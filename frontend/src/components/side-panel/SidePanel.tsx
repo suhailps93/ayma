@@ -77,24 +77,11 @@ function SidePanel({
   const { connected, client, connect, disconnect, volume, speakerMuted, setSpeakerMuted } = useLiveAPIContext();
   const [open, setOpen] = useState(true);
   const [connectionExpanded, setConnectionExpanded] = useState(false);
-  const hasGreetedRef = useRef(false);
 
   // Auto-connect on mount
   useEffect(() => {
     connect();
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
-
-  // Trigger Ayma's opening greeting once per session after connection
-  useEffect(() => {
-    if (connected && !hasGreetedRef.current) {
-      hasGreetedRef.current = true;
-      // Delay slightly to let session fully initialize, then send a
-      // silent session-start signal so Ayma opens the conversation
-      setTimeout(() => {
-        client.send([{ text: "[session_start]" }]);
-      }, 600);
-    }
-  }, [connected, client]);
 
   // Auto-collapse connection settings when panel is closed
   useEffect(() => {

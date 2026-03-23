@@ -202,6 +202,23 @@ class WebSocketToQueueAdapter:
                 if not await self._safe_send_json(setup_complete_response):
                     return
 
+                if self.authenticated_user_id:
+                    await self.input_queue.put(
+                        {
+                            "user_id": self.authenticated_user_id,
+                            "live_request": {
+                                "content": {
+                                    "role": "user",
+                                    "parts": [{"text": "[session_start]"}],
+                                }
+                            },
+                        }
+                    )
+                    logging.info(
+                        "Queued backend session bootstrap for user_id=%s",
+                        self.authenticated_user_id,
+                    )
+
                 async for response in self.agent_engine.bidi_stream_query(
                     self.input_queue
                 ):
