@@ -34,6 +34,8 @@ export type UseLiveAPIResults = {
   connect: () => Promise<void>;
   disconnect: () => Promise<void>;
   volume: number;
+  speakerMuted: boolean;
+  setSpeakerMuted: Dispatch<SetStateAction<boolean>>;
 };
 
 export type UseLiveAPIProps = {
@@ -54,6 +56,15 @@ export function useLiveAPI({
 
   const [connected, setConnected] = useState(false);
   const [volume, setVolume] = useState(0);
+  const [speakerMuted, setSpeakerMuted] = useState(false);
+  const speakerMutedRef = useRef(false);
+
+  useEffect(() => {
+    speakerMutedRef.current = speakerMuted;
+    if (speakerMuted) {
+      audioStreamerRef.current?.stop();
+    }
+  }, [speakerMuted]);
 
   // register audio for streaming server -> speakers
   useEffect(() => {
@@ -82,8 +93,11 @@ export function useLiveAPI({
 
     const stopAudioStreamer = () => audioStreamerRef.current?.stop();
 
-    const onAudio = (data: ArrayBuffer) =>
-      audioStreamerRef.current?.addPCM16(new Uint8Array(data));
+    const onAudio = (data: ArrayBuffer) => {
+      if (!speakerMutedRef.current) {
+        audioStreamerRef.current?.addPCM16(new Uint8Array(data));
+      }
+    };
 
     client
       .on("close", onClose)
@@ -117,5 +131,7 @@ export function useLiveAPI({
     connect,
     disconnect,
     volume,
+    speakerMuted,
+    setSpeakerMuted,
   };
 }

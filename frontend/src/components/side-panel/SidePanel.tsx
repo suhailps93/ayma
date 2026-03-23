@@ -77,9 +77,26 @@ function SidePanel({
   onServerUrlChange = () => {},
   onUserIdChange = () => {},
 }: SidePanelProps) {
-  const { connected, client, connect, disconnect, volume } = useLiveAPIContext();
+  const { connected, client, connect, disconnect, volume, speakerMuted, setSpeakerMuted } = useLiveAPIContext();
   const [open, setOpen] = useState(true);
   const [connectionExpanded, setConnectionExpanded] = useState(false);
+  const hasGreetedRef = useRef(false);
+
+  // Auto-connect on mount
+  useEffect(() => {
+    connect();
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Send greeting trigger once after first successful connection
+  useEffect(() => {
+    if (connected && !hasGreetedRef.current) {
+      hasGreetedRef.current = true;
+      // Small delay to let the session fully initialize before sending
+      setTimeout(() => {
+        client.send([{ text: "Hi!" }]);
+      }, 500);
+    }
+  }, [connected, client]);
 
   // Auto-collapse connection settings when panel is closed
   useEffect(() => {
@@ -338,6 +355,18 @@ function SidePanel({
               <span className="material-symbols-outlined filled">mic</span>
             ) : (
               <span className="material-symbols-outlined filled">mic_off</span>
+            )}
+          </button>
+
+          <button
+            className={cn("action-button speaker-button", { active: !speakerMuted })}
+            onClick={() => setSpeakerMuted(!speakerMuted)}
+            title={speakerMuted ? "Unmute speaker" : "Mute speaker"}
+          >
+            {!speakerMuted ? (
+              <span className="material-symbols-outlined filled">volume_up</span>
+            ) : (
+              <span className="material-symbols-outlined filled">volume_off</span>
             )}
           </button>
 
