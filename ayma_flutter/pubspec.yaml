@@ -1,0 +1,47 @@
+name: ayma
+description: "Ayma — your personal AI matchmaker"
+publish_to: none
+version: 1.0.0+1
+
+environment:
+  sdk: '>=3.3.0 <4.0.0'
+
+dependencies:
+  flutter:
+    sdk: flutter
+
+  # Navigation
+  go_router: ^13.2.4
+
+  # State
+  flutter_riverpod: ^2.5.1
+
+  # Audio
+  flutter_sound: ^9.2.13
+  permission_handler: ^11.3.1
+
+  # Network
+  web_socket_channel: ^3.0.1
+
+  # UI
+  flutter_animate: ^4.5.0
+  google_fonts: ^6.2.1
+
+  # Location
+  geolocator: ^13.0.2
+  geocoding: ^3.0.0
+
+  # Utils
+  intl: ^0.19.0
+  shared_preferences: ^2.3.2
+  uuid: ^4.4.0
+  logger: ^2.4.0
+  http: ^1.2.2
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^5.0.0
+
+flutter:
+  uses-material-design: true

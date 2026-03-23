@@ -1,0 +1,533 @@
+import 'dart:async';
+import 'dart:collection';
+import 'dart:convert';
+import 'dart:math' as math;
+import 'dart:typed_data';
+import 'package:flutter/foundation.dart';
+import 'package:flutter_sound/flutter_sound.dart';
+import 'package:logger/logger.dart' show Level;
+import 'package:permission_handler/permission_handler.dart';
+import 'package:uuid/uuid.dart';
+import 'package:web_socket_channel/web_socket_channel.dart';
+
+import 'auth_storage.dart';
+import 'web_audio_stub.dart'
+    if (dart.library.html) 'web_audio_impl.dart';
+
+// ignore_for_file: deprecated_member_use
+
+enum SessionState { disconnected, connecting, ready, listening, thinking, speaking }
+
+class TranscriptLine {
+  final String text;
+  final bool isUser;
+  final DateTime time;
+  TranscriptLine(this.text, {required this.isUser}) : time = DateTime.now();
+}
+
+class AymaAudioService extends ChangeNotifier {
+  WebSocketChannel? _channel;
+
+  // Mobile audio (flutter_sound) — skipped on web
+  final _recorder = FlutterSoundRecorder(logLevel: Level.nothing);
+  final _player   = FlutterSoundPlayer(logLevel: Level.nothing);
+  bool  _playerStarted  = false;
+  bool  _playerDraining = false;
+  final _pcmQueue = Queue<Uint8List>();
+
+  // Web audio (dart:html Web Audio API) — skipped on mobile
+  final _webMic    = WebMicCapture();
+  final _webPlayer = WebPcmPlayer();
+
+  StreamSubscription? _wsSub;
+
+  SessionState _state = SessionState.disconnected;
+  SessionState get state => _state;
+
+  double _inputVolume  = 0;
+  double _outputVolume = 0;
+  double get inputVolume  => _inputVolume;
+  double get outputVolume => _outputVolume;
+
+  bool _muted        = false;
+  bool _speakerMuted = false;
+  bool get muted        => _muted;
+  bool get speakerMuted => _speakerMuted;
+
+  final List<TranscriptLine> _transcript = [];
+  List<TranscriptLine> get transcript => List.unmodifiable(_transcript);
+
+  // Buffer agent text chunks; only commit to transcript on turnComplete
+  String _pendingAgentText = '';
+
+  bool   _firstContentSent = false;
+  bool _audioInitialized = false;
+  Future<void>? _audioInitFuture;
+  Future<void>? _connectFuture;
+  final BytesBuilder _pendingMicAudio = BytesBuilder(copy: false);
+  Timer? _micFlushTimer;
+  static const _micFlushInterval = Duration(milliseconds: 120);
+
+  // ── Init ────────────────────────────────────────────────────────────────────
+
+  Future<void> init() async {
+    await _ensureAudioInitialized();
+  }
+
+  Future<void> _ensureAudioInitialized() async {
+    if (kIsWeb || _audioInitialized) return;
+    if (_audioInitFuture != null) {
+      await _audioInitFuture;
+      return;
+    }
+
+    _audioInitFuture = () async {
+      await _recorder.openRecorder();
+      await _player.openPlayer();
+      await _recorder.setSubscriptionDuration(const Duration(milliseconds: 80));
+      _audioInitialized = true;
+    }();
+
+    try {
+      await _audioInitFuture;
+    } finally {
+      _audioInitFuture = null;
+    }
+  }
+
+  // ── Connect ─────────────────────────────────────────────────────────────────
+
+  Future<void> connect(String wsUrl) async {
+    if (_connectFuture != null) {
+      await _connectFuture;
+      return;
+    }
+
+    _connectFuture = _connect(wsUrl);
+    try {
+      await _connectFuture;
+    } finally {
+      _connectFuture = null;
+    }
+  }
+
+  Future<void> _connect(String wsUrl) async {
+    if (_state != SessionState.disconnected) {
+      disconnect();
+    }
+
+    _firstContentSent = false;
+    _pendingAgentText = '';
+    _setState(SessionState.connecting);
+    _transcript.clear();
+
+    final token = AuthStorage.accessToken;
+    if (token == null || token.isEmpty) {
+      _setState(SessionState.disconnected);
+      throw Exception('Missing auth session');
+    }
+
+    if (!kIsWeb) {
+      final permission = await Permission.microphone.request();
+      if (!permission.isGranted) {
+        _setState(SessionState.disconnected);
+        throw Exception('Microphone permission denied');
+      }
+      await _ensureAudioInitialized();
+    }
+
+    final baseUri = Uri.parse(wsUrl);
+    final wsUri = baseUri.replace(
+      queryParameters: {
+        ...baseUri.queryParameters,
+        'token': token,
+      },
+    );
+    _channel = WebSocketChannel.connect(wsUri);
+
+    _channel!.sink.add(jsonEncode({
+      'setup': {'run_id': const Uuid().v4()},
+    }));
+
+    _wsSub = _channel!.stream.listen(
+      _onMessage,
+      onError: (e) {
+        debugPrint('[ws] error: $e');
+        _handleRemoteDisconnect();
+      },
+      onDone: () {
+        _handleRemoteDisconnect();
+      },
+    );
+  }
+
+  void disconnect({bool notify = true}) {
+    _wsSub?.cancel();
+    _wsSub = null;
+    _channel?.sink.close();
+    _channel = null;
+
+    if (kIsWeb) {
+      _webMic.stop();
+      _webPlayer.stop();
+    } else {
+      if (_recorder.isRecording) {
+        _recorder.stopRecorder();
+      }
+      if (!_player.isStopped) {
+        _player.stopPlayer();
+      }
+      _playerStarted = false;
+      _pcmQueue.clear();
+    }
+
+    _pendingAgentText = '';
+    _clearPendingMicAudio();
+    _transcript.clear();
+    _state = SessionState.disconnected;
+    _outputVolume = 0;
+    if (notify) {
+      notifyListeners();
+    }
+  }
+
+  void _handleRemoteDisconnect() {
+    _wsSub?.cancel();
+    _wsSub = null;
+    _channel = null;
+
+    if (kIsWeb) {
+      _webMic.stop();
+      _webPlayer.stop();
+    } else {
+      if (_recorder.isRecording) {
+        _recorder.stopRecorder();
+      }
+      if (!_player.isStopped) {
+        _player.stopPlayer();
+      }
+      _playerStarted = false;
+      _pcmQueue.clear();
+    }
+
+    _pendingAgentText = '';
+    _clearPendingMicAudio();
+    _setState(SessionState.disconnected);
+  }
+
+  // ── WebSocket messages ───────────────────────────────────────────────────────
+
+  void _onMessage(dynamic raw) {
+    final Map<String, dynamic> msg;
+    try { msg = jsonDecode(raw as String) as Map<String, dynamic>; }
+    catch (_) { return; }
+
+    if (msg.containsKey('setupComplete')) {
+      _setState(SessionState.ready);
+      _startRecorderAndBegin();
+      return;
+    }
+
+    if (msg.containsKey('status')) return;
+
+    final sc = msg['serverContent'] as Map<String, dynamic>?;
+    final interrupted = (sc?['interrupted'] as bool?) ?? (msg['interrupted'] as bool?) ?? false;
+    if (interrupted) {
+      if (kIsWeb) { _webPlayer.stop(); }
+      else        { _player.stopPlayer(); _playerStarted = false; }
+      _flushPendingAgentText();
+      _setState(SessionState.listening);
+      return;
+    }
+
+    final turnComplete =
+        (sc?['turnComplete'] as bool?) ??
+        (sc?['turn_complete'] as bool?) ??
+        (msg['turnComplete'] as bool?) ??
+        (msg['turn_complete'] as bool?) ??
+        false;
+
+    final modelTurn = sc?['modelTurn'] as Map<String, dynamic>?;
+    final content = modelTurn ?? (msg['content'] as Map<String, dynamic>?);
+
+    if (content != null) {
+      _setState(SessionState.speaking);
+      final parts = content['parts'] as List<dynamic>? ?? [];
+      for (final part in parts) {
+        final p = part as Map<String, dynamic>;
+        final inline =
+            (p['inlineData'] as Map<String, dynamic>?) ??
+            (p['inline_data'] as Map<String, dynamic>?);
+        if (inline != null) {
+          final mime =
+              (inline['mimeType'] as String?) ??
+              (inline['mime_type'] as String?) ??
+              '';
+          final data = inline['data'] as String?;
+          if (data != null && mime.contains('audio')) {
+            _playPcm(base64Decode(data));
+          }
+        }
+
+        final text = p['text'] as String?;
+        if (text != null && text.trim().isNotEmpty) {
+          _pendingAgentText += text;
+        }
+      }
+    }
+
+    final outTx =
+        (sc?['outputTranscription'] as Map<String, dynamic>?) ??
+        (sc?['output_transcription'] as Map<String, dynamic>?) ??
+        (msg['output_transcription'] as Map<String, dynamic>?) ??
+        (msg['outputTranscription'] as Map<String, dynamic>?);
+    if (outTx != null) {
+      final text = outTx['text'] as String? ?? '';
+      if (text.trim().isNotEmpty) _pendingAgentText += text;
+    }
+
+    final inTx =
+        (sc?['inputTranscription'] as Map<String, dynamic>?) ??
+        (sc?['input_transcription'] as Map<String, dynamic>?) ??
+        (msg['input_transcription'] as Map<String, dynamic>?) ??
+        (msg['inputTranscription'] as Map<String, dynamic>?);
+    if (inTx != null) {
+      final text = inTx['text'] as String? ?? '';
+      if (text.trim().isNotEmpty) _addTranscript(text, isUser: true);
+    }
+
+    if (turnComplete) {
+      _flushPendingAgentText();
+      _setState(SessionState.listening);
+    }
+  }
+
+  void _flushPendingAgentText() {
+    final t = _pendingAgentText.trim();
+    if (t.isNotEmpty) {
+      _addTranscript(t, isUser: false);
+    }
+    _pendingAgentText = '';
+  }
+
+  // ── Recorder ────────────────────────────────────────────────────────────────
+
+  Future<void> _startRecorderAndBegin() async {
+    await _startRecorder();
+  }
+
+  Future<void> _startRecorder() async {
+    if (kIsWeb) {
+      await _webMic.start((pcm16) {
+        _inputVolume = 0.5; // web doesn't give dB; use flat value while speaking
+        _sendAudio(pcm16);
+        notifyListeners();
+      });
+    } else {
+      await _recorder.startRecorder(
+        toStream: _recorderSink(),
+        codec: Codec.pcm16,
+        numChannels: 1,
+        sampleRate: 16000,
+        // VOICE_COMMUNICATION enables hardware AEC on Android
+        // (prevents mic picking up speaker output)
+        audioSource: AudioSource.voice_communication,
+      );
+      _recorder.onProgress?.listen((e) {
+        _inputVolume = ((e.decibels ?? -60) + 60) / 60;
+        notifyListeners();
+      });
+    }
+  }
+
+  StreamSink<Uint8List> _recorderSink() {
+    final ctrl = StreamController<Uint8List>();
+    ctrl.stream.listen((data) {
+      if (!_muted) _bufferAudio(data);
+    });
+    return ctrl.sink;
+  }
+
+  void _bufferAudio(Uint8List pcm) {
+    if (_channel == null || _state == SessionState.disconnected) return;
+    if (_muted || _state == SessionState.speaking) return;
+
+    _pendingMicAudio.add(pcm);
+    _micFlushTimer ??= Timer(_micFlushInterval, _flushBufferedAudio);
+  }
+
+  void _flushBufferedAudio() {
+    _micFlushTimer = null;
+
+    if (_pendingMicAudio.length == 0) return;
+    if (_channel == null || _state == SessionState.disconnected) {
+      _clearPendingMicAudio();
+      return;
+    }
+    if (_muted || _state == SessionState.speaking) {
+      _clearPendingMicAudio();
+      return;
+    }
+
+    final pcm = _pendingMicAudio.takeBytes();
+    _sendAudio(pcm);
+  }
+
+  void _clearPendingMicAudio() {
+    _micFlushTimer?.cancel();
+    _micFlushTimer = null;
+    if (_pendingMicAudio.length > 0) {
+      _pendingMicAudio.clear();
+    }
+  }
+
+  // ── Player ──────────────────────────────────────────────────────────────────
+
+  static const _maxQueueChunks = 25;
+
+  // Compute RMS amplitude of a PCM16 LE buffer, normalised to 0.0–1.0.
+  double _pcmRms(Uint8List pcm16) {
+    if (pcm16.length < 2) return 0;
+    final view = ByteData.sublistView(pcm16);
+    final count = pcm16.length ~/ 2;
+    double sum = 0;
+    for (int i = 0; i < count; i++) {
+      final s = view.getInt16(i * 2, Endian.little) / 32768.0;
+      sum += s * s;
+    }
+    return math.sqrt(sum / count).clamp(0.0, 1.0);
+  }
+
+  void _playPcm(Uint8List data) {
+    if (_speakerMuted) return;
+    _outputVolume = _pcmRms(data);
+    if (kIsWeb) {
+      _webPlayer.play(data);
+    } else {
+      // Cap queue to avoid unbounded memory growth
+      while (_pcmQueue.length >= _maxQueueChunks) {
+        _pcmQueue.removeFirst();
+      }
+      _pcmQueue.add(data);
+      _drainPcmQueue();
+    }
+  }
+
+  // Ensures only one feedFromStream runs at a time to prevent memory buildup
+  Future<void> _drainPcmQueue() async {
+    if (_playerDraining) return;
+    _playerDraining = true;
+    try {
+      while (_pcmQueue.isNotEmpty) {
+        final chunk = _pcmQueue.removeFirst();
+        if (!_playerStarted || _player.isStopped) {
+          // Always stop cleanly before (re)starting to avoid double AudioTrack alloc
+          if (_playerStarted) {
+            try { await _player.stopPlayer(); } catch (_) {}
+          }
+          _playerStarted = true;
+          await _player.startPlayerFromStream(
+            codec: Codec.pcm16,
+            numChannels: 1,
+            sampleRate: 24000,
+            bufferSize: 8192,
+            interleaved: true,
+          );
+        }
+        await _player.feedFromStream(chunk);
+      }
+    } catch (e, st) {
+      debugPrint('[player] drain error: $e\n$st');
+      // Do NOT reset _playerStarted here — that causes repeated startPlayerFromStream
+      // calls (each allocates ~256 MB AudioTrack). Instead stop cleanly.
+      _pcmQueue.clear();
+      try {
+        await _player.stopPlayer();
+      } catch (_) {}
+      _playerStarted = false;
+    } finally {
+      _playerDraining = false;
+    }
+  }
+
+  // ── Send helpers ─────────────────────────────────────────────────────────────
+
+  void _sendAudio(Uint8List pcm) {
+    if (_channel == null || _state == SessionState.disconnected) return;
+    if (_muted) return;
+    // Don't send mic audio while agent is speaking — avoids echo feedback loop
+    // and reduces unnecessary bandwidth while output is playing
+    if (_state == SessionState.speaking) return;
+    final b64 = base64Encode(pcm);
+    final Map<String, dynamic> payload;
+    if (!_firstContentSent) {
+      _firstContentSent = true;
+      payload = {
+        'live_request': {
+          'blob': {'mimeType': 'audio/pcm;rate=16000', 'data': b64}
+        },
+      };
+    } else {
+      payload = {'blob': {'mimeType': 'audio/pcm;rate=16000', 'data': b64}};
+    }
+    _channel!.sink.add(jsonEncode(payload));
+  }
+
+  void sendText(String text) {
+    if (_channel == null || _state == SessionState.disconnected) return;
+    final Map<String, dynamic> payload;
+    if (!_firstContentSent) {
+      _firstContentSent = true;
+      payload = {
+        'live_request': {
+          'content': {'role': 'user', 'parts': [{'text': text}]}
+        },
+      };
+    } else {
+      payload = {'content': {'role': 'user', 'parts': [{'text': text}]}};
+    }
+    _channel!.sink.add(jsonEncode(payload));
+    _addTranscript(text, isUser: true);
+  }
+
+  // ── Controls ─────────────────────────────────────────────────────────────────
+
+  void toggleMute() {
+    _muted = !_muted;
+    notifyListeners();
+  }
+
+  void toggleSpeaker() {
+    _speakerMuted = !_speakerMuted;
+    if (_speakerMuted) {
+      if (kIsWeb) { _webPlayer.stop(); }
+      else        { _player.stopPlayer(); _playerStarted = false; _pcmQueue.clear(); }
+    }
+    notifyListeners();
+  }
+
+  // ── Helpers ──────────────────────────────────────────────────────────────────
+
+  void _setState(SessionState s) {
+    _state = s;
+    if (s != SessionState.speaking) _outputVolume = 0;
+    notifyListeners();
+  }
+
+  void _addTranscript(String text, {required bool isUser}) {
+    _transcript.add(TranscriptLine(text, isUser: isUser));
+    notifyListeners();
+  }
+
+  @override
+  void dispose() {
+    disconnect(notify: false);
+    if (!kIsWeb) {
+      if (_audioInitialized) {
+        _recorder.closeRecorder();
+        _player.closePlayer();
+      }
+    }
+    super.dispose();
+  }
+}

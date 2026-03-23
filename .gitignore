@@ -155,6 +155,9 @@ tmp*
 **/node_modules
 npm-debug.log
 yarn-error.log
+**/.dart_tool/
+!ayma_flutter/lib/
+!ayma_flutter/lib/**
 
 # IDEs and editors
 .idea/
