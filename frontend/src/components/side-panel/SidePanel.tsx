@@ -87,14 +87,15 @@ function SidePanel({
     connect();
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // Send greeting trigger once after first successful connection
+  // Trigger Ayma's opening greeting once per session after connection
   useEffect(() => {
     if (connected && !hasGreetedRef.current) {
       hasGreetedRef.current = true;
-      // Small delay to let the session fully initialize before sending
+      // Delay slightly to let session fully initialize, then send a
+      // silent session-start signal so Ayma opens the conversation
       setTimeout(() => {
-        client.send([{ text: "Hi!" }]);
-      }, 500);
+        client.send([{ text: "[session_start]" }]);
+      }, 600);
     }
   }, [connected, client]);
 

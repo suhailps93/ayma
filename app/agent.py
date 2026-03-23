@@ -187,12 +187,17 @@ async def _build_instruction(context: ReadonlyContext) -> str:
         )
 
         result = supabase.table("user_profiles").select(
-            "agent_name, profile_private"
+            "agent_name, profile_private, display_name, age, gender, location_region, matching_prefs"
         ).eq("id", user_id).maybe_single().execute()
 
         profile = result.data or {}
         agent_name = profile.get("agent_name") or "Ayma"
         profile_private = profile.get("profile_private") or ""
+        display_name = profile.get("display_name") or ""
+        age = profile.get("age")
+        gender = profile.get("gender") or ""
+        location = profile.get("location_region") or ""
+        matching_prefs = profile.get("matching_prefs") or {}
 
         # Replace agent name placeholder
         system_skills = system_skills.replace("Ayma", agent_name)
@@ -205,9 +210,33 @@ async def _build_instruction(context: ReadonlyContext) -> str:
         items = facts_raw if isinstance(facts_raw, list) else facts_raw.get("results", [])
         mem0_facts = "\n".join(f"- {r['memory']}" for r in items) if items else ""
 
+        # Build user context block (demographics + location)
+        user_context_lines = []
+        if display_name:
+            user_context_lines.append(f"Name: {display_name}")
+        if age:
+            user_context_lines.append(f"Age: {age}")
+        if gender:
+            user_context_lines.append(f"Gender: {gender}")
+        if location:
+            user_context_lines.append(
+                f"Location: {location} — use this for local recommendations, time zone, "
+                f"and nearby events when relevant. When asked about current time, use "
+                f"get_current_time with the appropriate IANA timezone for this location."
+            )
+        if matching_prefs:
+            if matching_prefs.get("interested_in"):
+                user_context_lines.append(f"Interested in: {', '.join(matching_prefs['interested_in'])}")
+            age_min = matching_prefs.get("age_min")
+            age_max = matching_prefs.get("age_max")
+            if age_min and age_max:
+                user_context_lines.append(f"Preferred age range: {age_min}–{age_max}")
+
         sections = [system_skills]
         if user_skills:
             sections.append(f"## Additional Instructions\n{user_skills}")
+        if user_context_lines:
+            sections.append("## About this person\n" + "\n".join(user_context_lines))
         if profile_private:
             sections.append(
                 f"## What you know about this person (private — never share directly)\n{profile_private}"
