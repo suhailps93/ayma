@@ -34,6 +34,8 @@ class AymaAudioService extends ChangeNotifier {
   bool  _playerStarted  = false;
   bool  _playerDraining = false;
   final _pcmQueue = Queue<Uint8List>();
+  int _playerSampleRate = 24000;
+  int _playerChannels = 1;
 
   // Web audio (dart:html Web Audio API) — skipped on mobile
   final _webMic    = WebMicCapture();
@@ -59,6 +61,7 @@ class AymaAudioService extends ChangeNotifier {
 
   // Buffer agent text chunks; only commit to transcript on turnComplete
   String _pendingAgentText = '';
+  String _pendingUserText = '';
 
   bool   _firstContentSent = false;
   bool _audioInitialized = false;
@@ -247,8 +250,28 @@ class AymaAudioService extends ChangeNotifier {
         (msg['turn_complete'] as bool?) ??
         false;
 
+    final outTx =
+        (sc?['outputTranscription'] as Map<String, dynamic>?) ??
+        (sc?['output_transcription'] as Map<String, dynamic>?) ??
+        (msg['output_transcription'] as Map<String, dynamic>?) ??
+        (msg['outputTranscription'] as Map<String, dynamic>?);
+    final inTx =
+        (sc?['inputTranscription'] as Map<String, dynamic>?) ??
+        (sc?['input_transcription'] as Map<String, dynamic>?) ??
+        (msg['input_transcription'] as Map<String, dynamic>?) ??
+        (msg['inputTranscription'] as Map<String, dynamic>?);
+
     final modelTurn = sc?['modelTurn'] as Map<String, dynamic>?;
     final content = modelTurn ?? (msg['content'] as Map<String, dynamic>?);
+    final hasOutputTranscription =
+        (outTx?['text'] as String?)?.trim().isNotEmpty ?? false;
+    final hasInputTranscription =
+        (inTx?['text'] as String?)?.trim().isNotEmpty ?? false;
+    final agentResponding = content != null || hasOutputTranscription;
+
+    if (agentResponding && _pendingUserText.trim().isNotEmpty) {
+      _flushPendingUserText();
+    }
 
     if (content != null) {
       _setState(SessionState.speaking);
@@ -265,41 +288,44 @@ class AymaAudioService extends ChangeNotifier {
               '';
           final data = inline['data'] as String?;
           if (data != null && mime.contains('audio')) {
-            _playPcm(base64Decode(data));
+            _playPcm(base64Decode(data), mimeType: mime);
           }
         }
 
         final text = p['text'] as String?;
-        if (text != null && text.trim().isNotEmpty) {
-          _pendingAgentText += text;
+        if (text != null && text.trim().isNotEmpty && !hasOutputTranscription) {
+          _setPendingAgentText(text);
         }
       }
     }
 
-    final outTx =
-        (sc?['outputTranscription'] as Map<String, dynamic>?) ??
-        (sc?['output_transcription'] as Map<String, dynamic>?) ??
-        (msg['output_transcription'] as Map<String, dynamic>?) ??
-        (msg['outputTranscription'] as Map<String, dynamic>?);
     if (outTx != null) {
       final text = outTx['text'] as String? ?? '';
-      if (text.trim().isNotEmpty) _pendingAgentText += text;
+      if (text.trim().isNotEmpty) {
+        _setPendingAgentText(text);
+      }
     }
 
-    final inTx =
-        (sc?['inputTranscription'] as Map<String, dynamic>?) ??
-        (sc?['input_transcription'] as Map<String, dynamic>?) ??
-        (msg['input_transcription'] as Map<String, dynamic>?) ??
-        (msg['inputTranscription'] as Map<String, dynamic>?);
     if (inTx != null) {
       final text = inTx['text'] as String? ?? '';
-      if (text.trim().isNotEmpty) _addTranscript(text, isUser: true);
+      if (text.trim().isNotEmpty) {
+        if (hasInputTranscription) {
+          _pendingUserText = text.trim();
+        } else {
+          _addTranscript(text, isUser: true);
+        }
+      }
     }
 
     if (turnComplete) {
+      _flushPendingUserText();
       _flushPendingAgentText();
       _setState(SessionState.listening);
     }
+  }
+
+  void _setPendingAgentText(String text) {
+    _pendingAgentText = text.trim();
   }
 
   void _flushPendingAgentText() {
@@ -308,6 +334,14 @@ class AymaAudioService extends ChangeNotifier {
       _addTranscript(t, isUser: false);
     }
     _pendingAgentText = '';
+  }
+
+  void _flushPendingUserText() {
+    final t = _pendingUserText.trim();
+    if (t.isNotEmpty) {
+      _addTranscript(t, isUser: true);
+    }
+    _pendingUserText = '';
   }
 
   // ── Recorder ────────────────────────────────────────────────────────────────
@@ -398,12 +432,29 @@ class AymaAudioService extends ChangeNotifier {
     return math.sqrt(sum / count).clamp(0.0, 1.0);
   }
 
-  void _playPcm(Uint8List data) {
+  ({int sampleRate, int channels}) _parsePcmConfig(String mimeType) {
+    final rateMatch = RegExp(r'rate=(\d+)', caseSensitive: false).firstMatch(mimeType);
+    final channelsMatch = RegExp(r'channels=(\d+)', caseSensitive: false).firstMatch(mimeType);
+    final sampleRate = int.tryParse(rateMatch?.group(1) ?? '') ?? 24000;
+    final channels = int.tryParse(channelsMatch?.group(1) ?? '') ?? 1;
+    return (sampleRate: sampleRate, channels: channels);
+  }
+
+  void _playPcm(Uint8List data, {required String mimeType}) {
     if (_speakerMuted) return;
     _outputVolume = _pcmRms(data);
+    final pcmConfig = _parsePcmConfig(mimeType);
     if (kIsWeb) {
       _webPlayer.play(data);
     } else {
+      if (_playerStarted &&
+          (_playerSampleRate != pcmConfig.sampleRate ||
+              _playerChannels != pcmConfig.channels)) {
+        _restartPlayer();
+      }
+      _playerSampleRate = pcmConfig.sampleRate;
+      _playerChannels = pcmConfig.channels;
+
       // Cap queue to avoid unbounded memory growth
       while (_pcmQueue.length >= _maxQueueChunks) {
         _pcmQueue.removeFirst();
@@ -428,8 +479,8 @@ class AymaAudioService extends ChangeNotifier {
           _playerStarted = true;
           await _player.startPlayerFromStream(
             codec: Codec.pcm16,
-            numChannels: 1,
-            sampleRate: 24000,
+            numChannels: _playerChannels,
+            sampleRate: _playerSampleRate,
             bufferSize: 8192,
             interleaved: true,
           );
@@ -487,7 +538,8 @@ class AymaAudioService extends ChangeNotifier {
       payload = {'content': {'role': 'user', 'parts': [{'text': text}]}};
     }
     _channel!.sink.add(jsonEncode(payload));
-    _addTranscript(text, isUser: true);
+    _pendingUserText = text.trim();
+    _flushPendingUserText();
   }
 
   // ── Controls ─────────────────────────────────────────────────────────────────
@@ -515,8 +567,29 @@ class AymaAudioService extends ChangeNotifier {
   }
 
   void _addTranscript(String text, {required bool isUser}) {
-    _transcript.add(TranscriptLine(text, isUser: isUser));
+    final normalized = text.trim();
+    if (normalized.isEmpty) return;
+
+    if (_transcript.isNotEmpty) {
+      final last = _transcript.last;
+      final isDuplicate = last.isUser == isUser &&
+          last.text.trim() == normalized &&
+          DateTime.now().difference(last.time) < const Duration(seconds: 3);
+      if (isDuplicate) {
+        return;
+      }
+    }
+
+    _transcript.add(TranscriptLine(normalized, isUser: isUser));
     notifyListeners();
+  }
+
+  void _restartPlayer() {
+    try {
+      _player.stopPlayer();
+    } catch (_) {}
+    _playerStarted = false;
+    _pcmQueue.clear();
   }
 
   @override
