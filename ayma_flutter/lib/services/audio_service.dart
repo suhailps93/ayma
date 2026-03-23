@@ -1,5 +1,4 @@
 import 'dart:async';
-import 'dart:collection';
 import 'dart:convert';
 import 'dart:math' as math;
 import 'dart:typed_data';
@@ -11,6 +10,9 @@ import 'package:uuid/uuid.dart';
 import 'package:web_socket_channel/web_socket_channel.dart';
 
 import 'auth_storage.dart';
+import '../env.dart';
+import 'audio_dump_stub.dart'
+    if (dart.library.io) 'audio_dump_io.dart';
 import 'web_audio_stub.dart'
     if (dart.library.html) 'web_audio_impl.dart';
 
@@ -32,8 +34,7 @@ class AymaAudioService extends ChangeNotifier {
   final _recorder = FlutterSoundRecorder(logLevel: Level.nothing);
   final _player   = FlutterSoundPlayer(logLevel: Level.nothing);
   bool  _playerStarted  = false;
-  bool  _playerDraining = false;
-  final _pcmQueue = Queue<Uint8List>();
+  final BytesBuilder _turnOutputAudio = BytesBuilder(copy: false);
   int _playerSampleRate = 24000;
   int _playerChannels = 1;
 
@@ -68,8 +69,11 @@ class AymaAudioService extends ChangeNotifier {
   Future<void>? _audioInitFuture;
   Future<void>? _connectFuture;
   final BytesBuilder _pendingMicAudio = BytesBuilder(copy: false);
+  final BytesBuilder _debugOutputAudio = BytesBuilder(copy: false);
   Timer? _micFlushTimer;
   static const _micFlushInterval = Duration(milliseconds: 120);
+  static const _debugDumpTargetBytes = 24 * 2 * 2000;
+  bool _debugAudioDumpWritten = false;
 
   // ── Init ────────────────────────────────────────────────────────────────────
 
@@ -121,6 +125,10 @@ class AymaAudioService extends ChangeNotifier {
 
     _firstContentSent = false;
     _pendingAgentText = '';
+    _pendingUserText = '';
+    _debugOutputAudio.clear();
+    _turnOutputAudio.clear();
+    _debugAudioDumpWritten = false;
     _setState(SessionState.connecting);
     _transcript.clear();
 
@@ -181,10 +189,11 @@ class AymaAudioService extends ChangeNotifier {
         _player.stopPlayer();
       }
       _playerStarted = false;
-      _pcmQueue.clear();
+      _turnOutputAudio.clear();
     }
 
     _pendingAgentText = '';
+    _pendingUserText = '';
     _clearPendingMicAudio();
     _transcript.clear();
     _state = SessionState.disconnected;
@@ -210,10 +219,11 @@ class AymaAudioService extends ChangeNotifier {
         _player.stopPlayer();
       }
       _playerStarted = false;
-      _pcmQueue.clear();
+      _turnOutputAudio.clear();
     }
 
     _pendingAgentText = '';
+    _pendingUserText = '';
     _clearPendingMicAudio();
     _setState(SessionState.disconnected);
   }
@@ -237,7 +247,7 @@ class AymaAudioService extends ChangeNotifier {
     final interrupted = (sc?['interrupted'] as bool?) ?? (msg['interrupted'] as bool?) ?? false;
     if (interrupted) {
       if (kIsWeb) { _webPlayer.stop(); }
-      else        { _player.stopPlayer(); _playerStarted = false; }
+      else        { _player.stopPlayer(); _playerStarted = false; _turnOutputAudio.clear(); }
       _flushPendingAgentText();
       _setState(SessionState.listening);
       return;
@@ -288,7 +298,9 @@ class AymaAudioService extends ChangeNotifier {
               '';
           final data = inline['data'] as String?;
           if (data != null && mime.contains('audio')) {
-            _playPcm(base64Decode(data), mimeType: mime);
+            final pcmData = base64Decode(data);
+            _captureDebugAudioDump(pcmData, mimeType: mime);
+            _playPcm(pcmData, mimeType: mime);
           }
         }
 
@@ -320,7 +332,11 @@ class AymaAudioService extends ChangeNotifier {
     if (turnComplete) {
       _flushPendingUserText();
       _flushPendingAgentText();
-      _setState(SessionState.listening);
+      if (kIsWeb) {
+        _setState(SessionState.listening);
+      } else {
+        unawaited(_playBufferedTurnAudio());
+      }
     }
   }
 
@@ -417,8 +433,6 @@ class AymaAudioService extends ChangeNotifier {
 
   // ── Player ──────────────────────────────────────────────────────────────────
 
-  static const _maxQueueChunks = 25;
-
   // Compute RMS amplitude of a PCM16 LE buffer, normalised to 0.0–1.0.
   double _pcmRms(Uint8List pcm16) {
     if (pcm16.length < 2) return 0;
@@ -440,11 +454,57 @@ class AymaAudioService extends ChangeNotifier {
     return (sampleRate: sampleRate, channels: channels);
   }
 
+  void _captureDebugAudioDump(Uint8List data, {required String mimeType}) {
+    if (kIsWeb || !Env.debugAudioDumpEnabled || _debugAudioDumpWritten) {
+      return;
+    }
+
+    final remaining = _debugDumpTargetBytes - _debugOutputAudio.length;
+    if (remaining <= 0) {
+      _writeDebugAudioDump(mimeType);
+      return;
+    }
+
+    if (data.length <= remaining) {
+      _debugOutputAudio.add(data);
+    } else {
+      _debugOutputAudio.add(data.sublist(0, remaining));
+    }
+
+    if (_debugOutputAudio.length >= _debugDumpTargetBytes) {
+      _writeDebugAudioDump(mimeType);
+    }
+  }
+
+  Future<void> _writeDebugAudioDump(String mimeType) async {
+    if (_debugAudioDumpWritten || kIsWeb || !Env.debugAudioDumpEnabled) {
+      return;
+    }
+    _debugAudioDumpWritten = true;
+
+    try {
+      final pcmBytes = _debugOutputAudio.takeBytes();
+      final pcmConfig = _parsePcmConfig(mimeType);
+      final outputPath = await dumpAudioDebugCapture(
+        bytes: pcmBytes,
+        mimeType: mimeType,
+        sampleRate: pcmConfig.sampleRate,
+        channels: pcmConfig.channels,
+      );
+      if (outputPath != null) {
+        debugPrint('[audio-debug] dumped Gemini output audio to $outputPath');
+        debugPrint('[audio-debug] metadata written to $outputPath.txt');
+      }
+    } catch (e, st) {
+      debugPrint('[audio-debug] failed to dump output audio: $e\n$st');
+    }
+  }
+
   void _playPcm(Uint8List data, {required String mimeType}) {
     if (_speakerMuted) return;
-    _outputVolume = _pcmRms(data);
     final pcmConfig = _parsePcmConfig(mimeType);
     if (kIsWeb) {
+      _outputVolume = _pcmRms(data);
       _webPlayer.play(data);
     } else {
       if (_playerStarted &&
@@ -454,50 +514,38 @@ class AymaAudioService extends ChangeNotifier {
       }
       _playerSampleRate = pcmConfig.sampleRate;
       _playerChannels = pcmConfig.channels;
-
-      // Cap queue to avoid unbounded memory growth
-      while (_pcmQueue.length >= _maxQueueChunks) {
-        _pcmQueue.removeFirst();
-      }
-      _pcmQueue.add(data);
-      _drainPcmQueue();
+      _outputVolume = _pcmRms(data);
+      _turnOutputAudio.add(data);
     }
   }
 
-  // Ensures only one feedFromStream runs at a time to prevent memory buildup
-  Future<void> _drainPcmQueue() async {
-    if (_playerDraining) return;
-    _playerDraining = true;
+  Future<void> _playBufferedTurnAudio() async {
+    if (_speakerMuted || _turnOutputAudio.length == 0) {
+      _turnOutputAudio.clear();
+      _setState(SessionState.listening);
+      return;
+    }
+
+    final buffered = _turnOutputAudio.takeBytes();
     try {
-      while (_pcmQueue.isNotEmpty) {
-        final chunk = _pcmQueue.removeFirst();
-        if (!_playerStarted || _player.isStopped) {
-          // Always stop cleanly before (re)starting to avoid double AudioTrack alloc
-          if (_playerStarted) {
-            try { await _player.stopPlayer(); } catch (_) {}
-          }
-          _playerStarted = true;
-          await _player.startPlayerFromStream(
-            codec: Codec.pcm16,
-            numChannels: _playerChannels,
-            sampleRate: _playerSampleRate,
-            bufferSize: 8192,
-            interleaved: true,
-          );
-        }
-        await _player.feedFromStream(chunk);
-      }
-    } catch (e, st) {
-      debugPrint('[player] drain error: $e\n$st');
-      // Do NOT reset _playerStarted here — that causes repeated startPlayerFromStream
-      // calls (each allocates ~256 MB AudioTrack). Instead stop cleanly.
-      _pcmQueue.clear();
-      try {
+      if (!_player.isStopped) {
         await _player.stopPlayer();
-      } catch (_) {}
+      }
       _playerStarted = false;
-    } finally {
-      _playerDraining = false;
+
+      await _player.startPlayer(
+        fromDataBuffer: buffered,
+        codec: Codec.pcm16,
+        sampleRate: _playerSampleRate,
+        numChannels: _playerChannels,
+        whenFinished: () {
+          _outputVolume = 0;
+          _setState(SessionState.listening);
+        },
+      );
+    } catch (e, st) {
+      debugPrint('[player] buffered turn playback error: $e\n$st');
+      _setState(SessionState.listening);
     }
   }
 
@@ -553,7 +601,7 @@ class AymaAudioService extends ChangeNotifier {
     _speakerMuted = !_speakerMuted;
     if (_speakerMuted) {
       if (kIsWeb) { _webPlayer.stop(); }
-      else        { _player.stopPlayer(); _playerStarted = false; _pcmQueue.clear(); }
+      else        { _player.stopPlayer(); _playerStarted = false; _turnOutputAudio.clear(); }
     }
     notifyListeners();
   }
@@ -589,7 +637,7 @@ class AymaAudioService extends ChangeNotifier {
       _player.stopPlayer();
     } catch (_) {}
     _playerStarted = false;
-    _pcmQueue.clear();
+    _turnOutputAudio.clear();
   }
 
   @override

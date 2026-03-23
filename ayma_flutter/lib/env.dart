@@ -6,6 +6,8 @@ class Env {
       String.fromEnvironment('AYMA_WS_URL', defaultValue: '');
   static const _httpBaseUrlOverride =
       String.fromEnvironment('AYMA_HTTP_BASE_URL', defaultValue: '');
+  static const _debugAudioDumpEnabled =
+      bool.fromEnvironment('AYMA_DEBUG_AUDIO_DUMP', defaultValue: false);
 
   // Web uses localhost; native devices need the LAN IP of the dev machine.
   // Override with:
@@ -31,4 +33,6 @@ class Env {
     }
     return 'http://$_devHost:8000';
   }
+
+  static bool get debugAudioDumpEnabled => _debugAudioDumpEnabled;
 }
