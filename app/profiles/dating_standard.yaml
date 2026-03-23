@@ -1,0 +1,57 @@
+# Community profile: Standard dating
+# Used when AYMA_COMMUNITY_PROFILE=dating_standard (the default)
+#
+# required: must be collected before deeper conversation goes too far
+# deeper: build a rich picture naturally through conversation
+# matching_prefs: what the user is looking for in a match (also required)
+
+name: "dating_standard"
+display_name: "Dating"
+
+# Required fields — agent MUST collect these early.
+# Shown to the agent as a priority list with "known" status injected at runtime.
+required:
+  - key: name
+    question: "what's their name"
+  - key: age
+    question: "how old they are"
+  - key: gender
+    question: "their gender"
+  - key: interested_in
+    question: "who they're interested in (men, women, everyone)"
+  - key: location
+    question: "roughly where they're based"
+  - key: relationship_goal
+    question: "what kind of relationship they're looking for (casual, serious, marriage)"
+
+# Deeper profile — extract naturally, no fixed order
+deeper:
+  - key: career
+    question: "what they do for work or study"
+  - key: lifestyle
+    question: "how they spend their time — social life, hobbies, routines"
+  - key: values
+    question: "what matters most to them in life"
+  - key: family_views
+    question: "how they feel about family, kids, future"
+  - key: deal_breakers
+    question: "what they absolutely cannot compromise on in a partner"
+  - key: past_relationships
+    question: "what their relationship history is like (gently)"
+  - key: love_language
+    question: "how they show and receive affection"
+  - key: fun_quirks
+    question: "something surprising or unique about them"
+  - key: ideal_date
+    question: "what their perfect date or evening looks like"
+  - key: green_flags
+    question: "what immediately draws them to someone"
+
+# Matching preferences — what they want in a match
+matching_prefs:
+  - key: match_age_range
+    question: "what age range they're open to"
+  - key: match_location
+    question: "whether location matters to them in a match"
+  - key: match_dealbreakers
+    question: "anything that's a hard no in a potential match"
