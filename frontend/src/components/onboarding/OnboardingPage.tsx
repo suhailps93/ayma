@@ -1,5 +1,5 @@
 import { useState, useEffect } from "react";
-import { supabase } from "../../lib/supabase";
+import { api } from "../../lib/api";
 import { useLocation } from "../../hooks/use-location";
 import "./OnboardingPage.scss";
 
@@ -17,11 +17,10 @@ const GENDERS = ["Man", "Woman", "Non-binary", "Other", "Prefer not to say"];
 const INTERESTED_IN = ["Men", "Women", "Non-binary people", "Everyone"];
 
 interface Props {
-  userId: string;
   onComplete: () => void;
 }
 
-export default function OnboardingPage({ userId, onComplete }: Props) {
+export default function OnboardingPage({ onComplete }: Props) {
   const [step, setStep] = useState(0);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -75,26 +74,21 @@ export default function OnboardingPage({ userId, onComplete }: Props) {
     setSaving(true);
     setError(null);
     try {
-      const { error } = await supabase
-        .from("user_profiles")
-        .update({
-          display_name: data.display_name.trim(),
-          age: parseInt(data.age),
-          gender: data.gender,
-          location_region: data.location_region.trim(),
-          matching_prefs: {
-            interested_in: data.interested_in,
-            age_min: parseInt(data.age_min),
-            age_max: parseInt(data.age_max),
-          },
-          onboarding_complete: true,
-        })
-        .eq("id", userId);
-
-      if (error) throw error;
+      await api.saveOnboarding({
+        display_name: data.display_name.trim(),
+        age: parseInt(data.age),
+        gender: data.gender,
+        location_region: data.location_region.trim(),
+        matching_prefs: {
+          interested_in: data.interested_in,
+          age_min: parseInt(data.age_min),
+          age_max: parseInt(data.age_max),
+        },
+      });
       onComplete();
     } catch (e: any) {
       setError(e.message || "Something went wrong. Try again.");
+    } finally {
       setSaving(false);
     }
   };
@@ -199,13 +193,13 @@ export default function OnboardingPage({ userId, onComplete }: Props) {
         >
           {permission === "loading"
             ? "Detecting..."
-            : "📍 Detect my location automatically"}
+              : "Detect my location automatically"}
         </button>
       )}
 
       {permission === "granted" && detectedLocation && (
         <div className="location-detected">
-          <span className="detected-badge">📍 Auto-detected</span>
+          <span className="detected-badge">Auto-detected</span>
           <span>{detectedLocation}</span>
         </div>
       )}

@@ -1,6 +1,6 @@
 # Agent System
 
-> **Status:** System skills ✅ | LangGraph graph ✅ | Auth wiring ⬜ | Voice ✅
+> **Status:** System skills ✅ | LangGraph graph ✅ | Auth wiring 🔄 | Voice ✅
 >
 > [← Back to Architecture](ARCHITECTURE.md)
 

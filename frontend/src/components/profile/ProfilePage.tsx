@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { supabase } from "../../lib/supabase";
+import { api } from "../../lib/api";
 import "./ProfilePage.scss";
 
 interface UserProfile {
@@ -9,15 +9,14 @@ interface UserProfile {
   profile_private: string | null;
   profile_public_locked: boolean;
   agent_name: string | null;
-  community_profile: string;
+  community_profile: string | null;
 }
 
 interface ProfilePageProps {
-  userId: string;
   onBack: () => void;
 }
 
-export default function ProfilePage({ userId, onBack }: ProfilePageProps) {
+export default function ProfilePage({ onBack }: ProfilePageProps) {
   const [profile, setProfile] = useState<UserProfile | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -25,22 +24,21 @@ export default function ProfilePage({ userId, onBack }: ProfilePageProps) {
   useEffect(() => {
     async function fetchProfile() {
       setLoading(true);
-      const { data, error } = await supabase
-        .from("user_profile_safe")
-        .select("id, display_name, profile_public, profile_private, profile_public_locked, agent_name, community_profile")
-        .eq("id", userId)
-        .single();
-
-      if (error) {
-        setError(error.message);
-      } else {
-        setProfile(data);
+      try {
+        const data = await api.getProfile();
+        setProfile({
+          ...data,
+          community_profile: data.community_profile ?? null,
+        });
+        setError(null);
+      } catch (err) {
+        setError(err instanceof Error ? err.message : "Could not load profile");
       }
       setLoading(false);
     }
 
     fetchProfile();
-  }, [userId]);
+  }, []);
 
   if (loading) {
     return (

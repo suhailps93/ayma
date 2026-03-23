@@ -40,17 +40,15 @@ export type UseLiveAPIResults = {
 
 export type UseLiveAPIProps = {
   url?: string;
-  userId?: string;
   onRunIdChange?: Dispatch<SetStateAction<string>>;
 };
 
 export function useLiveAPI({
   url,
-  userId,
 }: UseLiveAPIProps): UseLiveAPIResults {
   const client = useMemo(
-    () => new MultimodalLiveClient({ url, userId }),
-    [url, userId],
+    () => new MultimodalLiveClient({ url }),
+    [url],
   );
   const audioStreamerRef = useRef<AudioStreamer | null>(null);
 

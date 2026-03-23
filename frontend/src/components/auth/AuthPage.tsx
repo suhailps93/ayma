@@ -1,5 +1,6 @@
 import { useState } from "react";
-import { supabase } from "../../lib/supabase";
+import { api } from "../../lib/api";
+import { setAuthSession } from "../../lib/auth";
 import "./AuthPage.scss";
 
 export default function AuthPage() {
@@ -15,16 +16,24 @@ export default function AuthPage() {
     setError(null);
     setLoading(true);
 
-    if (mode === "login") {
-      const { error } = await supabase.auth.signInWithPassword({ email, password });
-      if (error) setError(error.message);
-    } else {
-      const { error } = await supabase.auth.signUp({ email, password });
-      if (error) {
-        setError(error.message);
+    try {
+      if (mode === "login") {
+        const response = await api.login(email, password);
+        if (!response.session) {
+          setError("Login did not return a session.");
+        } else {
+          setAuthSession(response.session);
+        }
       } else {
-        setSignupDone(true);
+        const response = await api.signup(email, password);
+        if (response.session) {
+          setAuthSession(response.session);
+        } else {
+          setSignupDone(true);
+        }
       }
+    } catch (error) {
+      setError(error instanceof Error ? error.message : "Authentication failed.");
     }
     setLoading(false);
   }

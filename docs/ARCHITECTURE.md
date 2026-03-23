@@ -184,7 +184,7 @@ stateDiagram-v2
 | pgvector + halfvec(3072) | ✅ | Phase 1 | [data.md](data.md) |
 | Auth trigger (signup → profile) | ✅ | Phase 1 | [data.md](data.md) |
 | System skills (tone_mirror, deep_recall) | ✅ | Phase 1 | [agent.md](agent.md) |
-| Supabase Auth → backend | ⬜ | Phase 2 | [agent.md](agent.md) |
+| Supabase Auth → backend | 🔄 | Phase 2 | [agent.md](agent.md) |
 | LangGraph agent graph | ✅ | Phase 2 | [agent.md](agent.md) |
 | Mem0 integration | ✅ | Phase 2 | [memory.md](memory.md) |
 | Profile tier update pipeline | ✅ | Phase 2 | [agent.md](agent.md) |

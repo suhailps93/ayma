@@ -8,6 +8,7 @@
  * We debounce the search input at 400 ms to stay within limits.
  */
 import { useCallback, useEffect, useRef, useState } from "react";
+import { api } from "../lib/api";
 
 export type LocationPermission = "prompt" | "granted" | "denied" | "loading";
 
@@ -27,35 +28,6 @@ export type UseLocationResult = {
   searchLoading: boolean;
 };
 
-const NOMINATIM = "https://nominatim.openstreetmap.org";
-const UA = "AymaApp/1.0";
-
-async function reverseGeocode(lat: number, lon: number): Promise<string> {
-  const url = `${NOMINATIM}/reverse?lat=${lat}&lon=${lon}&format=json`;
-  const res = await fetch(url, { headers: { "User-Agent": UA } });
-  const data = await res.json();
-  const { city, town, village, county, state, country } = data.address || {};
-  const locality = city || town || village || county || state || "";
-  return country ? `${locality}, ${country}` : locality;
-}
-
-async function forwardGeocode(query: string): Promise<PlaceSuggestion[]> {
-  const url = `${NOMINATIM}/search?q=${encodeURIComponent(query)}&format=json&limit=5&addressdetails=1`;
-  const res = await fetch(url, { headers: { "User-Agent": UA } });
-  const data: any[] = await res.json();
-  return data.map((item) => {
-    const a = item.address || {};
-    const locality = a.city || a.town || a.village || a.county || a.state || "";
-    const short = a.country ? `${locality}, ${a.country}` : locality;
-    return {
-      display_name: item.display_name,
-      short_name: short || item.display_name,
-      lat: item.lat,
-      lon: item.lon,
-    };
-  });
-}
-
 export function useLocation(): UseLocationResult {
   const [permission, setPermission] = useState<LocationPermission>("prompt");
   const [detectedLocation, setDetectedLocation] = useState<string | null>(null);
@@ -71,7 +43,8 @@ export function useLocation(): UseLocationResult {
         setPermission("granted");
         // Auto-detect silently if already granted
         navigator.geolocation.getCurrentPosition(async (pos) => {
-          const loc = await reverseGeocode(pos.coords.latitude, pos.coords.longitude);
+          const result = await api.reverseLocation(pos.coords.latitude, pos.coords.longitude);
+          const loc = result.location;
           setDetectedLocation(loc);
         });
       } else if (status.state === "denied") {
@@ -89,7 +62,8 @@ export function useLocation(): UseLocationResult {
     navigator.geolocation.getCurrentPosition(
       async (pos) => {
         setPermission("granted");
-        const loc = await reverseGeocode(pos.coords.latitude, pos.coords.longitude);
+        const result = await api.reverseLocation(pos.coords.latitude, pos.coords.longitude);
+        const loc = result.location;
         setDetectedLocation(loc);
       },
       () => {
@@ -107,7 +81,7 @@ export function useLocation(): UseLocationResult {
     debounceRef.current = setTimeout(async () => {
       setSearchLoading(true);
       try {
-        const results = await forwardGeocode(query);
+        const results = await api.searchLocation(query);
         setSuggestions(results);
       } catch {
         setSuggestions([]);

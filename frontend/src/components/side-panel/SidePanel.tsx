@@ -27,6 +27,7 @@ import { AudioRecorder } from "../../utils/audio-recorder";
 import AudioPulse from "../audio-pulse/AudioPulse";
 import Logger, { LoggerFilterType } from "../logger/Logger";
 import TranscriptionPreview from "../transcription-preview/TranscriptionPreview";
+import { getAuthSession } from "../../lib/auth";
 import "./side-panel.scss";
 
 const filterOptions = [
@@ -41,9 +42,7 @@ export type SidePanelProps = {
   supportsVideo?: boolean;
   onVideoStreamChange?: (stream: MediaStream | null) => void;
   serverUrl?: string;
-  userId?: string;
   onServerUrlChange?: (url: string) => void;
-  onUserIdChange?: (userId: string) => void;
 };
 
 type MediaStreamButtonProps = {
@@ -73,9 +72,7 @@ function SidePanel({
   onVideoStreamChange = () => {},
   supportsVideo = true,
   serverUrl = "ws://localhost:8000/",
-  userId = "user1",
   onServerUrlChange = () => {},
-  onUserIdChange = () => {},
 }: SidePanelProps) {
   const { connected, client, connect, disconnect, volume, speakerMuted, setSpeakerMuted } = useLiveAPIContext();
   const [open, setOpen] = useState(true);
@@ -217,6 +214,7 @@ function SidePanel({
     const feedbackUrl = new URL('feedback', serverUrl.replace('ws', 'http')).href;
     
     try {
+      const currentUserId = getAuthSession()?.user.id ?? "anonymous";
       const response = await fetch(feedbackUrl, {
         method: 'POST',
         headers: {
@@ -226,7 +224,7 @@ function SidePanel({
           score: feedbackScore,
           text: feedbackText,
           run_id: client.currentRunId,
-          user_id: userId,
+          user_id: currentUserId,
           log_type: "feedback"
         })
       });
@@ -311,17 +309,6 @@ function SidePanel({
                 value={serverUrl}
                 onChange={(e) => onServerUrlChange(e.target.value)}
                 placeholder="ws://localhost:8000/"
-                className="setting-input"
-              />
-            </div>
-            <div className="setting-group">
-              <label htmlFor="user-id">User ID</label>
-              <input
-                id="user-id"
-                type="text"
-                value={userId}
-                onChange={(e) => onUserIdChange(e.target.value)}
-                placeholder="user123"
                 className="setting-input"
               />
             </div>

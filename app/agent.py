@@ -16,7 +16,7 @@ from google.adk.tools import google_search
 from google.adk.tools.tool_context import ToolContext
 from google.genai import types
 
-load_dotenv()
+load_dotenv(override=True)
 
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO)
@@ -24,8 +24,6 @@ logging.basicConfig(level=logging.INFO)
 _, project_id = google.auth.default()
 os.environ.setdefault("GOOGLE_CLOUD_PROJECT", project_id)
 os.environ.setdefault("GOOGLE_CLOUD_LOCATION", "us-central1")
-os.environ["GOOGLE_GENAI_USE_VERTEXAI"] = "True"
-
 vertexai.init(
     project=os.environ["GOOGLE_CLOUD_PROJECT"],
     location=os.environ["GOOGLE_CLOUD_LOCATION"],
@@ -97,37 +95,39 @@ async def submit_feedback(
         )
 
         if feedback_type == "personal_preference":
-            # Translate preference into a concise instruction and append to user_skills
-            from langchain_google_genai import ChatGoogleGenerativeAI
-            from langchain_core.messages import SystemMessage
+            # Translate preference into a concise instruction and save to user_skills.
+            # Stored as skill_type="prompt", name="_user_preferences" so load_user_skills
+            # picks it up automatically on next session.
+            import vertexai.generative_models as genai_models
 
-            llm = ChatGoogleGenerativeAI(model="gemini-2.5-flash", temperature=0.3)
-            result = await llm.ainvoke([
-                SystemMessage(content=(
+            model = genai_models.GenerativeModel(
+                model_name="gemini-2.5-flash",
+                system_instruction=(
                     "Convert this user preference into a single, concise instruction "
                     "for an AI matchmaker to follow. Max 2 sentences. "
                     "Start with an imperative verb. No explanation."
-                )),
-                {"role": "user", "content": issue},
-            ])
-            instruction = result.content.strip()
+                ),
+            )
+            response = await model.generate_content_async(issue)
+            instruction = response.text.strip()
 
-            # Append to user_skills (create row if not exists)
-            existing = supabase.table("user_skills").select("skill_text").eq(
+            # Upsert into user_skills using the correct schema columns.
+            existing = supabase.table("user_skills").select("content").eq(
                 "user_id", user_id
-            ).eq("skill_type", "preference").execute()
+            ).eq("skill_type", "prompt").eq("name", "_user_preferences").execute()
 
             if existing.data:
-                old = existing.data[0]["skill_text"]
+                old = existing.data[0]["content"]
                 new_text = f"{old}\n{instruction}"
-                supabase.table("user_skills").update({"skill_text": new_text}).eq(
+                supabase.table("user_skills").update({"content": new_text}).eq(
                     "user_id", user_id
-                ).eq("skill_type", "preference").execute()
+                ).eq("skill_type", "prompt").eq("name", "_user_preferences").execute()
             else:
                 supabase.table("user_skills").insert({
                     "user_id": user_id,
-                    "skill_type": "preference",
-                    "skill_text": instruction,
+                    "name": "_user_preferences",
+                    "skill_type": "prompt",
+                    "content": instruction,
                 }).execute()
 
             logger.info(f"[feedback] saved personal_preference for {user_id}: {instruction}")
@@ -204,11 +204,27 @@ async def _build_instruction(context: ReadonlyContext) -> str:
 
         user_skills = await load_user_skills(user_id, supabase)
 
-        from mem0 import MemoryClient
-        mem0 = MemoryClient(api_key=os.environ["MEM0_API_KEY"])
-        facts_raw = mem0.get_all(user_id=user_id)
-        items = facts_raw if isinstance(facts_raw, list) else facts_raw.get("results", [])
-        mem0_facts = "\n".join(f"- {r['memory']}" for r in items) if items else ""
+        mem0_facts = ""
+        try:
+            import httpx
+            mem0_resp = await httpx.AsyncClient().post(
+                "https://api.mem0.ai/v2/memories/search/",
+                headers={"Authorization": f"Token {os.environ['MEM0_API_KEY']}"},
+                json={
+                    "query": "user profile background preferences",
+                    "filters": {"AND": [{"user_id": user_id}]},
+                    "top_k": 20,
+                },
+                timeout=3.0,
+            )
+            if mem0_resp.status_code == 200:
+                data = mem0_resp.json()
+                items = data if isinstance(data, list) else data.get("results", [])
+                mem0_facts = "\n".join(f"- {r['memory']}" for r in items) if items else ""
+            else:
+                logger.warning(f"[instruction] mem0 search {mem0_resp.status_code}: {mem0_resp.text[:200]}")
+        except Exception as mem0_err:
+            logger.warning(f"[instruction] mem0 unavailable: {mem0_err}")
 
         # Build user context block (demographics + location)
         user_context_lines = []

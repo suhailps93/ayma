@@ -38,6 +38,7 @@ import {
   type LiveConfig,
   type AdkEvent,
 } from "../multimodal-live-types";
+import { getAuthSession } from "../lib/auth";
 import { blobToJSON, base64ToArrayBuffer } from "./utils";
 
 /**
@@ -64,7 +65,6 @@ interface MultimodalLiveClientEventTypes {
 export type MultimodalLiveAPIClientConnection = {
   url?: string;
   runId?: string;
-  userId?: string;
 };
 
 /**
@@ -77,7 +77,6 @@ export class MultimodalLiveClient extends EventEmitter<MultimodalLiveClientEvent
   protected config: LiveConfig | null = null;
   public url: string = "";
   private runId: string;
-  private userId?: string;
   private firstContentSent: boolean = false;
   private audioChunksSent: number = 0;
   private lastAudioSendTime: number = 0;
@@ -85,12 +84,11 @@ export class MultimodalLiveClient extends EventEmitter<MultimodalLiveClientEvent
   private readonly NORMAL_SEND_INTERVAL_MS = 125; // Normal rate: 125ms (8 chunks/sec)
   private readonly RAMPUP_CHUNKS = 10; // Number of chunks to send at reduced rate
 
-  constructor({ url, userId, runId }: MultimodalLiveAPIClientConnection) {
+  constructor({ url, runId }: MultimodalLiveAPIClientConnection) {
     super();
     const defaultWsUrl = `${window.location.protocol === 'https:' ? 'wss:' : 'ws:'}//${window.location.host}/ws`;
     url = url || defaultWsUrl;
     this.url = new URL("ws", url).href;
-    this.userId = userId;
     this.runId = runId || crypto.randomUUID(); // Ensure runId is always a string by providing default
     this.send = this.send.bind(this);
   }
@@ -109,7 +107,13 @@ export class MultimodalLiveClient extends EventEmitter<MultimodalLiveClientEvent
   }
 
   connect(newRunId?: string): Promise<boolean> {
-    const ws = new WebSocket(this.url);
+    const socketUrl = new URL(this.url);
+    const token = getAuthSession()?.access_token;
+    if (!token) {
+      return Promise.reject(new Error("Missing auth session"));
+    }
+    socketUrl.searchParams.set("token", token);
+    const ws = new WebSocket(socketUrl.toString());
 
     // Update runId if provided
     if (newRunId) {
@@ -169,12 +173,9 @@ export class MultimodalLiveClient extends EventEmitter<MultimodalLiveClientEvent
         this.emit("open");
 
         this.ws = ws;
-        // Send initial setup message with user_id for backend
         const setupMessage = {
-          user_id: this.userId || "default_user",
           setup: {
             run_id: this.runId,
-            user_id: this.userId || "default_user",
           },
         };
         this._sendDirect(setupMessage);
@@ -452,10 +453,9 @@ export class MultimodalLiveClient extends EventEmitter<MultimodalLiveClientEvent
         },
       };
 
-      // For remote mode: wrap first content in {user_id, live_request} format
+      // Wrap first content the way the backend expects for the starter-pack transport.
       if (!this.firstContentSent) {
         data = {
-          user_id: this.userId || "default_user",
           live_request: data,
         };
         this.firstContentSent = true;
@@ -493,10 +493,9 @@ export class MultimodalLiveClient extends EventEmitter<MultimodalLiveClientEvent
       content: content,
     };
 
-    // For remote mode: wrap first content in {user_id, live_request} format
+    // Wrap first content the way the backend expects for the starter-pack transport.
     if (!this.firstContentSent) {
       data = {
-        user_id: this.userId || "default_user",
         live_request: data,
       };
       this.firstContentSent = true;

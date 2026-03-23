@@ -5,8 +5,8 @@ import SidePanel from "./components/side-panel/SidePanel";
 import AuthPage from "./components/auth/AuthPage";
 import ProfilePage from "./components/profile/ProfilePage";
 import OnboardingPage from "./components/onboarding/OnboardingPage";
-import { supabase } from "./lib/supabase";
-import type { User } from "@supabase/supabase-js";
+import { api } from "./lib/api";
+import { AuthUser, clearAuthSession, getAuthSession, subscribeAuthSession } from "./lib/auth";
 import cn from "classnames";
 
 // In development mode (frontend on :8501), connect to backend on :8000
@@ -25,44 +25,46 @@ function App() {
   const videoRef = useRef<HTMLVideoElement>(null);
   const [videoStream, setVideoStream] = useState<MediaStream | null>(null);
   const [serverUrl] = useState<string>(defaultUri);
-  const [user, setUser] = useState<User | null>(null);
+  const [user, setUser] = useState<AuthUser | null>(getAuthSession()?.user ?? null);
   const [appState, setAppState] = useState<AppState>("loading");
   const [view, setView] = useState<View>("chat");
 
-  // Subscribe to Supabase auth state
   useEffect(() => {
-    supabase.auth.getSession().then(({ data }) => {
-      const u = data.session?.user ?? null;
-      setUser(u);
-      if (!u) {
-        setAppState("auth");
-      } else {
-        checkOnboarding(u.id);
-      }
+    return subscribeAuthSession(() => {
+      setUser(getAuthSession()?.user ?? null);
     });
-
-    const {
-      data: { subscription },
-    } = supabase.auth.onAuthStateChange((_event, session) => {
-      const u = session?.user ?? null;
-      setUser(u);
-      if (!u) {
-        setAppState("auth");
-      } else {
-        checkOnboarding(u.id);
-      }
-    });
-    return () => subscription.unsubscribe();
   }, []);
 
-  async function checkOnboarding(userId: string) {
-    const { data } = await supabase
-      .from("user_profile_safe")
-      .select("onboarding_complete")
-      .eq("id", userId)
-      .single();
-    setAppState(data?.onboarding_complete ? "chat" : "onboarding");
-  }
+  useEffect(() => {
+    let cancelled = false;
+
+    async function bootstrap() {
+      if (!user) {
+        if (!cancelled) {
+          setAppState("auth");
+        }
+        return;
+      }
+
+      try {
+        await api.getSession();
+        const data = await api.getOnboardingStatus();
+        if (!cancelled) {
+          setAppState(data.onboarding_complete ? "chat" : "onboarding");
+        }
+      } catch {
+        clearAuthSession();
+        if (!cancelled) {
+          setAppState("auth");
+        }
+      }
+    }
+
+    bootstrap();
+    return () => {
+      cancelled = true;
+    };
+  }, [user]);
 
   if (appState === "loading") {
     return <div style={{ background: "#0f0f0f", minHeight: "100vh" }} />;
@@ -75,29 +77,26 @@ function App() {
   if (appState === "onboarding" && user) {
     return (
       <OnboardingPage
-        userId={user.id}
         onComplete={() => setAppState("chat")}
       />
     );
   }
 
   if (view === "profile" && user) {
-    return <ProfilePage userId={user.id} onBack={() => setView("chat")} />;
+    return <ProfilePage onBack={() => setView("chat")} />;
   }
 
   // Main chat UI
   return (
     <div className="App">
-      <LiveAPIProvider url={serverUrl} userId={user!.id}>
+      <LiveAPIProvider url={serverUrl}>
         <div className="streaming-console">
           <SidePanel
             videoRef={videoRef}
             supportsVideo={true}
             onVideoStreamChange={setVideoStream}
             serverUrl={serverUrl}
-            userId={user!.id}
             onServerUrlChange={() => {}}
-            onUserIdChange={() => {}}
           />
           <main>
             <div className="main-app-area">
@@ -115,7 +114,13 @@ function App() {
                 </button>
                 <button
                   className="nav-btn"
-                  onClick={() => supabase.auth.signOut()}
+                  onClick={async () => {
+                    try {
+                      await api.logout();
+                    } finally {
+                      clearAuthSession();
+                    }
+                  }}
                 >
                   Sign out
                 </button>

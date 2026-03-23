@@ -15,20 +15,24 @@
 import asyncio
 import json
 import logging
+import os
 import uuid
 from collections.abc import Callable
+from contextlib import suppress
 from pathlib import Path
 from typing import Any, Literal
 
 import backoff
 import google.auth
+import httpx
 import vertexai
-from fastapi import FastAPI, HTTPException, WebSocket
+from fastapi import FastAPI, Header, HTTPException, Query, WebSocket, WebSocketException, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from google.cloud import logging as google_cloud_logging
 from pydantic import BaseModel, Field
+from supabase import Client, create_client
 from websockets.exceptions import ConnectionClosedError
 
 app = FastAPI()
@@ -54,6 +58,9 @@ logging_client = google_cloud_logging.Client()
 logger = logging_client.logger(__name__)
 logging.basicConfig(level=logging.INFO)
 
+NOMINATIM = "https://nominatim.openstreetmap.org"
+NOMINATIM_UA = "AymaApp/1.0"
+
 # Initialize default configuration
 app.state.config = {
     "use_remote_agent": False,
@@ -73,6 +80,7 @@ class WebSocketToQueueAdapter:
         websocket: WebSocket,
         agent_engine: Any = None,
         remote_config: dict[str, Any] | None = None,
+        authenticated_user_id: str | None = None,
     ):
         """Initialize the adapter.
 
@@ -84,8 +92,23 @@ class WebSocketToQueueAdapter:
         self.websocket = websocket
         self.agent_engine = agent_engine
         self.remote_config = remote_config
+        self.authenticated_user_id = authenticated_user_id
         self.input_queue: asyncio.Queue[dict] = asyncio.Queue()
         self.first_message = True
+        self.disconnected = False
+
+    async def _safe_send_json(self, payload: dict[str, Any]) -> bool:
+        """Send a websocket message unless the client has already disconnected."""
+        if self.disconnected:
+            return False
+
+        try:
+            await self.websocket.send_json(payload)
+            return True
+        except RuntimeError as e:
+            self.disconnected = True
+            logging.info(f"WebSocket closed while sending: {e}")
+            return False
 
     def _transform_remote_agent_engine_response(self, response: dict) -> dict:
         """Transform remote Agent Engine bidiStreamOutput to ADK Event format for frontend."""
@@ -106,12 +129,26 @@ class WebSocketToQueueAdapter:
                 # Use receive() instead of receive_json() to handle both text and binary data
                 message = await self.websocket.receive()
 
+                if message.get("type") == "websocket.disconnect":
+                    self.disconnected = True
+                    logging.info(
+                        "Client disconnected: code=%s reason=%r",
+                        message.get("code"),
+                        message.get("reason", ""),
+                    )
+                    break
+
                 # Handle different message types
                 if "text" in message:
                     # Parse JSON text messages
                     data = json.loads(message["text"])
 
                     if isinstance(data, dict):
+                        if self.authenticated_user_id:
+                            data["user_id"] = self.authenticated_user_id
+                            if isinstance(data.get("setup"), dict):
+                                data["setup"]["user_id"] = self.authenticated_user_id
+
                         # Skip setup messages - they're for backend logging only, not valid LiveRequest format
                         if "setup" in data:
                             # Log setup information
@@ -141,12 +178,14 @@ class WebSocketToQueueAdapter:
                     )
 
             except ConnectionClosedError as e:
+                self.disconnected = True
                 logging.warning(f"Client closed connection: {e}")
                 break
             except json.JSONDecodeError as e:
                 logging.error(f"Error parsing JSON from client: {e}")
                 break
             except Exception as e:
+                self.disconnected = True
                 logging.error(f"Error receiving from client: {e!s}")
                 break
 
@@ -160,14 +199,16 @@ class WebSocketToQueueAdapter:
 
                 # Send setupComplete after initialization delay
                 setup_complete_response: dict = {"setupComplete": {}}
-                await self.websocket.send_json(setup_complete_response)
+                if not await self._safe_send_json(setup_complete_response):
+                    return
 
                 async for response in self.agent_engine.bidi_stream_query(
                     self.input_queue
                 ):
                     # Send responses from agent engine to the websocket client
                     if response is not None:
-                        await self.websocket.send_json(response)
+                        if not await self._safe_send_json(response):
+                            return
 
                         # Check for error responses
                         if isinstance(response, dict) and "error" in response:
@@ -186,7 +227,7 @@ class WebSocketToQueueAdapter:
                 )
         except Exception as e:
             logging.error(f"Error in agent engine: {e}")
-            await self.websocket.send_json({"error": str(e)})
+            await self._safe_send_json({"error": str(e)})
 
     async def run_remote_agent_engine(
         self, project_id: str, location: str, remote_agent_engine_id: str
@@ -204,7 +245,8 @@ class WebSocketToQueueAdapter:
             # Send setupComplete only after remote connection is established
             logging.info("Remote agent engine connection established")
             setup_complete_response: dict = {"setupComplete": {}}
-            await self.websocket.send_json(setup_complete_response)
+            if not await self._safe_send_json(setup_complete_response):
+                return
 
             # Create task to forward messages from queue to remote session
             async def forward_to_remote() -> None:
@@ -227,7 +269,8 @@ class WebSocketToQueueAdapter:
                                 response
                             )
                             if transformed:
-                                await self.websocket.send_json(transformed)
+                                if not await self._safe_send_json(transformed):
+                                    break
 
                             # Check for error responses
                             if isinstance(response, dict) and "error" in response:
@@ -285,6 +328,7 @@ def get_connect_and_run_callable(
         backoff.expo, ConnectionClosedError, max_tries=10, on_backoff=on_backoff
     )
     async def connect_and_run() -> None:
+        authenticated_user_id = getattr(websocket.state, "authenticated_user_id", None)
         if config["use_remote_agent"]:
             # Remote agent engine mode
             logging.info(
@@ -296,7 +340,10 @@ def get_connect_and_run_callable(
                 "remote_agent_engine_id": config["remote_agent_engine_id"],
             }
             adapter = WebSocketToQueueAdapter(
-                websocket, agent_engine=None, remote_config=remote_config
+                websocket,
+                agent_engine=None,
+                remote_config=remote_config,
+                authenticated_user_id=authenticated_user_id,
             )
         else:
             # Local agent engine mode
@@ -306,22 +353,50 @@ def get_connect_and_run_callable(
                 f"Starting local agent engine with object: {type(agent_engine).__name__}"
             )
 
-            adapter = WebSocketToQueueAdapter(websocket, agent_engine)
+            adapter = WebSocketToQueueAdapter(
+                websocket,
+                agent_engine,
+                authenticated_user_id=authenticated_user_id,
+            )
 
         logging.info("Starting bidirectional communication with agent engine")
-        await asyncio.gather(
-            adapter.receive_from_client(),
-            adapter.run_agent_engine(),
+        receive_task = asyncio.create_task(adapter.receive_from_client())
+        engine_task = asyncio.create_task(adapter.run_agent_engine())
+
+        done, pending = await asyncio.wait(
+            {receive_task, engine_task},
+            return_when=asyncio.FIRST_COMPLETED,
         )
+
+        for task in pending:
+            task.cancel()
+
+        for task in pending:
+            with suppress(asyncio.CancelledError):
+                await task
+
+        for task in done:
+            task.result()
 
     return connect_and_run
 
 
 @app.websocket("/ws")
-async def websocket_endpoint(websocket: WebSocket) -> None:
+async def websocket_endpoint(
+    websocket: WebSocket,
+    token: str | None = Query(default=None),
+) -> None:
     """Handle new websocket connections."""
+    if not token:
+        raise WebSocketException(
+            code=status.WS_1008_POLICY_VIOLATION,
+            reason="Missing auth token",
+        )
+
+    user_id = _get_current_user_id_from_token(token)
     await websocket.accept()
     connect_and_run = get_connect_and_run_callable(websocket, app.state.config)
+    websocket.state.authenticated_user_id = user_id
     await connect_and_run()
 
 
@@ -347,6 +422,331 @@ def collect_feedback(feedback: Feedback) -> dict[str, str]:
     """
     logger.log_struct(feedback.model_dump(), severity="INFO")
     return {"status": "success"}
+
+
+class OnboardingPayload(BaseModel):
+    display_name: str
+    age: int
+    gender: str
+    location_region: str
+    matching_prefs: dict[str, Any]
+
+
+class ProfileUpdatePayload(BaseModel):
+    profile_public: str
+    profile_private: str
+
+
+class LoginPayload(BaseModel):
+    email: str
+    password: str
+
+
+class SignupPayload(BaseModel):
+    email: str
+    password: str
+
+
+class RefreshPayload(BaseModel):
+    refresh_token: str
+
+
+def _get_supabase() -> Client:
+    return create_client(
+        os.environ["SUPABASE_URL"],
+        os.environ["SUPABASE_SERVICE_ROLE_KEY"],
+    )
+
+
+def _get_supabase_auth_api_key() -> str:
+    return os.environ.get("SUPABASE_ANON_KEY") or os.environ["SUPABASE_SERVICE_ROLE_KEY"]
+
+
+def _supabase_auth_headers(access_token: str | None = None) -> dict[str, str]:
+    headers = {
+        "apikey": _get_supabase_auth_api_key(),
+        "Content-Type": "application/json",
+    }
+    if access_token:
+        headers["Authorization"] = f"Bearer {access_token}"
+    return headers
+
+
+def _format_auth_response(payload: dict[str, Any]) -> dict[str, Any]:
+    user = payload.get("user")
+    session = payload.get("session")
+    if session is None and payload.get("access_token"):
+        session = payload
+    if user is None and isinstance(session, dict):
+        user = session.get("user")
+
+    formatted_user = None
+    if isinstance(user, dict):
+        formatted_user = {
+            "id": user.get("id"),
+            "email": user.get("email"),
+        }
+
+    formatted_session = None
+    if isinstance(session, dict) and session.get("access_token"):
+        formatted_session = {
+            "access_token": session.get("access_token"),
+            "refresh_token": session.get("refresh_token"),
+            "expires_at": session.get("expires_at"),
+            "token_type": session.get("token_type"),
+            "user": formatted_user,
+        }
+
+    return {
+        "user": formatted_user,
+        "session": formatted_session,
+        "requires_email_confirmation": formatted_session is None,
+    }
+
+
+def _supabase_auth_post(
+    path: str,
+    payload: dict[str, Any],
+    *,
+    params: dict[str, str] | None = None,
+    access_token: str | None = None,
+) -> dict[str, Any]:
+    response = httpx.post(
+        f"{os.environ['SUPABASE_URL']}/auth/v1{path}",
+        params=params,
+        headers=_supabase_auth_headers(access_token),
+        json=payload,
+        timeout=10.0,
+    )
+    if response.status_code >= 400:
+        detail = response.text
+        try:
+            detail = response.json().get("msg") or response.json().get("message") or detail
+        except Exception:
+            pass
+        raise HTTPException(status_code=response.status_code, detail=detail)
+    return response.json() if response.content else {}
+
+
+def _supabase_auth_get_user(token: str) -> dict[str, Any]:
+    response = httpx.get(
+        f"{os.environ['SUPABASE_URL']}/auth/v1/user",
+        headers=_supabase_auth_headers(token),
+        timeout=10.0,
+    )
+    if response.status_code >= 400:
+        raise HTTPException(status_code=401, detail="Invalid bearer token")
+    return response.json()
+
+
+def _extract_bearer_token(authorization: str | None) -> str:
+    if not authorization or not authorization.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="Missing bearer token")
+    return authorization.removeprefix("Bearer ").strip()
+
+
+def _get_current_user_id_from_token(token: str) -> str:
+    user = _supabase_auth_get_user(token)
+    user_id = user.get("id")
+    if not user_id:
+        raise HTTPException(status_code=401, detail="Invalid bearer token")
+    return user_id
+
+
+def _get_current_user_id(authorization: str | None) -> str:
+    token = _extract_bearer_token(authorization)
+    return _get_current_user_id_from_token(token)
+
+
+async def _nominatim_get(path: str, params: dict[str, Any]) -> Any:
+    async with httpx.AsyncClient(timeout=5.0) as client:
+        response = await client.get(
+            f"{NOMINATIM}{path}",
+            params=params,
+            headers={"User-Agent": NOMINATIM_UA},
+        )
+        response.raise_for_status()
+        return response.json()
+
+
+@app.post("/api/auth/login")
+def login(payload: LoginPayload) -> dict[str, Any]:
+    auth_response = _supabase_auth_post(
+        "/token",
+        {"email": payload.email, "password": payload.password},
+        params={"grant_type": "password"},
+    )
+    return _format_auth_response(auth_response)
+
+
+@app.post("/api/auth/signup")
+def signup(payload: SignupPayload) -> dict[str, Any]:
+    auth_response = _supabase_auth_post(
+        "/signup",
+        {"email": payload.email, "password": payload.password},
+    )
+    return _format_auth_response(auth_response)
+
+
+@app.post("/api/auth/refresh")
+def refresh_auth(payload: RefreshPayload) -> dict[str, Any]:
+    auth_response = _supabase_auth_post(
+        "/token",
+        {"refresh_token": payload.refresh_token},
+        params={"grant_type": "refresh_token"},
+    )
+    return _format_auth_response(auth_response)
+
+
+@app.get("/api/auth/session")
+def get_auth_session(authorization: str | None = Header(default=None)) -> dict[str, Any]:
+    token = _extract_bearer_token(authorization)
+    user = _supabase_auth_get_user(token)
+    return {"user": {"id": user.get("id"), "email": user.get("email")}}
+
+
+@app.post("/api/auth/logout")
+def logout(authorization: str | None = Header(default=None)) -> dict[str, str]:
+    token = _extract_bearer_token(authorization)
+    httpx.post(
+        f"{os.environ['SUPABASE_URL']}/auth/v1/logout",
+        headers=_supabase_auth_headers(token),
+        timeout=10.0,
+    )
+    return {"status": "ok"}
+
+
+@app.get("/api/onboarding-status")
+def get_onboarding_status(authorization: str | None = Header(default=None)) -> dict[str, bool]:
+    user_id = _get_current_user_id(authorization)
+    supabase = _get_supabase()
+    result = (
+        supabase.table("user_profiles")
+        .select("onboarding_complete")
+        .eq("id", user_id)
+        .single()
+        .execute()
+    )
+    return {"onboarding_complete": bool((result.data or {}).get("onboarding_complete"))}
+
+
+@app.post("/api/onboarding")
+def save_onboarding(
+    payload: OnboardingPayload,
+    authorization: str | None = Header(default=None),
+) -> dict[str, str]:
+    user_id = _get_current_user_id(authorization)
+    supabase = _get_supabase()
+    supabase.table("user_profiles").upsert(
+        {
+            "id": user_id,
+            "display_name": payload.display_name.strip(),
+            "age": payload.age,
+            "gender": payload.gender,
+            "location_region": payload.location_region.strip(),
+            "matching_prefs": payload.matching_prefs,
+            "onboarding_complete": True,
+        }
+    ).execute()
+    return {"status": "ok"}
+
+
+@app.get("/api/profile")
+def get_profile(authorization: str | None = Header(default=None)) -> dict[str, Any]:
+    user_id = _get_current_user_id(authorization)
+    supabase = _get_supabase()
+    result = (
+        supabase.table("user_profile_safe")
+        .select(
+            "id, display_name, profile_public, profile_private, "
+            "profile_public_locked, agent_name, voice_preference, matching_prefs, "
+            "age, gender, location_region, community_profile, onboarding_complete"
+        )
+        .eq("id", user_id)
+        .single()
+        .execute()
+    )
+    return result.data or {}
+
+
+@app.post("/api/profile")
+def update_profile(
+    payload: ProfileUpdatePayload,
+    authorization: str | None = Header(default=None),
+) -> dict[str, str]:
+    user_id = _get_current_user_id(authorization)
+    supabase = _get_supabase()
+    supabase.table("user_profiles").update(
+        {
+            "profile_public": payload.profile_public.strip(),
+            "profile_private": payload.profile_private.strip(),
+            "profile_public_locked": True,
+        }
+    ).eq("id", user_id).execute()
+    return {"status": "ok"}
+
+
+@app.get("/api/matches")
+def get_matches(authorization: str | None = Header(default=None)) -> list[dict[str, Any]]:
+    user_id = _get_current_user_id(authorization)
+    supabase = _get_supabase()
+    result = (
+        supabase.table("matches")
+        .select("*")
+        .or_(f"user_a.eq.{user_id},user_b.eq.{user_id}")
+        .order("score", desc=True)
+        .limit(50)
+        .execute()
+    )
+    return result.data or []
+
+
+@app.get("/api/location/search")
+async def search_location(q: str = Query(min_length=1)) -> list[dict[str, str]]:
+    data = await _nominatim_get(
+        "/search",
+        {"q": q, "format": "json", "limit": 5, "addressdetails": 1},
+    )
+    results = []
+    for item in data:
+        address = item.get("address", {})
+        locality = (
+            address.get("city")
+            or address.get("town")
+            or address.get("village")
+            or address.get("county")
+            or address.get("state")
+            or ""
+        )
+        short_name = f"{locality}, {address['country']}" if address.get("country") else locality
+        results.append(
+            {
+                "display_name": item.get("display_name", ""),
+                "short_name": short_name or item.get("display_name", ""),
+                "lat": str(item.get("lat", "")),
+                "lon": str(item.get("lon", "")),
+            }
+        )
+    return results
+
+
+@app.get("/api/location/reverse")
+async def reverse_location(lat: float, lon: float) -> dict[str, str]:
+    data = await _nominatim_get(
+        "/reverse",
+        {"lat": lat, "lon": lon, "format": "json"},
+    )
+    address = data.get("address", {})
+    locality = (
+        address.get("city")
+        or address.get("town")
+        or address.get("village")
+        or address.get("county")
+        or address.get("state")
+        or ""
+    )
+    short_name = f"{locality}, {address['country']}" if address.get("country") else locality
+    return {"location": short_name}
 
 
 @app.get("/")

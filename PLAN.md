@@ -3,6 +3,11 @@
 > **Rule:** Do ONE step at a time. Do not move to the next step until the current one works
 > and you understand why it works — not just that it works.
 >
+> **Client Boundary:** Keep the client as thin as possible. The web app and Flutter app should
+> only handle presentation, device capabilities (mic/camera/playback), and authenticated API /
+> WebSocket calls. Auth, session lifecycle, profile writes, matching logic, location lookup,
+> and all business logic belong in the backend.
+>
 > **Goal:** Build a production-grade personalized AI matchmaking platform, and understand
 > every layer of the architecture as we go.
 
@@ -145,7 +150,7 @@ Each step has:
 | Graph database | Graphiti + Kuzu (embedded) | Neo4j | Zero extra infra; migrate to Neo4j at scale if needed |
 | Memory facts | Mem0 v1.0.6 | Agent Engine Memory Bank alone | Mem0 gives structured facts; Memory Bank gives long-term recall; they complement each other |
 | LLM default | Gemini 2.5 Flash | GPT-4o, Claude | Flash is fastest + cheapest; Google-native with Agent Engine; Pro available as optional upgrade |
-| Auth | Supabase Auth + JWT | Firebase Auth, Auth0 | Already using Supabase for DB; one fewer service |
+| Auth | Backend-managed Supabase Auth + JWT | Client-owned Supabase SDK, Firebase Auth, Auth0 | Keeps clients thin, centralizes auth/session policy, still uses Supabase as the identity provider |
 | Rate limiting | Supabase counter table | Redis, Upstash | Already have Supabase; Redis dropped intentionally |
 | Frontend deploy | Vercel | Cloud Run, Netlify | Free tier; zero config for React |
 | BYOT encryption | Fernet (AES-256) | AWS KMS, manual AES | Simple, server-side only, no external key service needed at this scale |
@@ -168,6 +173,6 @@ Each step has:
 
 ## Current Step
 
-**-> Step 1.1 — Create Supabase project**
+**-> Step 1.8 — Wire Supabase Auth into the backend**
 
-Phase 0 complete. Say "start step 1.1" when ready.
+Thin-client auth is the active architecture rule. Do not add new direct database or auth logic to the clients.
