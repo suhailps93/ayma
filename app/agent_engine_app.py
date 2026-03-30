@@ -22,7 +22,8 @@ from google.cloud import logging as google_cloud_logging
 from vertexai.agent_engines.templates.adk import AdkApp
 from vertexai.preview.reasoning_engines import AdkApp as PreviewAdkApp
 
-from app.agent import app as adk_app
+from app.agent import app as default_adk_app
+from app.agent import create_app
 from app.app_utils.telemetry import setup_telemetry
 from app.app_utils.typing import Feedback
 
@@ -36,6 +37,10 @@ class AgentEngineApp(AdkApp):
         vertexai.init()
         setup_telemetry()
         super().set_up()
+        # super().set_up() (Vertex AI AdkApp) always sets GOOGLE_GENAI_USE_VERTEXAI=1.
+        # We use AI Studio via GOOGLE_API_KEY, so reset it here before any LLM
+        # connection is made (the ADK's _api_backend is a lazy cached_property).
+        os.environ["GOOGLE_GENAI_USE_VERTEXAI"] = "0"
         logging.basicConfig(level=logging.INFO)
         logging_client = google_cloud_logging.Client()
         self.logger = logging_client.logger(__name__)
@@ -62,11 +67,22 @@ AgentEngineApp.bidi_stream_query = PreviewAdkApp.bidi_stream_query
 
 gemini_location = os.environ.get("GOOGLE_CLOUD_LOCATION")
 logs_bucket_name = os.environ.get("LOGS_BUCKET_NAME")
-agent_engine = AgentEngineApp(
-    app=adk_app,
-    artifact_service_builder=lambda: (
+def _artifact_service_builder() -> GcsArtifactService | InMemoryArtifactService:
+    return (
         GcsArtifactService(bucket_name=logs_bucket_name)
         if logs_bucket_name
         else InMemoryArtifactService()
-    ),
+    )
+
+
+def get_agent_engine(user_id: str | None = None) -> AgentEngineApp:
+    return AgentEngineApp(
+        app=create_app(user_id),
+        artifact_service_builder=_artifact_service_builder,
+    )
+
+
+agent_engine = AgentEngineApp(
+    app=default_adk_app,
+    artifact_service_builder=_artifact_service_builder,
 )

@@ -26,6 +26,8 @@ import backoff
 import google.auth
 import httpx
 import vertexai
+from google.adk.agents.run_config import RunConfig as _RunConfig
+from google.genai import types as _genai_types
 from fastapi import FastAPI, Header, HTTPException, Query, WebSocket, WebSocketException, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
@@ -61,6 +63,28 @@ logging.basicConfig(level=logging.INFO)
 NOMINATIM = "https://nominatim.openstreetmap.org"
 NOMINATIM_UA = "AymaApp/1.0"
 
+# RunConfig for every live session — all Gemini Live best practices supported by AI Studio.
+# Note: enable_affective_dialog and proactivity are Vertex AI-only; omitted here.
+# Native audio models have a 128K context window; compress at 100K, slide to 50K.
+_LIVE_RUN_CONFIG: dict = _RunConfig(
+    input_audio_transcription=_genai_types.AudioTranscriptionConfig(),
+    output_audio_transcription=_genai_types.AudioTranscriptionConfig(),
+    realtime_input_config=_genai_types.RealtimeInputConfig(
+        automatic_activity_detection=_genai_types.AutomaticActivityDetection(
+            start_of_speech_sensitivity=_genai_types.StartSensitivity.START_SENSITIVITY_HIGH,
+            end_of_speech_sensitivity=_genai_types.EndSensitivity.END_SENSITIVITY_LOW,
+            prefix_padding_ms=20,
+            silence_duration_ms=800,
+        ),
+        activity_handling=_genai_types.ActivityHandling.START_OF_ACTIVITY_INTERRUPTS,
+        turn_coverage=_genai_types.TurnCoverage.TURN_INCLUDES_ALL_INPUT,
+    ),
+    context_window_compression=_genai_types.ContextWindowCompressionConfig(
+        trigger_tokens=100_000,
+        sliding_window=_genai_types.SlidingWindow(target_tokens=50_000),
+    ),
+).model_dump(mode="json", exclude_none=True)
+
 # Initialize default configuration
 app.state.config = {
     "use_remote_agent": False,
@@ -68,7 +92,7 @@ app.state.config = {
     "project_id": None,
     "location": "us-central1",
     "local_agent_path": "..agent.root_agent",
-    "agent_engine_object_path": "..agent_engine_app.agent_engine",
+    "agent_engine_object_path": "..agent_engine_app.get_agent_engine",
 }
 
 
@@ -206,6 +230,7 @@ class WebSocketToQueueAdapter:
                     await self.input_queue.put(
                         {
                             "user_id": self.authenticated_user_id,
+                            "run_config": _LIVE_RUN_CONFIG,
                             "live_request": {
                                 "content": {
                                     "role": "user",
@@ -321,6 +346,17 @@ def _dynamic_import(path: str) -> Any:
     return getattr(module, object_name)
 
 
+def _resolve_local_agent_engine(
+    object_or_factory: Any,
+    authenticated_user_id: str | None,
+) -> Any:
+    if callable(object_or_factory) and not hasattr(
+        object_or_factory, "bidi_stream_query"
+    ):
+        return object_or_factory(authenticated_user_id)
+    return object_or_factory
+
+
 def get_connect_and_run_callable(
     websocket: WebSocket, config: dict[str, Any]
 ) -> Callable:
@@ -365,7 +401,10 @@ def get_connect_and_run_callable(
         else:
             # Local agent engine mode
             # Dynamically import the pre-configured agent_engine object
-            agent_engine = _dynamic_import(config["agent_engine_object_path"])
+            agent_engine = _resolve_local_agent_engine(
+                _dynamic_import(config["agent_engine_object_path"]),
+                authenticated_user_id,
+            )
             logging.info(
                 f"Starting local agent engine with object: {type(agent_engine).__name__}"
             )
@@ -410,7 +449,17 @@ async def websocket_endpoint(
             reason="Missing auth token",
         )
 
-    user_id = _get_current_user_id_from_token(token)
+    try:
+        user_id = _get_current_user_id_from_token(token)
+    except HTTPException as e:
+        # Raise WebSocketException so the upgrade still happens and client gets
+        # a proper WS close frame instead of an HTTP 401 (which Flutter reports
+        # as "was not upgraded to websocket").
+        raise WebSocketException(
+            code=status.WS_1008_POLICY_VIOLATION,
+            reason=f"Auth failed: {e.detail}",
+        )
+
     await websocket.accept()
     connect_and_run = get_connect_and_run_callable(websocket, app.state.config)
     websocket.state.authenticated_user_id = user_id
@@ -835,7 +884,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--agent-engine-object",
         type=str,
-        default="..agent_engine_app.agent_engine",
+        default="..agent_engine_app.get_agent_engine",
         help="Python path to agent engine object instance",
     )
     parser.add_argument(

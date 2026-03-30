@@ -113,6 +113,9 @@ class AymaAudioService extends ChangeNotifier {
     _connectFuture = _connect(wsUrl);
     try {
       await _connectFuture;
+    } catch (e, st) {
+      debugPrint('[ws] connect failed: $e\n$st');
+      _handleConnectionFailure();
     } finally {
       _connectFuture = null;
     }
@@ -228,6 +231,29 @@ class AymaAudioService extends ChangeNotifier {
     _setState(SessionState.disconnected);
   }
 
+  void _handleConnectionFailure() {
+    _wsSub?.cancel();
+    _wsSub = null;
+    _channel = null;
+
+    if (kIsWeb) {
+      _webMic.stop();
+      _webPlayer.stop();
+    } else {
+      if (_recorder.isRecording) {
+        _recorder.stopRecorder();
+      }
+      if (!_player.isStopped) {
+        _player.stopPlayer();
+      }
+      _playerStarted = false;
+      _turnOutputAudio.clear();
+    }
+
+    _clearPendingMicAudio();
+    _setState(SessionState.disconnected);
+  }
+
   // ── WebSocket messages ───────────────────────────────────────────────────────
 
   void _onMessage(dynamic raw) {
@@ -305,7 +331,8 @@ class AymaAudioService extends ChangeNotifier {
         }
 
         final text = p['text'] as String?;
-        if (text != null && text.trim().isNotEmpty && !hasOutputTranscription) {
+        final isThought = (p['thought'] as bool?) ?? false;
+        if (text != null && text.trim().isNotEmpty && !hasOutputTranscription && !isThought) {
           _setPendingAgentText(text);
         }
       }

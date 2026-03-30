@@ -18,8 +18,10 @@ class ChatScreen extends ConsumerStatefulWidget {
 class _ChatScreenState extends ConsumerState<ChatScreen> {
   final _textCtrl     = TextEditingController();
   final _scrollCtrl   = ScrollController();
+  final _inputFocusNode = FocusNode();
   bool _showTranscript = true;
   late final AymaAudioService _audioService;
+  int _lastTranscriptCount = 0;
 
   @override
   void initState() {
@@ -33,7 +35,12 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
     if (audio.state != SessionState.disconnected) return;
     final user = ref.read(currentUserProvider);
     if (user == null) return;
-    await audio.connect(Env.wsUrl);
+    try {
+      await audio.connect(Env.wsUrl);
+    } catch (_) {
+      // The audio service already converts transport failures into a clean
+      // disconnected state. Don't let startup retries crash the UI.
+    }
   }
 
   @override
@@ -41,6 +48,7 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
     _audioService.disconnect(notify: false);
     _textCtrl.dispose();
     _scrollCtrl.dispose();
+    _inputFocusNode.dispose();
     super.dispose();
   }
 
@@ -56,14 +64,30 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
     });
   }
 
+  void _sendCurrentText() {
+    final text = _textCtrl.text.trim();
+    if (text.isEmpty) return;
+
+    _textCtrl.value = const TextEditingValue();
+    _audioService.sendText(text);
+  }
+
   @override
   Widget build(BuildContext context) {
-    final audio     = ref.watch(audioServiceProvider);
-    final state     = audio.state;
-    final transcript = audio.transcript;
+    final state = ref.watch(audioServiceProvider.select((audio) => audio.state));
+    final muted = ref.watch(audioServiceProvider.select((audio) => audio.muted));
+    final speakerMuted =
+        ref.watch(audioServiceProvider.select((audio) => audio.speakerMuted));
+    final transcriptCount =
+        ref.watch(audioServiceProvider.select((audio) => audio.transcript.length));
+    final transcript = _audioService.transcript;
 
-    // Auto scroll on new messages
-    if (transcript.isNotEmpty) _scrollToBottom();
+    if (transcriptCount != _lastTranscriptCount) {
+      _lastTranscriptCount = transcriptCount;
+      if (transcriptCount > 0) {
+        _scrollToBottom();
+      }
+    }
 
     return Scaffold(
       backgroundColor: AymaColors.bg,
@@ -73,14 +97,14 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
             // Top bar
             _TopBar(
               state: state,
-              muted: audio.muted,
-              speakerMuted: audio.speakerMuted,
+              muted: muted,
+              speakerMuted: speakerMuted,
               showTranscript: _showTranscript,
-              onMute: audio.toggleMute,
-              onSpeaker: audio.toggleSpeaker,
+              onMute: _audioService.toggleMute,
+              onSpeaker: _audioService.toggleSpeaker,
               onToggleTranscript: () => setState(() => _showTranscript = !_showTranscript),
               onDisconnect: () {
-                audio.disconnect();
+                _audioService.disconnect();
               },
               onConnect: _autoConnect,
             ),
@@ -89,14 +113,24 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
             Expanded(
               flex: 3,
               child: Center(
-                child: VoiceOrb(
-                  state: state,
-                  inputVolume: audio.inputVolume,
-                  outputVolume: audio.outputVolume,
-                  onTap: () {
-                    if (state == SessionState.disconnected) {
-                      _autoConnect();
-                    }
+                child: Consumer(
+                  builder: (context, ref, _) {
+                    final inputVolume = ref.watch(
+                      audioServiceProvider.select((audio) => audio.inputVolume),
+                    );
+                    final outputVolume = ref.watch(
+                      audioServiceProvider.select((audio) => audio.outputVolume),
+                    );
+                    return VoiceOrb(
+                      state: state,
+                      inputVolume: inputVolume,
+                      outputVolume: outputVolume,
+                      onTap: () {
+                        if (state == SessionState.disconnected) {
+                          _autoConnect();
+                        }
+                      },
+                    );
                   },
                 ),
               ),
@@ -115,12 +149,10 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
             // Text input
             _TextInputBar(
               ctrl: _textCtrl,
+              focusNode: _inputFocusNode,
               enabled: state != SessionState.disconnected &&
                        state != SessionState.connecting,
-              onSend: (text) {
-                audio.sendText(text);
-                _textCtrl.clear();
-              },
+              onSend: _sendCurrentText,
             ),
           ],
         ),
@@ -356,12 +388,20 @@ class _TranscriptBubble extends StatelessWidget {
 
 class _TextInputBar extends StatelessWidget {
   final TextEditingController ctrl;
+  final FocusNode focusNode;
   final bool enabled;
-  final ValueChanged<String> onSend;
-  const _TextInputBar({required this.ctrl, required this.enabled, required this.onSend});
+  final VoidCallback onSend;
+  const _TextInputBar({
+    required this.ctrl,
+    required this.focusNode,
+    required this.enabled,
+    required this.onSend,
+  });
 
   @override
   Widget build(BuildContext context) {
+    final hasText = ctrl.text.trim().isNotEmpty;
+
     return Padding(
       padding: const EdgeInsets.fromLTRB(16, 8, 16, 16),
       child: Row(
@@ -369,16 +409,27 @@ class _TextInputBar extends StatelessWidget {
           Expanded(
             child: TextField(
               controller: ctrl,
+              focusNode: focusNode,
               enabled: enabled,
+              textInputAction: TextInputAction.send,
+              keyboardType: TextInputType.multiline,
+              minLines: 1,
+              maxLines: 4,
               style: TextStyle(color: AymaColors.textPrimary, fontSize: 14),
               cursorColor: AymaColors.accent,
-              onSubmitted: (v) { if (v.trim().isNotEmpty) onSend(v.trim()); },
+              onTapOutside: (_) => focusNode.unfocus(),
+              onChanged: (_) => (context as Element).markNeedsBuild(),
+              onSubmitted: (_) {
+                if (enabled && ctrl.text.trim().isNotEmpty) {
+                  onSend();
+                }
+              },
               decoration: InputDecoration(
                 hintText: enabled ? 'Type a message...' : 'Not connected',
                 hintStyle: TextStyle(color: AymaColors.textTertiary, fontSize: 14),
                 filled: true,
                 fillColor: AymaColors.surface,
-                contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+                contentPadding: const EdgeInsets.symmetric(horizontal: 18, vertical: 14),
                 border: OutlineInputBorder(
                     borderRadius: BorderRadius.circular(24),
                     borderSide: BorderSide(color: AymaColors.border)),
@@ -396,22 +447,21 @@ class _TextInputBar extends StatelessWidget {
           ),
           const SizedBox(width: 8),
           GestureDetector(
-            onTap: enabled
-                ? () {
-                    final text = ctrl.text.trim();
-                    if (text.isNotEmpty) { onSend(text); ctrl.clear(); }
-                  }
-                : null,
+            onTap: enabled && hasText ? onSend : null,
             child: AnimatedContainer(
               duration: const Duration(milliseconds: 200),
               width: 44, height: 44,
               decoration: BoxDecoration(
-                color: enabled ? AymaColors.accent : AymaColors.surface,
+                color: enabled && hasText
+                    ? AymaColors.accent
+                    : AymaColors.surface,
                 shape: BoxShape.circle,
               ),
               child: Icon(Icons.arrow_upward_rounded,
                   size: 20,
-                  color: enabled ? Colors.white : AymaColors.textTertiary),
+                  color: enabled && hasText
+                      ? Colors.white
+                      : AymaColors.textTertiary),
             ),
           ),
         ],

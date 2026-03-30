@@ -29,9 +29,20 @@ vertexai.init(
     location=os.environ["GOOGLE_CLOUD_LOCATION"],
 )
 
-# Available Gemini Live voices
-AVAILABLE_VOICES = ["Charon", "Puck", "Kore", "Fenrir", "Aoede"]
+# Prebuilt Gemini Live voices. We pick opposite-gender defaults for the app's
+# dating-assistant persona, falling back to a neutral default if the user's
+# gender is unknown.
 DEFAULT_VOICE = "Charon"
+FEMALE_PRESENTING_VOICES = {"Kore", "Aoede", "Leda", "Despina"}
+MALE_PRESENTING_VOICES = {"Puck", "Charon", "Fenrir", "Algieba"}
+VOICE_BY_USER_GENDER = {
+    "male": "Despina",
+    "man": "Despina",
+    "m": "Despina",
+    "female": "Puck",
+    "woman": "Puck",
+    "f": "Puck",
+}
 
 
 # ---------------------------------------------------------------------------
@@ -172,7 +183,10 @@ async def _build_instruction(context: ReadonlyContext) -> str:
         "- Keep every response to 1-3 sentences. Never longer.\n"
         "- No markdown, bullet points, or lists. Speak naturally.\n"
         "- If you need to think, say 'let me think about that' — don't go silent.\n"
-        "- Match the user's energy and pace."
+        "- Match the user's energy and pace.\n"
+        "- Sound warm, playful, flirtatious, and emotionally expressive.\n"
+        "- Use vocal variety, light teasing, and confident charm when appropriate.\n"
+        "- Keep it tasteful and consensual; never become explicit or sexually graphic."
     )
 
     if not user_id:
@@ -271,21 +285,77 @@ async def _build_instruction(context: ReadonlyContext) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Agent
+# Agent factory
 # ---------------------------------------------------------------------------
 
-root_agent = Agent(
-    name="ayma_voice_agent",
-    model=Gemini(
-        model="gemini-live-2.5-flash-native-audio",
-        retry_options=types.HttpRetryOptions(attempts=3),
-    ),
-    instruction=_build_instruction,
-    tools=[
-        google_search,
-        get_current_time,
-        submit_feedback,
-    ],
-)
+def _voice_for_gender(gender: str | None) -> str:
+    if not gender:
+        return DEFAULT_VOICE
+    normalized = gender.strip().lower()
+    return VOICE_BY_USER_GENDER.get(normalized, DEFAULT_VOICE)
 
-app = App(root_agent=root_agent, name="app")
+
+def _load_user_gender(user_id: str | None) -> str | None:
+    if not user_id:
+        return None
+
+    try:
+        from supabase import create_client
+
+        supabase = create_client(
+            os.environ["SUPABASE_URL"],
+            os.environ["SUPABASE_SERVICE_ROLE_KEY"],
+        )
+        result = (
+            supabase.table("user_profiles")
+            .select("gender")
+            .eq("id", user_id)
+            .maybe_single()
+            .execute()
+        )
+        data = result.data or {}
+        gender = data.get("gender")
+        return gender if isinstance(gender, str) and gender.strip() else None
+    except Exception as e:
+        logger.warning("[voice] failed to load gender for %s: %s", user_id, e)
+        return None
+
+
+def create_root_agent(user_id: str | None = None) -> Agent:
+    user_gender = _load_user_gender(user_id)
+    voice_name = _voice_for_gender(user_gender)
+    logger.info(
+        "[voice] selected voice=%s for user_id=%s gender=%r",
+        voice_name,
+        user_id,
+        user_gender,
+    )
+
+    return Agent(
+        name="ayma_voice_agent",
+        model=Gemini(
+            model="gemini-2.5-flash-native-audio-latest",
+            speech_config=types.SpeechConfig(
+                voice_config=types.VoiceConfig(
+                    prebuilt_voice_config=types.PrebuiltVoiceConfig(
+                        voice_name=voice_name,
+                    )
+                ),
+            ),
+            retry_options=types.HttpRetryOptions(attempts=3),
+        ),
+        instruction=_build_instruction,
+        tools=[
+            google_search,
+            get_current_time,
+            submit_feedback,
+        ],
+    )
+
+
+def create_app(user_id: str | None = None) -> App:
+    return App(root_agent=create_root_agent(user_id), name="app")
+
+
+root_agent = create_root_agent()
+app = create_app()
