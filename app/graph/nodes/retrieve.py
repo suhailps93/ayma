@@ -1,25 +1,26 @@
 """
 retrieve node — runs at the start of every turn.
 
-Fetches two things in parallel:
-1. Mem0 facts      — who this person is ("User is a vegetarian", "has a dog named Mango")
-2. pgvector RAG    — past messages semantically similar to the current message
+Fetches three things in parallel:
+1. Mem0 facts      — atomic facts about this person
+2. Wiki context    — synthesized per-user knowledge base from GCS
+3. Recent messages — last N messages from DB (no embedding needed)
 
-Both are injected into the system prompt by the personality node.
-Token caps are enforced here to keep the context budget under control.
+Wiki replaces the old pgvector semantic search. The wiki is richer and already
+synthesized — the LLM maintains it after each turn via wiki_update.py.
+Recent messages give conversation continuity without re-embedding anything.
 """
 import asyncio
 import os
-from google import genai as google_genai
+
 from mem0 import MemoryClient
 from supabase import create_client
 
 from app.graph.state import AgentState
+from app.wiki import read_all_wiki_pages
 
-# Token caps — see docs/memory.md for the full budget breakdown
 MEM0_TOKEN_CAP = 600
-RAG_TOKEN_CAP = 400
-RAG_RESULTS = 8   # fetch 8 messages, trim to token cap after
+RECENT_MESSAGES = 10
 
 
 def _get_supabase():
@@ -33,16 +34,7 @@ def _get_mem0():
     return MemoryClient(api_key=os.environ["MEM0_API_KEY"])
 
 
-def _get_genai():
-    return google_genai.Client(
-        vertexai=True,
-        project=os.environ["GOOGLE_CLOUD_PROJECT"],
-        location=os.environ["GOOGLE_CLOUD_LOCATION"],
-    )
-
-
 def _trim_to_tokens(text: str, max_tokens: int) -> str:
-    """Rough token trimming — 1 token ≈ 4 characters."""
     max_chars = max_tokens * 4
     if len(text) <= max_chars:
         return text
@@ -50,64 +42,55 @@ def _trim_to_tokens(text: str, max_tokens: int) -> str:
 
 
 async def _fetch_mem0_facts(user_id: str) -> str:
-    """Fetch structured facts about the user from Mem0."""
     try:
         mem0 = _get_mem0()
         results = mem0.get_all(user_id=user_id)
         if not results:
             return ""
-        # results is a dict with a "results" key in Mem0 v1+
         items = results if isinstance(results, list) else results.get("results", [])
         facts = "\n".join(f"- {r['memory']}" for r in items)
         return _trim_to_tokens(facts, MEM0_TOKEN_CAP)
     except Exception:
-        return ""  # graceful degradation — agent still works without memory
+        return ""
 
 
-async def _fetch_rag_context(user_id: str, query: str) -> str:
-    """Fetch past messages semantically similar to the current message."""
+async def _fetch_wiki_context(user_id: str) -> str:
     try:
-        gc = _get_genai()
-        emb = gc.models.embed_content(
-            model="gemini-embedding-2-preview",
-            contents=query,
-        )
-        vec = emb.embeddings[0].values
-        vec_str = "[" + ",".join(str(v) for v in vec) + "]"
+        import asyncio as _asyncio
+        return await _asyncio.to_thread(read_all_wiki_pages, user_id)
+    except Exception:
+        return ""
 
+
+async def _fetch_recent_messages(user_id: str) -> str:
+    try:
         supabase = _get_supabase()
-        result = supabase.rpc("match_messages", {
-            "query_embedding": vec_str,
-            "match_user_id": user_id,
-            "match_count": RAG_RESULTS,
-        }).execute()
-
+        result = (
+            supabase.table("messages")
+            .select("role, content")
+            .eq("user_id", user_id)
+            .order("created_at", desc=True)
+            .limit(RECENT_MESSAGES)
+            .execute()
+        )
         if not result.data:
             return ""
-
-        lines = [f"{r['role']}: {r['content']}" for r in result.data]
-        context = "\n".join(lines)
-        return _trim_to_tokens(context, RAG_TOKEN_CAP)
+        rows = list(reversed(result.data))
+        return "\n".join(f"{r['role']}: {r['content']}" for r in rows)
     except Exception:
         return ""
 
 
 async def retrieve(state: AgentState) -> AgentState:
-    """Fetch Mem0 facts and RAG context in parallel."""
     user_id = state["user_id"]
-    # Use the last user message as the RAG query
-    last_user_msg = next(
-        (m.content for m in reversed(state["messages"]) if m.type == "human"),
-        "",
-    )
-
-    mem0_facts, rag_context = await asyncio.gather(
+    mem0_facts, wiki_context, rag_context = await asyncio.gather(
         _fetch_mem0_facts(user_id),
-        _fetch_rag_context(user_id, last_user_msg),
+        _fetch_wiki_context(user_id),
+        _fetch_recent_messages(user_id),
     )
-
     return {
         **state,
         "mem0_facts": mem0_facts,
+        "wiki_context": wiki_context,
         "rag_context": rag_context,
     }

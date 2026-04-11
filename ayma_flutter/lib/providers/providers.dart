@@ -86,6 +86,15 @@ final onboardingStatusProvider = FutureProvider<bool>((ref) async {
   return (res['onboarding_complete'] as bool?) ?? false;
 });
 
+// ── Insights (Your Story / wiki pages) ───────────────────────────────────────
+
+final insightsProvider = FutureProvider<Map<String, String>>((ref) async {
+  final user = ref.watch(currentUserProvider);
+  if (user == null) return {};
+  final res = await BackendService.get('/api/insights') as Map<String, dynamic>;
+  return res.map((k, v) => MapEntry(k, (v as String?) ?? ''));
+});
+
 // ── Audio Service ─────────────────────────────────────────────────────────────
 
 final audioServiceProvider = ChangeNotifierProvider<AymaAudioService>((ref) {

@@ -28,14 +28,18 @@ import httpx
 import vertexai
 from google.adk.agents.run_config import RunConfig as _RunConfig
 from google.genai import types as _genai_types
-from fastapi import FastAPI, Header, HTTPException, Query, WebSocket, WebSocketException, status
+from fastapi import FastAPI, File, Header, HTTPException, Query, UploadFile, WebSocket, WebSocketException, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from google.cloud import logging as google_cloud_logging
+from google.cloud import storage
 from pydantic import BaseModel, Field
 from supabase import Client, create_client
 from websockets.exceptions import ConnectionClosedError
+
+from app.genai_client import create_genai_client
+from app.live_bridge import GeminiLiveBridge
 
 app = FastAPI()
 app.add_middleware(
@@ -63,27 +67,12 @@ logging.basicConfig(level=logging.INFO)
 NOMINATIM = "https://nominatim.openstreetmap.org"
 NOMINATIM_UA = "AymaApp/1.0"
 
-# RunConfig for every live session — all Gemini Live best practices supported by AI Studio.
-# Note: enable_affective_dialog and proactivity are Vertex AI-only; omitted here.
-# Native audio models have a 128K context window; compress at 100K, slide to 50K.
-_LIVE_RUN_CONFIG: dict = _RunConfig(
-    input_audio_transcription=_genai_types.AudioTranscriptionConfig(),
-    output_audio_transcription=_genai_types.AudioTranscriptionConfig(),
-    realtime_input_config=_genai_types.RealtimeInputConfig(
-        automatic_activity_detection=_genai_types.AutomaticActivityDetection(
-            start_of_speech_sensitivity=_genai_types.StartSensitivity.START_SENSITIVITY_HIGH,
-            end_of_speech_sensitivity=_genai_types.EndSensitivity.END_SENSITIVITY_LOW,
-            prefix_padding_ms=20,
-            silence_duration_ms=800,
-        ),
-        activity_handling=_genai_types.ActivityHandling.START_OF_ACTIVITY_INTERRUPTS,
-        turn_coverage=_genai_types.TurnCoverage.TURN_INCLUDES_ALL_INPUT,
-    ),
-    context_window_compression=_genai_types.ContextWindowCompressionConfig(
-        trigger_tokens=100_000,
-        sliding_window=_genai_types.SlidingWindow(target_tokens=50_000),
-    ),
-).model_dump(mode="json", exclude_none=True)
+# Keep the live RunConfig minimal for Gemini 3.1 on the Gemini API.
+# The local agent engine expects a dict, but the live SDK wants the enum object
+# preserved for modalities instead of a plain serialized string.
+_LIVE_RUN_CONFIG = {
+    "response_modalities": [_genai_types.Modality.AUDIO],
+}
 
 # Initialize default configuration
 app.state.config = {
@@ -461,9 +450,8 @@ async def websocket_endpoint(
         )
 
     await websocket.accept()
-    connect_and_run = get_connect_and_run_callable(websocket, app.state.config)
     websocket.state.authenticated_user_id = user_id
-    await connect_and_run()
+    await GeminiLiveBridge(websocket, user_id).run()
 
 
 class Feedback(BaseModel):
@@ -649,7 +637,11 @@ def login(payload: LoginPayload) -> dict[str, Any]:
 def signup(payload: SignupPayload) -> dict[str, Any]:
     auth_response = _supabase_auth_post(
         "/signup",
-        {"email": payload.email, "password": payload.password},
+        {
+            "email": payload.email,
+            "password": payload.password,
+            "options": {"emailRedirectTo": "ayma://auth/confirm"},
+        },
     )
     return _format_auth_response(auth_response)
 
@@ -669,6 +661,96 @@ def get_auth_session(authorization: str | None = Header(default=None)) -> dict[s
     token = _extract_bearer_token(authorization)
     user = _supabase_auth_get_user(token)
     return {"user": {"id": user.get("id"), "email": user.get("email")}}
+
+
+class TextChatPayload(BaseModel):
+    message: str
+    history: list[dict[str, Any]] = []
+    attachments: list[dict[str, Any]] = []
+
+
+def _guess_media_mime(path: str) -> str:
+    ext = Path(path).suffix.lower()
+    return {
+        ".jpg": "image/jpeg",
+        ".jpeg": "image/jpeg",
+        ".png": "image/png",
+        ".mp4": "video/mp4",
+        ".mov": "video/quicktime",
+    }.get(ext, "application/octet-stream")
+
+
+def _load_media_bytes(media_url: str) -> tuple[bytes, str]:
+    if media_url.startswith("gs://"):
+        bucket_name = media_url.removeprefix("gs://").split("/", 1)[0]
+        blob_path = media_url.removeprefix(f"gs://{bucket_name}/")
+        client = storage.Client()
+        data = client.bucket(bucket_name).blob(blob_path).download_as_bytes()
+        return data, _guess_media_mime(blob_path)
+    path = Path(media_url)
+    return path.read_bytes(), _guess_media_mime(path.name)
+
+
+@app.post("/api/chat/text")
+async def text_chat(
+    payload: TextChatPayload,
+    authorization: str | None = Header(default=None),
+) -> dict[str, Any]:
+    """Text-only chat using gemini-2.5-flash when live session is not connected.
+
+    Uses the same system instruction as the live agent so persona is consistent.
+    History format: [{"role": "user"|"model", "text": "..."}]
+    """
+    from google.genai import types as _gtypes
+    from app.agent import _build_instruction, TEXT_MODEL
+
+    # Resolve user_id if auth header provided; fall back to None (default persona)
+    user_id: str | None = None
+    try:
+        token = _extract_bearer_token(authorization)
+        user_id = _get_current_user_id_from_token(token)
+    except HTTPException:
+        pass
+
+    class _MinimalContext:
+        def __init__(self, uid: str | None) -> None:
+            self.user_id = uid
+
+    instruction = await _build_instruction(_MinimalContext(user_id))  # type: ignore[arg-type]
+
+    client = create_genai_client()
+
+    history = [
+        _gtypes.Content(
+            role=entry["role"],
+            parts=[_gtypes.Part(text=entry["text"])],
+        )
+        for entry in payload.history
+        if entry.get("role") in ("user", "model") and entry.get("text")
+    ]
+
+    attachment_parts: list[_gtypes.Part] = []
+    for attachment in payload.attachments:
+        media_url = attachment.get("url")
+        if not isinstance(media_url, str) or not media_url:
+            continue
+        try:
+            data, mime = _load_media_bytes(media_url)
+            attachment_parts.append(_gtypes.Part.from_bytes(data=data, mime_type=mime))
+        except Exception as exc:
+            logging.warning("failed to load attachment %s: %s", media_url, exc)
+
+    user_parts = attachment_parts + [_gtypes.Part(text=payload.message)]
+
+    response = await client.aio.models.generate_content(
+        model=TEXT_MODEL,
+        contents=history + [_gtypes.Content(role="user", parts=user_parts)],
+        config=_gtypes.GenerateContentConfig(
+            system_instruction=instruction,
+            max_output_tokens=512,
+        ),
+    )
+    return {"reply": response.text}
 
 
 @app.post("/api/auth/logout")
@@ -815,6 +897,176 @@ async def reverse_location(lat: float, lon: float) -> dict[str, str]:
     return {"location": short_name}
 
 
+# ---------------------------------------------------------------------------
+# Internal endpoints — called by Cloud Tasks, not by clients
+# ---------------------------------------------------------------------------
+
+class MemoryWritePayload(BaseModel):
+    user_id: str
+    messages: list[dict[str, Any]]
+
+
+class ProfileUpdatePayload2(BaseModel):
+    user_id: str
+
+
+class WikiUpdatePayload(BaseModel):
+    user_id: str
+    messages: list[dict[str, Any]]
+
+
+class MediaProcessPayload(BaseModel):
+    user_id: str
+    photo_url: str
+
+
+@app.post("/internal/memory-write")
+async def internal_memory_write(payload: MemoryWritePayload) -> dict[str, str]:
+    from app.internal.memory_write import handle_memory_write
+    await handle_memory_write(payload.user_id, payload.messages)
+    return {"status": "ok"}
+
+
+@app.post("/internal/update-profile")
+async def internal_update_profile(payload: ProfileUpdatePayload2) -> dict[str, str]:
+    from app.internal.profile_update import handle_profile_update
+    await handle_profile_update(payload.user_id)
+    return {"status": "ok"}
+
+
+@app.post("/internal/wiki-update")
+async def internal_wiki_update(payload: WikiUpdatePayload) -> dict[str, str]:
+    from app.internal.wiki_update import handle_wiki_update
+    await handle_wiki_update(payload.user_id, payload.messages)
+    return {"status": "ok"}
+
+
+@app.post("/internal/process-photo")
+async def internal_process_photo(payload: MediaProcessPayload) -> dict[str, Any]:
+    from app.internal.media_process import handle_media_process
+    result = await handle_media_process(payload.user_id, payload.photo_url)
+    return {"status": "ok", **result}
+
+
+# ---------------------------------------------------------------------------
+# Photo upload — client uploads photo, backend stores to GCS and queues processing
+# ---------------------------------------------------------------------------
+
+class PhotoUploadResponse(BaseModel):
+    photo_url: str
+    status: str
+
+
+def _media_bucket_name() -> str:
+    return os.environ.get("MEDIA_BUCKET_NAME", "").strip() or os.environ.get("WIKI_BUCKET_NAME", "").strip()
+
+
+def _local_media_root() -> Path:
+    return Path(os.environ.get("MEDIA_LOCAL_DIR", Path.cwd() / ".media"))
+
+
+async def _save_uploaded_photo(user_id: str, upload: UploadFile) -> str:
+    suffix = Path(upload.filename or "photo.jpg").suffix.lower() or ".jpg"
+    if suffix not in {".jpg", ".jpeg", ".png", ".mp4", ".mov"}:
+        raise HTTPException(status_code=400, detail="Only JPG, PNG, MP4, and MOV files are supported")
+
+    data = await upload.read()
+    if not data:
+        raise HTTPException(status_code=400, detail="Uploaded file is empty")
+
+    media_id = f"{uuid.uuid4()}{suffix}"
+    bucket_name = _media_bucket_name()
+    if bucket_name:
+        blob_path = f"{user_id}/{media_id}"
+        client = storage.Client()
+        bucket = client.bucket(bucket_name)
+        content_type = upload.content_type or {
+            ".png": "image/png",
+            ".mp4": "video/mp4",
+            ".mov": "video/quicktime",
+        }.get(suffix, "image/jpeg")
+        bucket.blob(blob_path).upload_from_string(data, content_type=content_type)
+        return f"gs://{bucket_name}/{blob_path}"
+
+    local_root = _local_media_root() / user_id
+    local_root.mkdir(parents=True, exist_ok=True)
+    local_path = local_root / media_id
+    local_path.write_bytes(data)
+    return str(local_path)
+
+
+@app.post("/api/media/upload")
+async def upload_photo(
+    file: UploadFile = File(...),
+    authorization: str | None = Header(default=None),
+) -> dict[str, Any]:
+    """
+    Accept a photo upload, store it, and enqueue multimodal processing.
+    Expects multipart/form-data with a 'file' field.
+    Returns the stored photo URL; processing happens asynchronously unless local dev.
+    """
+    user_id = _get_current_user_id(authorization)
+    media_url = await _save_uploaded_photo(user_id, file)
+    suffix = Path(file.filename or "").suffix.lower()
+    if suffix in {".jpg", ".jpeg", ".png"}:
+        body = MediaProcessPayload(user_id=user_id, photo_url=media_url)
+        result = await process_existing_photo(body, authorization)
+        return {"photo_url": media_url, "media_type": "image", **result}
+
+    return {"photo_url": media_url, "media_type": "video", "status": "uploaded"}
+
+
+@app.get("/api/insights")
+def get_insights(authorization: str | None = Header(default=None)) -> dict[str, Any]:
+    """Return all wiki pages for the authenticated user."""
+    user_id = _get_current_user_id(authorization)
+    from app.wiki import read_wiki_page
+    return {
+        "about_me":    read_wiki_page(user_id, "about_me.md"),
+        "preferences": read_wiki_page(user_id, "preferences.md"),
+        "context":     read_wiki_page(user_id, "context.md"),
+        "media":       read_wiki_page(user_id, "media.md"),
+    }
+
+
+@app.post("/api/media/process")
+async def process_existing_photo(
+    body: MediaProcessPayload,
+    authorization: str | None = Header(default=None),
+) -> dict[str, Any]:
+    """
+    Trigger processing for a photo already stored at a gs:// URL.
+    Used when the client uploads directly to GCS via a signed URL.
+    """
+    user_id = _get_current_user_id(authorization)
+    if user_id != body.user_id:
+        raise HTTPException(status_code=403, detail="Forbidden")
+
+    import json as _json
+    from google.cloud import tasks_v2 as _tasks
+
+    queue = os.environ.get("CLOUD_TASKS_QUEUE", "")
+    backend_url = os.environ.get("BACKEND_URL", "http://localhost:8000")
+
+    if queue:
+        client = _tasks.CloudTasksClient()
+        task = {
+            "http_request": {
+                "http_method": _tasks.HttpMethod.POST,
+                "url": f"{backend_url}/internal/process-photo",
+                "headers": {"Content-Type": "application/json"},
+                "body": _json.dumps({"user_id": user_id, "photo_url": body.photo_url}).encode(),
+            }
+        }
+        client.create_task(parent=queue, task=task)
+        return {"status": "queued", "photo_url": body.photo_url}
+    else:
+        # Local dev: process inline
+        from app.internal.media_process import handle_media_process
+        result = await handle_media_process(user_id, body.photo_url)
+        return {"status": "processed", "photo_url": body.photo_url, **result}
+
+
 @app.get("/")
 async def serve_frontend_root() -> FileResponse:
     """Serve the frontend index.html at the root path."""
@@ -835,7 +1087,7 @@ async def serve_frontend_spa(full_path: str) -> FileResponse:
     Excludes API routes (ws, feedback) and assets.
     """
     # Don't intercept API routes
-    if full_path.startswith(("ws", "feedback", "assets", "api")):
+    if full_path.startswith(("ws", "feedback", "assets", "api", "internal")):
         raise HTTPException(status_code=404, detail="Not found")
 
     # Serve index.html for all other routes (SPA routing)

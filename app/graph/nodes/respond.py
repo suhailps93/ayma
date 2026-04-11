@@ -12,6 +12,7 @@ from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_core.messages import SystemMessage, AIMessage
 from supabase import create_client
 
+from app.model_config import FAST_MODEL
 from app.graph.state import AgentState
 
 EXCLUSION_DETECTION_PROMPT = """Does this message ask to remove or hide something from the user's profile?
@@ -41,7 +42,7 @@ def _get_supabase():
 
 def _get_llm(streaming: bool = False) -> ChatGoogleGenerativeAI:
     return ChatGoogleGenerativeAI(
-        model="gemini-2.5-flash",
+        model=FAST_MODEL,
         temperature=0.7,
     )
 

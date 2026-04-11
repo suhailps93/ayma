@@ -10,6 +10,7 @@ import 'package:uuid/uuid.dart';
 import 'package:web_socket_channel/web_socket_channel.dart';
 
 import 'auth_storage.dart';
+import 'backend_service.dart';
 import '../env.dart';
 import 'audio_dump_stub.dart'
     if (dart.library.io) 'audio_dump_io.dart';
@@ -60,7 +61,12 @@ class AymaAudioService extends ChangeNotifier {
   final List<TranscriptLine> _transcript = [];
   List<TranscriptLine> get transcript => List.unmodifiable(_transcript);
 
-  // Buffer agent text chunks; only commit to transcript on turnComplete
+  // Text-chat history for offline fallback (role: "user"|"model")
+  final List<Map<String, String>> _textHistory = [];
+
+  // Agent output: buffer and commit on turnComplete (or interrupt).
+  // User input: gemini-3.1 delivers full-utterance transcription non-incrementally,
+  // so we can show it immediately when received without waiting for turnComplete.
   String _pendingAgentText = '';
   String _pendingUserText = '';
 
@@ -123,6 +129,7 @@ class AymaAudioService extends ChangeNotifier {
 
   Future<void> _connect(String wsUrl) async {
     if (_state != SessionState.disconnected) {
+      debugPrint('[ws] connect requested while state=$_state, disconnecting current session first');
       disconnect();
     }
 
@@ -135,7 +142,16 @@ class AymaAudioService extends ChangeNotifier {
     _setState(SessionState.connecting);
     _transcript.clear();
 
-    final token = AuthStorage.accessToken;
+    var token = AuthStorage.accessToken;
+    if (token == null || token.isEmpty) {
+      final refreshed = await BackendService.refreshAuthToken();
+      token = refreshed ? AuthStorage.accessToken : null;
+    } else {
+      final refreshed = await BackendService.refreshAuthToken();
+      if (refreshed) {
+        token = AuthStorage.accessToken;
+      }
+    }
     if (token == null || token.isEmpty) {
       _setState(SessionState.disconnected);
       throw Exception('Missing auth session');
@@ -158,10 +174,12 @@ class AymaAudioService extends ChangeNotifier {
       },
     );
     _channel = WebSocketChannel.connect(wsUri);
+    debugPrint('[ws] opening $wsUri');
 
     _channel!.sink.add(jsonEncode({
       'setup': {'run_id': const Uuid().v4()},
     }));
+    debugPrint('[ws] setup sent');
 
     _wsSub = _channel!.stream.listen(
       _onMessage,
@@ -170,12 +188,14 @@ class AymaAudioService extends ChangeNotifier {
         _handleRemoteDisconnect();
       },
       onDone: () {
+        debugPrint('[ws] done');
         _handleRemoteDisconnect();
       },
     );
   }
 
   void disconnect({bool notify = true}) {
+    debugPrint('[ws] disconnect() state=$_state notify=$notify');
     _wsSub?.cancel();
     _wsSub = null;
     _channel?.sink.close();
@@ -199,6 +219,7 @@ class AymaAudioService extends ChangeNotifier {
     _pendingUserText = '';
     _clearPendingMicAudio();
     _transcript.clear();
+    _textHistory.clear();
     _state = SessionState.disconnected;
     _outputVolume = 0;
     if (notify) {
@@ -207,6 +228,7 @@ class AymaAudioService extends ChangeNotifier {
   }
 
   void _handleRemoteDisconnect() {
+    debugPrint('[ws] remote disconnect state=$_state');
     _wsSub?.cancel();
     _wsSub = null;
     _channel = null;
@@ -232,6 +254,7 @@ class AymaAudioService extends ChangeNotifier {
   }
 
   void _handleConnectionFailure() {
+    debugPrint('[ws] connection failure state=$_state');
     _wsSub?.cancel();
     _wsSub = null;
     _channel = null;
@@ -262,6 +285,7 @@ class AymaAudioService extends ChangeNotifier {
     catch (_) { return; }
 
     if (msg.containsKey('setupComplete')) {
+      debugPrint('[ws] setupComplete');
       _setState(SessionState.ready);
       _startRecorderAndBegin();
       return;
@@ -272,6 +296,7 @@ class AymaAudioService extends ChangeNotifier {
     final sc = msg['serverContent'] as Map<String, dynamic>?;
     final interrupted = (sc?['interrupted'] as bool?) ?? (msg['interrupted'] as bool?) ?? false;
     if (interrupted) {
+      debugPrint('[ws] interrupted');
       if (kIsWeb) { _webPlayer.stop(); }
       else        { _player.stopPlayer(); _playerStarted = false; _turnOutputAudio.clear(); }
       _flushPendingAgentText();
@@ -301,8 +326,6 @@ class AymaAudioService extends ChangeNotifier {
     final content = modelTurn ?? (msg['content'] as Map<String, dynamic>?);
     final hasOutputTranscription =
         (outTx?['text'] as String?)?.trim().isNotEmpty ?? false;
-    final hasInputTranscription =
-        (inTx?['text'] as String?)?.trim().isNotEmpty ?? false;
     final agentResponding = content != null || hasOutputTranscription;
 
     if (agentResponding && _pendingUserText.trim().isNotEmpty) {
@@ -348,11 +371,11 @@ class AymaAudioService extends ChangeNotifier {
     if (inTx != null) {
       final text = inTx['text'] as String? ?? '';
       if (text.trim().isNotEmpty) {
-        if (hasInputTranscription) {
-          _pendingUserText = text.trim();
-        } else {
-          _addTranscript(text, isUser: true);
-        }
+        // gemini-3.1 delivers complete utterance in one shot — add immediately.
+        // Deduplification in _addTranscript prevents doubles if a turnComplete
+        // also carries the same text.
+        _addTranscript(text, isUser: true);
+        _pendingUserText = '';
       }
     }
 
@@ -368,7 +391,20 @@ class AymaAudioService extends ChangeNotifier {
   }
 
   void _setPendingAgentText(String text) {
-    _pendingAgentText = text.trim();
+    final normalized = text.trim();
+    if (normalized.isEmpty) return;
+    if (_pendingAgentText.isEmpty) {
+      _pendingAgentText = normalized;
+      return;
+    }
+    if (_pendingAgentText == normalized || _pendingAgentText.endsWith(normalized)) {
+      return;
+    }
+    if (normalized.startsWith(_pendingAgentText)) {
+      _pendingAgentText = normalized;
+      return;
+    }
+    _pendingAgentText = '$_pendingAgentText $normalized'.trim();
   }
 
   void _flushPendingAgentText() {
@@ -394,6 +430,7 @@ class AymaAudioService extends ChangeNotifier {
   }
 
   Future<void> _startRecorder() async {
+    debugPrint('[audio] start recorder');
     if (kIsWeb) {
       await _webMic.start((pcm16) {
         _inputVolume = 0.5; // web doesn't give dB; use flat value while speaking
@@ -599,22 +636,67 @@ class AymaAudioService extends ChangeNotifier {
     _channel!.sink.add(jsonEncode(payload));
   }
 
-  void sendText(String text) {
-    if (_channel == null || _state == SessionState.disconnected) return;
-    final Map<String, dynamic> payload;
-    if (!_firstContentSent) {
-      _firstContentSent = true;
-      payload = {
-        'live_request': {
-          'content': {'role': 'user', 'parts': [{'text': text}]}
-        },
-      };
+  Future<void> sendText(
+    String text, {
+    List<Map<String, String>> attachments = const [],
+  }) async {
+    final trimmed = text.trim();
+    if (trimmed.isEmpty) return;
+    final attachmentSummary = attachments.isEmpty
+        ? ''
+        : '\n\nShared attachments:\n${attachments.map((a) => '- ${a['kind'] ?? 'file'}: ${a['filename'] ?? a['url'] ?? 'attachment'}').join('\n')}';
+    final historyText = '$trimmed$attachmentSummary';
+
+    if (attachments.isEmpty &&
+        _state != SessionState.disconnected &&
+        _channel != null) {
+      // Live session active — send over WebSocket
+      final Map<String, dynamic> payload;
+      final parts = <Map<String, dynamic>>[
+        if (trimmed.isNotEmpty) {'text': trimmed},
+      ];
+      if (!_firstContentSent) {
+        _firstContentSent = true;
+        payload = {
+          'live_request': {
+            'content': {'role': 'user', 'parts': parts},
+            if (attachments.isNotEmpty) 'attachments': attachments,
+          },
+        };
+      } else {
+        payload = {
+          'content': {'role': 'user', 'parts': parts},
+          if (attachments.isNotEmpty) 'attachments': attachments,
+        };
+      }
+      _channel!.sink.add(jsonEncode(payload));
+      _pendingUserText = historyText;
+      _flushPendingUserText();
     } else {
-      payload = {'content': {'role': 'user', 'parts': [{'text': text}]}};
+      // No live session — use text-only fallback model
+      _addTranscript(trimmed, isUser: true);
+      _textHistory.add({'role': 'user', 'text': historyText});
+      _setState(SessionState.thinking);
+      try {
+        final response = await BackendService.post(
+          '/api/chat/text',
+          {
+            'message': trimmed,
+            'history': _textHistory,
+            'attachments': attachments,
+          },
+        ) as Map<String, dynamic>;
+        final reply = (response['reply'] as String? ?? '').trim();
+        if (reply.isNotEmpty) {
+          _addTranscript(reply, isUser: false);
+          _textHistory.add({'role': 'model', 'text': reply});
+        }
+      } catch (e) {
+        debugPrint('[text-chat] error: $e');
+      } finally {
+        _setState(SessionState.disconnected);
+      }
     }
-    _channel!.sink.add(jsonEncode(payload));
-    _pendingUserText = text.trim();
-    _flushPendingUserText();
   }
 
   // ── Controls ─────────────────────────────────────────────────────────────────
@@ -636,6 +718,9 @@ class AymaAudioService extends ChangeNotifier {
   // ── Helpers ──────────────────────────────────────────────────────────────────
 
   void _setState(SessionState s) {
+    if (_state != s) {
+      debugPrint('[ws] state $_state -> $s');
+    }
     _state = s;
     if (s != SessionState.speaking) _outputVolume = 0;
     notifyListeners();

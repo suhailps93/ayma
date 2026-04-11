@@ -1,6 +1,7 @@
 # ruff: noqa
 import logging
 import os
+import asyncio
 from datetime import datetime
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
@@ -15,6 +16,9 @@ from google.adk.agents.readonly_context import ReadonlyContext
 from google.adk.tools import google_search
 from google.adk.tools.tool_context import ToolContext
 from google.genai import types
+
+from app.model_config import FAST_MODEL, LIVE_MODEL, TEXT_MODEL
+from app.wiki import read_all_wiki_pages
 
 load_dotenv(override=True)
 
@@ -112,7 +116,7 @@ async def submit_feedback(
             import vertexai.generative_models as genai_models
 
             model = genai_models.GenerativeModel(
-                model_name="gemini-2.5-flash",
+                model_name=FAST_MODEL,
                 system_instruction=(
                     "Convert this user preference into a single, concise instruction "
                     "for an AI matchmaker to follow. Max 2 sentences. "
@@ -218,27 +222,37 @@ async def _build_instruction(context: ReadonlyContext) -> str:
 
         user_skills = await load_user_skills(user_id, supabase)
 
-        mem0_facts = ""
-        try:
-            import httpx
-            mem0_resp = await httpx.AsyncClient().post(
-                "https://api.mem0.ai/v2/memories/search/",
-                headers={"Authorization": f"Token {os.environ['MEM0_API_KEY']}"},
-                json={
-                    "query": "user profile background preferences",
-                    "filters": {"AND": [{"user_id": user_id}]},
-                    "top_k": 20,
-                },
-                timeout=3.0,
-            )
-            if mem0_resp.status_code == 200:
-                data = mem0_resp.json()
-                items = data if isinstance(data, list) else data.get("results", [])
-                mem0_facts = "\n".join(f"- {r['memory']}" for r in items) if items else ""
-            else:
-                logger.warning(f"[instruction] mem0 search {mem0_resp.status_code}: {mem0_resp.text[:200]}")
-        except Exception as mem0_err:
-            logger.warning(f"[instruction] mem0 unavailable: {mem0_err}")
+        async def _fetch_mem0() -> str:
+            try:
+                import httpx
+                resp = await httpx.AsyncClient().post(
+                    "https://api.mem0.ai/v2/memories/search/",
+                    headers={"Authorization": f"Token {os.environ['MEM0_API_KEY']}"},
+                    json={
+                        "query": "user profile background preferences",
+                        "filters": {"AND": [{"user_id": user_id}]},
+                        "top_k": 20,
+                    },
+                    timeout=3.0,
+                )
+                if resp.status_code == 200:
+                    data = resp.json()
+                    items = data if isinstance(data, list) else data.get("results", [])
+                    return "\n".join(f"- {r['memory']}" for r in items) if items else ""
+                logger.warning(f"[instruction] mem0 {resp.status_code}: {resp.text[:200]}")
+                return ""
+            except Exception as e:
+                logger.warning(f"[instruction] mem0 unavailable: {e}")
+                return ""
+
+        async def _fetch_wiki() -> str:
+            try:
+                return await asyncio.to_thread(read_all_wiki_pages, user_id)
+            except Exception as e:
+                logger.warning(f"[instruction] wiki unavailable: {e}")
+                return ""
+
+        mem0_facts, wiki_context = await asyncio.gather(_fetch_mem0(), _fetch_wiki())
 
         # Build user context block (demographics + location)
         user_context_lines = []
@@ -271,6 +285,8 @@ async def _build_instruction(context: ReadonlyContext) -> str:
             sections.append(
                 f"## What you know about this person (private — never share directly)\n{profile_private}"
             )
+        if wiki_context:
+            sections.append(f"## Detailed knowledge about this person\n{wiki_context}")
         if mem0_facts:
             sections.append(f"## Facts about this person\n{mem0_facts}")
         sections.append(voice_modifier)
@@ -334,7 +350,7 @@ def create_root_agent(user_id: str | None = None) -> Agent:
     return Agent(
         name="ayma_voice_agent",
         model=Gemini(
-            model="gemini-2.5-flash-native-audio-latest",
+            model=LIVE_MODEL,
             speech_config=types.SpeechConfig(
                 voice_config=types.VoiceConfig(
                     prebuilt_voice_config=types.PrebuiltVoiceConfig(
@@ -342,7 +358,6 @@ def create_root_agent(user_id: str | None = None) -> Agent:
                     )
                 ),
             ),
-            retry_options=types.HttpRetryOptions(attempts=3),
         ),
         instruction=_build_instruction,
         tools=[

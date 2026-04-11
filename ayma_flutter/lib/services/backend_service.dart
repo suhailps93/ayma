@@ -1,4 +1,5 @@
 import 'dart:convert';
+import 'dart:typed_data';
 
 import 'package:http/http.dart' as http;
 
@@ -35,6 +36,16 @@ class BackendService {
     );
   }
 
+  static Future<dynamic> getWithToken(String path, String token) async {
+    return _request(
+      () => http.get(_uri(path), headers: {
+        'Content-Type': 'application/json',
+        'Authorization': 'Bearer $token',
+      }),
+      requiresAuth: false,
+    );
+  }
+
   static Future<dynamic> post(
     String path,
     Map<String, dynamic> body, {
@@ -48,6 +59,30 @@ class BackendService {
       ),
       requiresAuth: requiresAuth,
     );
+  }
+
+  static Future<dynamic> uploadFileBytes(
+    String path,
+    Uint8List bytes, {
+    required String filename,
+    String fieldName = 'file',
+    bool requiresAuth = true,
+  }) async {
+    Future<http.Response> run() async {
+      final request = http.MultipartRequest('POST', _uri(path))
+        ..headers.addAll(_headers(requiresAuth: requiresAuth))
+        ..files.add(
+          http.MultipartFile.fromBytes(
+            fieldName,
+            bytes,
+            filename: filename,
+          ),
+        );
+      final streamed = await request.send();
+      return http.Response.fromStream(streamed);
+    }
+
+    return _request(run, requiresAuth: requiresAuth);
   }
 
   static Future<dynamic> _request(

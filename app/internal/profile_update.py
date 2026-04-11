@@ -18,6 +18,8 @@ from supabase import create_client
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_core.messages import HumanMessage
 
+from app.model_config import FAST_MODEL
+
 PUBLIC_PROFILE_PROMPT = """You are writing a public profile for a person based on everything you know about them.
 Write in third person, warm and specific. 2-4 short paragraphs. No bullet points.
 Make it feel like a genuine person wrote it, not a form.
@@ -61,7 +63,7 @@ Write updated observations now. Output only the observations."""
 
 def _get_llm():
     return ChatGoogleGenerativeAI(
-        model="gemini-2.5-flash",
+        model=FAST_MODEL,
         temperature=0.4,
     )
 

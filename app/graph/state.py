@@ -14,8 +14,9 @@ class AgentState(TypedDict):
     messages: Annotated[list[BaseMessage], add_messages]
 
     # --- Populated by retrieve node ---
-    mem0_facts: str       # structured facts about this user ("User is a vegetarian...")
-    rag_context: str      # semantically relevant past messages
+    mem0_facts: str       # atomic facts from Mem0 ("User is a vegetarian...")
+    wiki_context: str     # synthesized per-user knowledge base (GCS wiki pages)
+    rag_context: str      # recent conversation messages
 
     # --- Populated by personality node ---
     system_prompt: str    # final assembled prompt sent to Gemini

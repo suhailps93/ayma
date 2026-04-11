@@ -8,17 +8,15 @@ Runs two things in parallel:
 """
 import asyncio
 import os
-from google import genai as google_genai
 from mem0 import MemoryClient
 from supabase import create_client
 
+from app.genai_client import create_genai_client
+from app.model_config import EMBEDDING_MODEL
+
 
 def _clients():
-    gc = google_genai.Client(
-        vertexai=True,
-        project=os.environ["GOOGLE_CLOUD_PROJECT"],
-        location=os.environ["GOOGLE_CLOUD_LOCATION"],
-    )
+    gc = create_genai_client()
     mem0 = MemoryClient(api_key=os.environ["MEM0_API_KEY"])
     supabase = create_client(
         os.environ["SUPABASE_URL"],
@@ -31,7 +29,7 @@ async def _embed_and_store(gc, supabase, user_id: str, messages: list[dict]) -> 
     """Embed each message and store in pgvector."""
     for msg in messages:
         emb = gc.models.embed_content(
-            model="gemini-embedding-2-preview",
+            model=EMBEDDING_MODEL,
             contents=msg["content"],
         )
         vec = emb.embeddings[0].values

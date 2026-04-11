@@ -83,6 +83,47 @@ class AuthService extends ChangeNotifier {
     notifyListeners();
   }
 
+  /// Called when the app is opened via the ayma://auth/confirm deep link.
+  /// Supabase appends tokens as a URL fragment:
+  ///   ayma://auth/confirm#access_token=...&refresh_token=...&type=signup
+  Future<bool> handleConfirmationLink(Uri uri) async {
+    // Fragment is returned as a query string by Supabase
+    final fragment = uri.fragment;
+    if (fragment.isEmpty) return false;
+
+    final params = Uri.splitQueryString(fragment);
+    final accessToken = params['access_token'];
+    final refreshToken = params['refresh_token'];
+    final expiresIn = int.tryParse(params['expires_in'] ?? '');
+    if (accessToken == null || refreshToken == null) return false;
+
+    // Fetch user info from backend using the new token
+    try {
+      final response = await BackendService.getWithToken(
+        '/api/auth/session',
+        accessToken,
+      ) as Map<String, dynamic>;
+      final userMap = response['user'] as Map<String, dynamic>?;
+      if (userMap == null) return false;
+
+      final expiresAt = expiresIn != null
+          ? (DateTime.now().millisecondsSinceEpoch ~/ 1000) + expiresIn
+          : null;
+      _session = AuthSession(
+        accessToken: accessToken,
+        refreshToken: refreshToken,
+        expiresAt: expiresAt,
+        tokenType: 'bearer',
+        user: AuthUser.fromMap(userMap),
+      );
+      await AuthStorage.save(_session);
+      notifyListeners();
+      return true;
+    } catch (_) {
+      return false;
+    }
+  }
+
   bool _applySessionResponse(Map<String, dynamic> response) {
     final sessionMap = response['session'] as Map<String, dynamic>?;
     if (sessionMap == null) {

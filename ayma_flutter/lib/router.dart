@@ -5,6 +5,7 @@ import 'package:go_router/go_router.dart';
 import 'providers/providers.dart';
 import 'screens/auth/auth_screen.dart';
 import 'screens/chat/chat_screen.dart';
+import 'screens/insights/insights_screen.dart';
 import 'screens/matches/matches_screen.dart';
 import 'screens/notifications/notifications_screen.dart';
 import 'screens/onboarding/onboarding_screen.dart';
@@ -55,6 +56,7 @@ final routerProvider = Provider<GoRouter>((ref) {
           GoRoute(path: '/chat',          builder: (_, __) => const ChatScreen()),
           GoRoute(path: '/matches',       builder: (_, __) => const MatchesScreen()),
           GoRoute(path: '/profile',       builder: (_, __) => const ProfileScreen()),
+          GoRoute(path: '/insights',      builder: (_, __) => const InsightsScreen()),
           GoRoute(path: '/notifications', builder: (_, __) => const NotificationsScreen()),
           GoRoute(path: '/settings',      builder: (_, __) => const SettingsScreen()),
         ],

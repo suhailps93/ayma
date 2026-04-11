@@ -94,6 +94,9 @@ async def personality(state: AgentState) -> AgentState:
             f"## What you know about this person (private — never share directly)\n{profile_private}"
         )
 
+    if state.get("wiki_context"):
+        sections.append(f"## Detailed knowledge about this person\n{state['wiki_context']}")
+
     if state.get("mem0_facts"):
         sections.append(f"## Facts about this person\n{state['mem0_facts']}")
 

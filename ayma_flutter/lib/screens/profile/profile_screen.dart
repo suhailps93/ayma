@@ -1,6 +1,8 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_animate/flutter_animate.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:go_router/go_router.dart';
+import 'package:image_picker/image_picker.dart';
 
 import '../../models/profile.dart';
 import '../../providers/providers.dart';
@@ -19,8 +21,10 @@ class ProfileScreen extends ConsumerStatefulWidget {
 class _ProfileScreenState extends ConsumerState<ProfileScreen> {
   bool _editing      = false;
   bool _saving       = false;
+  bool _uploadingPhoto = false;
   final _bioCtrl     = TextEditingController();
   final _notesCtrl   = TextEditingController();
+  final ImagePicker _imagePicker = ImagePicker();
 
   void _startEdit(UserProfile profile) {
     _bioCtrl.text   = profile.profilePublic  ?? '';
@@ -44,6 +48,39 @@ class _ProfileScreenState extends ConsumerState<ProfileScreen> {
       }
     }
     if (mounted) setState(() => _saving = false);
+  }
+
+  Future<void> _pickAndUploadPhoto() async {
+    if (_uploadingPhoto) return;
+
+    final picked = await _imagePicker.pickImage(
+      source: ImageSource.gallery,
+      imageQuality: 88,
+      maxWidth: 1800,
+    );
+    if (picked == null) return;
+
+    setState(() => _uploadingPhoto = true);
+    try {
+      final bytes = await picked.readAsBytes();
+      await BackendService.uploadFileBytes(
+        '/api/media/upload',
+        bytes,
+        filename: picked.name,
+      );
+      ref.invalidate(insightsProvider);
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Photo uploaded. Ayma is processing it now.')),
+      );
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Photo upload failed: $e')),
+      );
+    } finally {
+      if (mounted) setState(() => _uploadingPhoto = false);
+    }
   }
 
   @override
@@ -84,17 +121,39 @@ class _ProfileScreenState extends ConsumerState<ProfileScreen> {
           },
         ),
       ),
+      floatingActionButton: _editing
+          ? null
+          : FloatingActionButton.extended(
+              onPressed: _uploadingPhoto ? null : _pickAndUploadPhoto,
+              backgroundColor: AymaColors.gold,
+              foregroundColor: Colors.black,
+              icon: _uploadingPhoto
+                  ? const SizedBox(
+                      width: 16,
+                      height: 16,
+                      child: CircularProgressIndicator(strokeWidth: 2, color: Colors.black),
+                    )
+                  : const Icon(Icons.add_photo_alternate_outlined),
+              label: Text(_uploadingPhoto ? 'Uploading...' : 'Add Photo'),
+            ),
     );
   }
 }
 
-class _ReadView extends StatelessWidget {
+class _ReadView extends ConsumerWidget {
   final UserProfile profile;
   final VoidCallback onEdit;
   const _ReadView({required this.profile, required this.onEdit});
 
   @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context, WidgetRef ref) {
+    final insightsAsync = ref.watch(insightsProvider);
+    // Extract a one-line preview from the about_me wiki page
+    final aboutMe = insightsAsync.valueOrNull?['about_me'] ?? '';
+    final preview = aboutMe.trim().isEmpty
+        ? null
+        : aboutMe.trim().split('\n').first.trim();
+
     return ListView(
       padding: const EdgeInsets.all(20),
       children: [
@@ -209,6 +268,14 @@ class _ReadView extends StatelessWidget {
             child: _PrefsView(prefs: profile.matchingPrefs),
           ).animate(delay: 300.ms).fadeIn(duration: 400.ms).slideY(begin: 0.05, end: 0),
         ],
+
+        const SizedBox(height: 16),
+        _YourStoryCard(preview: preview)
+            .animate(delay: 360.ms)
+            .fadeIn(duration: 400.ms)
+            .slideY(begin: 0.05, end: 0),
+
+        const SizedBox(height: 8),
       ],
     );
   }
@@ -347,4 +414,111 @@ class _Chip extends StatelessWidget {
     ),
     child: Text(label, style: TextStyle(color: AymaColors.textSecondary, fontSize: 12)),
   );
+}
+
+// ── Your Story card ────────────────────────────────────────────────────────────
+
+class _YourStoryCard extends StatelessWidget {
+  final String? preview;
+  const _YourStoryCard({this.preview});
+
+  @override
+  Widget build(BuildContext context) {
+    return GestureDetector(
+      onTap: () => context.go('/insights'),
+      child: Container(
+        padding: const EdgeInsets.all(16),
+        decoration: BoxDecoration(
+          color: AymaColors.card,
+          borderRadius: BorderRadius.circular(16),
+          border: Border.all(color: AymaColors.gold.withValues(alpha: 0.25)),
+          boxShadow: [
+            BoxShadow(
+              color: AymaColors.gold.withValues(alpha: 0.04),
+              blurRadius: 16,
+              spreadRadius: 0,
+            ),
+          ],
+        ),
+        child: Row(
+          children: [
+            Container(
+              width: 40,
+              height: 40,
+              decoration: BoxDecoration(
+                color: AymaColors.gold.withValues(alpha: 0.1),
+                borderRadius: BorderRadius.circular(10),
+                border: Border.all(
+                  color: AymaColors.gold.withValues(alpha: 0.3),
+                  width: 0.5,
+                ),
+              ),
+              child: const Icon(
+                Icons.auto_stories_rounded,
+                size: 18,
+                color: AymaColors.gold,
+              ),
+            ),
+            const SizedBox(width: 14),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Row(
+                    children: [
+                      Text(
+                        'YOUR STORY',
+                        style: TextStyle(
+                          color: AymaColors.gold,
+                          fontSize: 11,
+                          fontWeight: FontWeight.w700,
+                          letterSpacing: 1.5,
+                        ),
+                      ),
+                      const SizedBox(width: 6),
+                      Container(
+                        padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 1),
+                        decoration: BoxDecoration(
+                          color: AymaColors.gold.withValues(alpha: 0.1),
+                          borderRadius: BorderRadius.circular(3),
+                        ),
+                        child: Text(
+                          'AI',
+                          style: TextStyle(
+                            color: AymaColors.gold.withValues(alpha: 0.7),
+                            fontSize: 8,
+                            fontWeight: FontWeight.w700,
+                            letterSpacing: 1,
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 3),
+                  Text(
+                    preview ?? 'What Ayma has learned about you',
+                    style: TextStyle(
+                      color: preview != null
+                          ? AymaColors.textSecondary
+                          : AymaColors.textTertiary,
+                      fontSize: 12,
+                      height: 1.4,
+                    ),
+                    maxLines: 2,
+                    overflow: TextOverflow.ellipsis,
+                  ),
+                ],
+              ),
+            ),
+            const SizedBox(width: 8),
+            Icon(
+              Icons.arrow_forward_ios_rounded,
+              size: 12,
+              color: AymaColors.gold.withValues(alpha: 0.5),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
 }

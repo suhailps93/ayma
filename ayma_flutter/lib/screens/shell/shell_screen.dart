@@ -50,6 +50,14 @@ class ShellScreen extends ConsumerWidget {
                     onTap: () => context.go(tab.path),
                     child: AnimatedContainer(
                       duration: const Duration(milliseconds: 200),
+                      decoration: BoxDecoration(
+                        border: Border(
+                          top: BorderSide(
+                            color: active ? AymaColors.gold : Colors.transparent,
+                            width: 1.5,
+                          ),
+                        ),
+                      ),
                       child: Column(
                         mainAxisAlignment: MainAxisAlignment.center,
                         children: [
@@ -60,7 +68,7 @@ class ShellScreen extends ConsumerWidget {
                                 tab.icon,
                                 size: 22,
                                 color: active
-                                    ? AymaColors.accent
+                                    ? AymaColors.gold
                                     : AymaColors.textTertiary,
                               ),
                               if (isNotif && unread > 0)
@@ -71,14 +79,14 @@ class ShellScreen extends ConsumerWidget {
                                     width: 14,
                                     height: 14,
                                     decoration: BoxDecoration(
-                                      color: AymaColors.accent,
+                                      color: AymaColors.gold,
                                       shape: BoxShape.circle,
                                     ),
                                     child: Center(
                                       child: Text(
                                         unread > 9 ? '9+' : '$unread',
                                         style: const TextStyle(
-                                            color: Colors.white,
+                                            color: Colors.black,
                                             fontSize: 8,
                                             fontWeight: FontWeight.bold),
                                       ),
@@ -93,11 +101,12 @@ class ShellScreen extends ConsumerWidget {
                             style: TextStyle(
                               fontSize: 10,
                               color: active
-                                  ? AymaColors.accent
+                                  ? AymaColors.gold
                                   : AymaColors.textTertiary,
                               fontWeight: active
                                   ? FontWeight.w600
                                   : FontWeight.w400,
+                              letterSpacing: active ? 0.8 : 0,
                             ),
                           ),
                         ],
