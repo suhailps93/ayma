@@ -74,6 +74,10 @@ class AymaAudioService extends ChangeNotifier {
   bool _audioInitialized = false;
   Future<void>? _audioInitFuture;
   Future<void>? _connectFuture;
+  String? _lastWsUrl;
+  Timer? _reconnectTimer;
+  bool _manualDisconnect = false;
+  int _reconnectAttempts = 0;
   final BytesBuilder _pendingMicAudio = BytesBuilder(copy: false);
   final BytesBuilder _debugOutputAudio = BytesBuilder(copy: false);
   Timer? _micFlushTimer;
@@ -111,14 +115,19 @@ class AymaAudioService extends ChangeNotifier {
   // ── Connect ─────────────────────────────────────────────────────────────────
 
   Future<void> connect(String wsUrl) async {
+    _lastWsUrl = wsUrl;
+    _manualDisconnect = false;
+    _reconnectTimer?.cancel();
+    _reconnectTimer = null;
     if (_connectFuture != null) {
       await _connectFuture;
       return;
     }
 
-    _connectFuture = _connect(wsUrl);
+    _connectFuture = _connect(wsUrl, preserveTranscript: true);
     try {
       await _connectFuture;
+      _reconnectAttempts = 0;
     } catch (e, st) {
       debugPrint('[ws] connect failed: $e\n$st');
       _handleConnectionFailure();
@@ -127,10 +136,11 @@ class AymaAudioService extends ChangeNotifier {
     }
   }
 
-  Future<void> _connect(String wsUrl) async {
+  Future<void> _connect(String wsUrl, {required bool preserveTranscript}) async {
     if (_state != SessionState.disconnected) {
-      debugPrint('[ws] connect requested while state=$_state, disconnecting current session first');
-      disconnect();
+      debugPrint('[ws] connect requested while state=$_state, closing current transport first');
+      _closeTransport();
+      _setState(SessionState.disconnected);
     }
 
     _firstContentSent = false;
@@ -140,7 +150,10 @@ class AymaAudioService extends ChangeNotifier {
     _turnOutputAudio.clear();
     _debugAudioDumpWritten = false;
     _setState(SessionState.connecting);
-    _transcript.clear();
+    if (!preserveTranscript) {
+      _transcript.clear();
+      _textHistory.clear();
+    }
 
     var token = AuthStorage.accessToken;
     if (token == null || token.isEmpty) {
@@ -196,6 +209,21 @@ class AymaAudioService extends ChangeNotifier {
 
   void disconnect({bool notify = true}) {
     debugPrint('[ws] disconnect() state=$_state notify=$notify');
+    _manualDisconnect = true;
+    _reconnectTimer?.cancel();
+    _reconnectTimer = null;
+    _closeTransport();
+    _pendingAgentText = '';
+    _pendingUserText = '';
+    _clearPendingMicAudio();
+    _state = SessionState.disconnected;
+    _outputVolume = 0;
+    if (notify) {
+      notifyListeners();
+    }
+  }
+
+  void _closeTransport() {
     _wsSub?.cancel();
     _wsSub = null;
     _channel?.sink.close();
@@ -214,67 +242,41 @@ class AymaAudioService extends ChangeNotifier {
       _playerStarted = false;
       _turnOutputAudio.clear();
     }
+  }
 
-    _pendingAgentText = '';
-    _pendingUserText = '';
-    _clearPendingMicAudio();
-    _transcript.clear();
-    _textHistory.clear();
-    _state = SessionState.disconnected;
-    _outputVolume = 0;
-    if (notify) {
-      notifyListeners();
+  void _scheduleReconnect() {
+    if (_manualDisconnect || _lastWsUrl == null || _connectFuture != null) return;
+    if (_reconnectAttempts >= 5) {
+      debugPrint('[ws] reconnect limit reached');
+      return;
     }
+    _reconnectAttempts += 1;
+    final delay = Duration(milliseconds: 800 * _reconnectAttempts);
+    debugPrint('[ws] scheduling reconnect attempt=$_reconnectAttempts delay=${delay.inMilliseconds}ms');
+    _reconnectTimer?.cancel();
+    _reconnectTimer = Timer(delay, () {
+      final wsUrl = _lastWsUrl;
+      if (wsUrl == null || _manualDisconnect) return;
+      unawaited(connect(wsUrl));
+    });
   }
 
   void _handleRemoteDisconnect() {
     debugPrint('[ws] remote disconnect state=$_state');
-    _wsSub?.cancel();
-    _wsSub = null;
-    _channel = null;
-
-    if (kIsWeb) {
-      _webMic.stop();
-      _webPlayer.stop();
-    } else {
-      if (_recorder.isRecording) {
-        _recorder.stopRecorder();
-      }
-      if (!_player.isStopped) {
-        _player.stopPlayer();
-      }
-      _playerStarted = false;
-      _turnOutputAudio.clear();
-    }
-
+    _closeTransport();
     _pendingAgentText = '';
     _pendingUserText = '';
     _clearPendingMicAudio();
     _setState(SessionState.disconnected);
+    _scheduleReconnect();
   }
 
   void _handleConnectionFailure() {
     debugPrint('[ws] connection failure state=$_state');
-    _wsSub?.cancel();
-    _wsSub = null;
-    _channel = null;
-
-    if (kIsWeb) {
-      _webMic.stop();
-      _webPlayer.stop();
-    } else {
-      if (_recorder.isRecording) {
-        _recorder.stopRecorder();
-      }
-      if (!_player.isStopped) {
-        _player.stopPlayer();
-      }
-      _playerStarted = false;
-      _turnOutputAudio.clear();
-    }
-
+    _closeTransport();
     _clearPendingMicAudio();
     _setState(SessionState.disconnected);
+    _scheduleReconnect();
   }
 
   // ── WebSocket messages ───────────────────────────────────────────────────────
@@ -754,6 +756,7 @@ class AymaAudioService extends ChangeNotifier {
 
   @override
   void dispose() {
+    _reconnectTimer?.cancel();
     disconnect(notify: false);
     if (!kIsWeb) {
       if (_audioInitialized) {
