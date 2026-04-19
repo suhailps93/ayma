@@ -23,9 +23,9 @@ class AymaColors {
   static const fgMute = Color(0xFF7E7669); // oklch(0.52 0.008 70)
 
   // Accent — warm amber (oklch 0.72 0.11 45)
-  static const accent     = Color(0xFFC48312);
-  static const accentSoft = Color(0x2EC48312); // ~18% alpha
-  static const accentFaint= Color(0x14C48312); // ~8% alpha
+  static const accent      = Color(0xFFF1C45A); // Sunlight Golden
+  static const accentSoft  = Color(0x2EF1C45A); // ~18% alpha
+  static const accentFaint = Color(0x14F1C45A); // ~8% alpha
 
   // Legacy aliases (keep existing code compiling)
   static const surface   = bgElev;
@@ -39,9 +39,10 @@ class AymaColors {
 
   static const gold        = accent;
   static const goldBright  = Color(0xFFD49A2A);
+  static const goldSun     = Color(0xFFF1C45A); // Warm sunlight gold
   static const goldDim     = Color(0xFF7A5C0A);
-  static const goldGlow    = Color(0x22C48312);
-  static const goldGlowMid = Color(0x44C48312);
+  static const goldGlow    = Color(0x22F1C45A);
+  static const goldGlowMid = Color(0x44F1C45A);
   static const accentDark  = goldDim;
   static const accentGlow  = goldGlow;
 
@@ -100,7 +101,7 @@ class AymaFonts {
     FontWeight weight = FontWeight.w400,
     double? letterSpacing,
   }) =>
-      GoogleFonts.inter(
+      GoogleFonts.instrumentSans(
         fontSize: size,
         color: color,
         fontWeight: weight,
@@ -113,7 +114,7 @@ class AymaFonts {
     FontWeight weight = FontWeight.w400,
     double? letterSpacing,
   }) =>
-      GoogleFonts.inter(
+      GoogleFonts.instrumentSans(
         fontSize: size,
         color: color,
         fontWeight: weight,

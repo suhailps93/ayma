@@ -129,10 +129,6 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
     ];
     _textCtrl.clear();
 
-    if (_audioService.state == SessionState.disconnected) {
-      await _autoConnect();
-      await Future.delayed(const Duration(milliseconds: 600));
-    }
     await _audioService.sendText(message, attachments: attachments);
     if (mounted && ready.isNotEmpty) {
       setState(() => _drafts.removeWhere((d) => d.remoteUrl != null));
@@ -263,6 +259,8 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
         ref.watch(audioServiceProvider.select((a) => a.inputVolume));
     final outputVol =
         ref.watch(audioServiceProvider.select((a) => a.outputVolume));
+    final userTalking =
+        ref.watch(audioServiceProvider.select((a) => a.userTalking));
     final transcript = _audioService.transcript;
 
     if (transcriptN != _lastTranscriptCount) {
@@ -300,6 +298,7 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
               focusNode: _focusNode,
               inputVolume: inputVol,
               outputVolume: outputVol,
+              userTalking: userTalking,
               hasAttachment: _drafts.isNotEmpty,
               drafts: _drafts,
               onMicTap: _toggleVoice,
@@ -466,6 +465,7 @@ class _InputBar extends StatefulWidget {
   final double outputVolume;
   final bool hasAttachment;
   final List<_DraftAttachment> drafts;
+  final bool userTalking;
   final VoidCallback onMicTap;
   final Future<void> Function() onSend;
   final VoidCallback onAttach;
@@ -478,6 +478,7 @@ class _InputBar extends StatefulWidget {
     required this.focusNode,
     required this.inputVolume,
     required this.outputVolume,
+    required this.userTalking,
     required this.hasAttachment,
     required this.drafts,
     required this.onMicTap,
@@ -510,9 +511,9 @@ class _InputBarState extends State<_InputBar>
   void initState() {
     super.initState();
     _glowCtrl = AnimationController(
-        vsync: this, duration: const Duration(milliseconds: 1600))
-      ..repeat(reverse: true);
-    _glow = CurvedAnimation(parent: _glowCtrl, curve: Curves.easeInOut);
+        vsync: this, duration: const Duration(milliseconds: 1200))
+      ..repeat();
+    _glow = CurvedAnimation(parent: _glowCtrl, curve: Curves.linear);
   }
 
   @override
@@ -522,8 +523,7 @@ class _InputBarState extends State<_InputBar>
   }
 
   bool get _aymaActive =>
-      widget.state == SessionState.speaking ||
-      widget.state == SessionState.listening;
+      widget.state == SessionState.speaking || widget.userTalking;
   bool get _voiceActive =>
       widget.state == SessionState.listening ||
       widget.state == SessionState.speaking ||
@@ -532,7 +532,9 @@ class _InputBarState extends State<_InputBar>
   bool get _hasText => widget.textCtrl.text.trim().isNotEmpty;
   bool get _canSend => _hasText || widget.hasAttachment;
 
-  double get _volume => _aymaActive ? widget.outputVolume : widget.inputVolume;
+  double get _volume => widget.state == SessionState.speaking
+      ? widget.outputVolume
+      : widget.inputVolume;
 
   @override
   Widget build(BuildContext context) {
@@ -603,11 +605,10 @@ class _InputBarState extends State<_InputBar>
                                           : TextField(
                                               controller: widget.textCtrl,
                                               focusNode: widget.focusNode,
-                                              style: const TextStyle(
+                                              style: AymaFonts.elegantSans(
+                                                size: 14.5,
                                                 color: AymaColors.fg,
-                                                fontSize: 13.5,
-                                                height: 1.1,
-                                              ),
+                                              ).copyWith(height: 1.1),
                                               cursorColor: AymaColors.accent,
                                               minLines: 1,
                                               maxLines: 4,
@@ -626,9 +627,10 @@ class _InputBarState extends State<_InputBar>
                                                 hintText: _voiceActive
                                                     ? 'Listening...'
                                                     : 'Speak or type to Ayma',
-                                                hintStyle: TextStyle(
+                                                hintStyle: AymaFonts.elegantSans(
+                                                  size: 14.5,
                                                   color: AymaColors.fgMute,
-                                                  fontSize: 13.5,
+                                                ).copyWith(
                                                   fontStyle: _voiceActive
                                                       ? FontStyle.italic
                                                       : FontStyle.normal,
@@ -779,78 +781,41 @@ class _DockActionCircle extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final ringColor = send
-        ? const Color(0xFFE2B24C)
+        ? AymaColors.accent
         : live
-            ? const Color(0xFFFFC24B)
+            ? AymaColors.accent
             : active
-                ? AymaColors.accent.withValues(alpha: 0.5)
-                : AymaColors.lineSoft.withValues(alpha: 0.9);
-    final iconColor = send
-        ? const Color(0xFFFFF0C8)
-        : live
-            ? const Color(0xFF1A1208)
-            : active
-                ? AymaColors.accent
-                : AymaColors.fgDim;
+                ? AymaColors.accent.withValues(alpha: 0.65)
+                : AymaColors.lineSoft.withValues(alpha: 0.85);
+
+    final iconColor = live
+        ? const Color(0xFF1A1208)
+        : active
+            ? AymaColors.accent
+            : AymaColors.fgDim;
 
     final outerSize = live ? 42.0 : 36.0;
-    final innerSize = live ? 29.0 : 24.0;
     final iconSize = live ? 18.0 : 15.0;
 
     return GestureDetector(
       onTap: onTap,
       child: AnimatedContainer(
-        duration: const Duration(milliseconds: 240),
+        duration: const Duration(milliseconds: 200),
         width: outerSize,
         height: outerSize,
         decoration: BoxDecoration(
           shape: BoxShape.circle,
-          gradient: LinearGradient(
-            begin: Alignment.topLeft,
-            end: Alignment.bottomRight,
-            colors: send
-                ? const [Color(0xFF805113), Color(0xFFF0C96F)]
-                : live
-                    ? const [Color(0xFF2A1F10), Color(0xFF1A1208)]
-                    : const [Color(0xFF1E1813), Color(0xFF0E0B09)],
-          ),
+          color: live
+              ? AymaColors.accent
+              : active
+                  ? AymaColors.accent.withValues(alpha: 0.15)
+                  : AymaColors.bg,
           border: Border.all(
             color: ringColor,
-            width: live ? 1.4 : 0.95,
-          ),
-          boxShadow: active
-              ? [
-                  BoxShadow(
-                    color: AymaColors.accent.withValues(alpha: live ? 0.35 : 0.2),
-                    blurRadius: live ? 14 : 8,
-                    spreadRadius: live ? 1 : 0,
-                  ),
-                ]
-              : null,
-        ),
-        child: Center(
-          child: Container(
-            width: innerSize,
-            height: innerSize,
-            decoration: BoxDecoration(
-              shape: BoxShape.circle,
-              color: live
-                  ? AymaColors.accent.withValues(alpha: 0.15)
-                  : active
-                      ? AymaColors.accent.withValues(alpha: 0.08)
-                      : Colors.black.withValues(alpha: send ? 0.08 : 0.18),
-              border: Border.all(
-                color: send
-                    ? const Color(0xFFFFE3A4).withValues(alpha: 0.5)
-                    : live
-                        ? AymaColors.accent.withValues(alpha: 0.4)
-                        : AymaColors.lineSoft.withValues(alpha: 0.45),
-                width: 0.8,
-              ),
-            ),
-            child: Icon(icon, size: iconSize, color: iconColor),
+            width: live ? 1.2 : 0.85,
           ),
         ),
+        child: Icon(icon, size: iconSize, color: iconColor),
       ),
     );
   }
@@ -872,32 +837,16 @@ class _PillAttachButton extends StatelessWidget {
           alignment: Alignment.center,
           decoration: BoxDecoration(
             shape: BoxShape.circle,
-            gradient: const LinearGradient(
-              begin: Alignment.topLeft,
-              end: Alignment.bottomRight,
-              colors: [Color(0xFF1A1510), Color(0xFF110D0A)],
-            ),
+            color: AymaColors.bg,
             border: Border.all(
-              color: AymaColors.lineSoft.withValues(alpha: 0.92),
-              width: 0.7,
+              color: AymaColors.lineSoft.withValues(alpha: 0.9),
+              width: 0.8,
             ),
           ),
-          child: Container(
-            width: 26,
-            height: 26,
-            alignment: Alignment.center,
-            decoration: BoxDecoration(
-              shape: BoxShape.circle,
-              border: Border.all(
-                color: AymaColors.accent.withValues(alpha: 0.16),
-                width: 0.7,
-              ),
-            ),
-            child: const Icon(
-              Icons.attach_file_rounded,
-              size: 18,
-              color: AymaColors.fgMute,
-            ),
+          child: const Icon(
+            Icons.attach_file_rounded,
+            size: 18,
+            color: AymaColors.fgMute,
           ),
         ),
       );
@@ -922,7 +871,15 @@ class _ComposerOutlinePainter extends CustomPainter {
   @override
   void paint(Canvas canvas, Size size) {
     final level = volume.clamp(0.0, 1.0);
-    final baseAmp = active ? (5.0 + level * 8.0) : 0.0;
+    // Only show waves if active (speaking/listening) AND there's actual volume
+    final bool isTalking = active && level > 0.005;
+
+    // Base amplitude increases with volume
+    final baseAmp = isTalking ? (4.0 + level * 10.0) : 0.0;
+    // Frequency increases with volume to make waves look more "energetic"
+    final freqMod = 1.0 + level * 0.45;
+    // Speed increases with volume
+    final speedMod = 1.0 + level * 0.6;
 
     final goldShader = const LinearGradient(
       begin: Alignment.centerLeft,
@@ -937,35 +894,40 @@ class _ComposerOutlinePainter extends CustomPainter {
     ).createShader(Offset.zero & size);
 
     void drawWave(double amp, double phaseShift, double freq, double detailFreq,
-        double opacity) {
+        [double opacity = 1.0]) {
       final path = _buildBorderPath(
         size,
         amplitude: amp,
-        phaseShift: phaseShift,
-        frequency: freq,
-        detailFrequency: detailFreq,
+        // Phase flows forward, sped up by speedMod
+        phaseShift: (phase * speedMod) + phaseShift,
+        frequency: freq * freqMod,
+        detailFrequency: detailFreq * freqMod,
       );
-      canvas.drawPath(
-        path,
-        Paint()
-          ..shader = goldShader
-          ..style = PaintingStyle.stroke
-          ..strokeWidth = 1.0
-          ..strokeCap = StrokeCap.round
-          ..strokeJoin = StrokeJoin.round
-          ..colorFilter =
-              ColorFilter.mode(Colors.black.withValues(alpha: 1.0 - opacity), BlendMode.dstIn),
-      );
+      final paint = Paint()
+        ..shader = goldShader
+        ..style = PaintingStyle.stroke
+        ..strokeWidth = 1.0
+        ..strokeCap = StrokeCap.round
+        ..strokeJoin = StrokeJoin.round;
+
+      if (opacity < 1.0) {
+        paint.colorFilter = ColorFilter.mode(
+          Colors.white.withValues(alpha: opacity),
+          BlendMode.modulate,
+        );
+      }
+
+      canvas.drawPath(path, paint);
     }
 
-    if (active) {
-      // Background waves (more subtle)
-      drawWave(baseAmp * 0.6, 0.4, 1.4, 2.8, 0.3);
-      drawWave(baseAmp * 0.8, -0.3, 2.6, 4.5, 0.5);
+    if (isTalking) {
+      // Background waves (more subtle, slower phase shifts)
+      drawWave(baseAmp * 0.55, 0.35, 1.3, 2.6, 0.28);
+      drawWave(baseAmp * 0.75, -0.25, 2.4, 4.2, 0.45);
     }
 
-    // Primary wave
-    drawWave(baseAmp, 0.0, 1.95, 3.7, 1.0);
+    // Primary wave (becomes the static pill border when amp is 0)
+    drawWave(baseAmp, 0.0, 1.85, 3.4, 1.0);
   }
 
   // Traces the full pill border with a wave across the top edge (y≈0).

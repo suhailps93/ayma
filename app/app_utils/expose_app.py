@@ -803,9 +803,19 @@ async def live_turn_update(
     token = _extract_bearer_token(authorization)
     user_id = _get_current_user_id_from_token(token)
     logger.info("[live] received client-side turn update user_id=%s messages=%s", user_id, len(payload.messages))
+    
+    # Map roles for run_post_turn_updates compatibility
+    mapped_messages = []
+    for msg in payload.messages:
+        role = "human" if msg["role"] == "human" else "ai"
+        # The node actually expects 'human' and 'ai' as seen in memorize.py
+        # and run_local_handlers, so no mapping needed IF we use human/ai.
+        # However, let's ensure it's safe.
+        mapped_messages.append({"role": role, "content": msg["content"]})
+
     # background task for memory/wiki updates
     from app.graph.nodes.memorize import run_post_turn_updates
-    asyncio.create_task(run_post_turn_updates(user_id, payload.messages))
+    asyncio.create_task(run_post_turn_updates(user_id, mapped_messages))
     return {"status": "ok"}
 
 

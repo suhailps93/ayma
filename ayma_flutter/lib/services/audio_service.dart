@@ -79,6 +79,10 @@ class AymaAudioService extends ChangeNotifier {
   double get inputVolume => _inputVolume;
   double get outputVolume => _outputVolume;
 
+  bool _userTalking = false;
+  bool get userTalking => _userTalking;
+  Timer? _userTalkingDebounce;
+
   bool _muted = false;
   bool _speakerMuted = false;
   bool get muted => _muted;
@@ -383,25 +387,50 @@ class AymaAudioService extends ChangeNotifier {
   void _onMessage(dynamic raw) {
     // Optimization: Skip decoding for constant resumption updates to reduce GC pressure
     if (raw is List<int>) {
-      // "sessionResumptionUpdate" starts at index 5-10 in most messages
-      final str = String.fromCharCodes(raw.sublist(0, math.min(raw.length, 100)));
-      if (str.contains('sessionResumptionUpdate') || str.contains('"status":')) {
-        return;
+      if (raw.length > 50) {
+        // Search for key signatures in raw bytes without full string allocation
+        // "sessionResumptionUpdate" contains "sessionR"
+        // "status" contains "status"
+        bool isNoisy = false;
+        final len = math.min(raw.length, 100);
+        for (int i = 0; i < len - 8; i++) {
+          if (raw[i] == 115 && // s
+              raw[i + 1] == 101 && // e
+              raw[i + 2] == 115 && // s
+              raw[i + 3] == 115 && // s
+              raw[i + 4] == 105 && // i
+              raw[i + 5] == 111 && // o
+              raw[i + 6] == 110) { // n
+            isNoisy = true;
+            break;
+          }
+          if (raw[i] == 115 && // s
+              raw[i + 1] == 116 && // t
+              raw[i + 2] == 97 && // a
+              raw[i + 3] == 116 && // t
+              raw[i + 4] == 117 && // u
+              raw[i + 5] == 115) { // s
+            isNoisy = true;
+            break;
+          }
+        }
+        if (isNoisy) return;
       }
     }
 
     final String decoded;
     if (raw is String) {
       decoded = raw;
-      if (decoded.contains('sessionResumptionUpdate') ||
-          decoded.contains('"status":')) {
-        return;
-      }
     } else if (raw is List<int>) {
       decoded = utf8.decode(raw);
     } else if (raw is Uint8List) {
       decoded = utf8.decode(raw);
     } else {
+      return;
+    }
+
+    if (decoded.contains('sessionResumptionUpdate') ||
+        decoded.contains('"status":')) {
       return;
     }
 
@@ -430,7 +459,7 @@ class AymaAudioService extends ChangeNotifier {
         } else {
           _stopStreamPlayer();
         }
-        _flushPendingAgentText();
+        _pendingAgentText = ''; // Clear pending text as it was interrupted
         _setState(SessionState.listening);
         return;
       }
@@ -601,7 +630,18 @@ class AymaAudioService extends ChangeNotifier {
         audioSource: AudioSource.voice_communication,
       );
       _recorder.onProgress?.listen((e) {
-        _inputVolume = ((e.decibels ?? -60) + 60) / 60;
+        final vol = ((e.decibels ?? -60) + 60) / 60;
+        _inputVolume = vol;
+
+        // Lightweight VAD: volume threshold + debounce
+        if (vol > 0.15) {
+          _userTalking = true;
+          _userTalkingDebounce?.cancel();
+          _userTalkingDebounce = Timer(const Duration(milliseconds: 300), () {
+            _userTalking = false;
+            notifyListeners();
+          });
+        }
         notifyListeners();
       });
     }
@@ -750,7 +790,7 @@ class AymaAudioService extends ChangeNotifier {
     } else {
       // If sink isn't ready, wait a tiny bit and retry once.
       // This can happen during the very first chunk while startPlayerFromStream is async.
-      Future.delayed(const Duration(milliseconds: 10), () {
+      Future.delayed(const Duration(milliseconds: 25), () {
         _player.uint8ListSink?.add(data);
       });
     }
@@ -838,10 +878,12 @@ class AymaAudioService extends ChangeNotifier {
     } catch (e) {
       debugPrint('[text-chat] error: $e');
     } finally {
-      if (liveSessionActive) {
-        _setState(SessionState.listening);
-      } else {
+      if (!liveSessionActive) {
         _setState(SessionState.disconnected);
+      } else {
+        // If live was active, just notify to refresh UI but don't force a state change
+        // that might restart the recorder if we were in a different state.
+        notifyListeners();
       }
     }
   }
