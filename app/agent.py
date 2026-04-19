@@ -276,7 +276,37 @@ async def _build_instruction(context: ReadonlyContext) -> str:
             if age_min and age_max:
                 user_context_lines.append(f"Preferred age range: {age_min}–{age_max}")
 
-        sections = [system_skills]
+        # Session timestamp + recency
+        try:
+            _auth_result = supabase.auth.admin.get_user_by_id(user_id)
+            last_sign_in = getattr(_auth_result.user, "last_sign_in_at", None)
+            now_utc = datetime.now(ZoneInfo("UTC"))
+            session_lines = [f"Current date and time: {now_utc.strftime('%A, %d %B %Y %H:%M UTC')}"]
+            if last_sign_in:
+                if isinstance(last_sign_in, str):
+                    last_sign_in = datetime.fromisoformat(last_sign_in.replace("Z", "+00:00"))
+                delta = now_utc - last_sign_in.replace(tzinfo=ZoneInfo("UTC")) if last_sign_in.tzinfo is None else now_utc - last_sign_in
+                days = delta.days
+                hours = delta.seconds // 3600
+                if days == 0 and hours == 0:
+                    recency = "just now (first session or returning within the hour)"
+                elif days == 0:
+                    recency = f"{hours} hour{'s' if hours != 1 else ''} ago"
+                elif days == 1:
+                    recency = "yesterday"
+                elif days < 7:
+                    recency = f"{days} days ago"
+                elif days < 30:
+                    recency = f"{days // 7} week{'s' if days // 7 != 1 else ''} ago"
+                else:
+                    recency = f"{days // 30} month{'s' if days // 30 != 1 else ''} ago"
+                session_lines.append(f"User's last session: {recency}")
+            sections = [system_skills]
+            sections.append("## Session context\n" + "\n".join(session_lines))
+        except Exception as _e:
+            logger.warning(f"[instruction] session context failed: {_e}")
+            sections = [system_skills]
+
         if user_skills:
             sections.append(f"## Additional Instructions\n{user_skills}")
         if user_context_lines:

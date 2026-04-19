@@ -27,10 +27,15 @@ logger = logging.getLogger(__name__)
 
 EMBEDDING_DIMS = 768
 
-CAPTION_PROMPT = (
-    "Describe this person in their dating profile photo. "
+IMAGE_CAPTION_PROMPT = (
+    "Describe this person in their dating profile media. "
     "Focus on: overall vibe, style, setting, expression, energy. "
     "2-3 sentences. Be warm and specific."
+)
+
+VIDEO_CAPTION_PROMPT = (
+    "Describe this dating profile video. Focus on what the person is like, their energy, setting, style, and what the clip communicates about them. "
+    "2-4 sentences. Be warm and specific."
 )
 
 
@@ -45,8 +50,8 @@ def _clients():
 
 def _guess_mime(path: str) -> str:
     ext = path.rsplit(".", 1)[-1].lower()
-    mime = {"jpg": "image/jpeg", "jpeg": "image/jpeg", "png": "image/png"}.get(
-        ext, "image/jpeg"
+    mime = {"jpg": "image/jpeg", "jpeg": "image/jpeg", "png": "image/png", "mp4": "video/mp4", "mov": "video/quicktime"}.get(
+        ext, "application/octet-stream"
     )
     return mime
 
@@ -65,15 +70,16 @@ def _load_media_bytes(media_uri: str) -> tuple[bytes, str]:
     return data, _guess_mime(path.name)
 
 
-async def _caption(image_bytes: bytes, mime_type: str) -> str:
+async def _caption(media_bytes: bytes, mime_type: str) -> str:
     client = create_genai_client()
+    prompt = VIDEO_CAPTION_PROMPT if mime_type.startswith("video/") else IMAGE_CAPTION_PROMPT
     response = await client.aio.models.generate_content(
         model=FAST_MODEL,
         contents=types.Content(
             role="user",
             parts=[
-                types.Part.from_bytes(data=image_bytes, mime_type=mime_type),
-                types.Part.from_text(CAPTION_PROMPT),
+                types.Part.from_bytes(data=media_bytes, mime_type=mime_type),
+                types.Part.from_text(prompt),
             ],
         ),
     )
@@ -98,34 +104,40 @@ def _embed(
     return result.embeddings[0].values
 
 
-def _update_media_wiki(user_id: str, photo_url: str, caption: str) -> None:
+def _update_media_wiki(user_id: str, media_url: str, caption: str, media_type: str) -> None:
     current = read_wiki_page(user_id, "media.md")
     date = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-    entry = f"- [{date}]({photo_url})\n  {caption}"
+    label = "Photo" if media_type == "image" else "Video"
+    entry = f"- [{date}] {label}: {media_url}\n  {caption}"
     updated = (
-        f"{current.strip()}\n\n{entry}" if current.strip() else f"# Photos\n\n{entry}"
+        f"{current.strip()}\n\n{entry}" if current.strip() else f"# Media\n\n{entry}"
     )
     write_wiki_page(user_id, "media.md", updated)
 
 
 async def handle_media_process(user_id: str, photo_url: str) -> dict:
-    """Caption → embed → store → update wiki. Returns caption and embedding dims."""
+    """Caption → optional embed → store → update wiki. Returns caption and embedding dims."""
     gc, supabase = _clients()
 
-    image_bytes, mime_type = _load_media_bytes(photo_url)
-    caption = await _caption(image_bytes, mime_type)
+    media_bytes, mime_type = _load_media_bytes(photo_url)
+    media_type = "video" if mime_type.startswith("video/") else "image"
+    caption = await _caption(media_bytes, mime_type)
     logger.info(f"[media] {user_id}: {caption[:80]}")
 
-    embedding = _embed(gc, image_bytes, mime_type, caption)
-    vec_str = "[" + ",".join(str(v) for v in embedding) + "]"
+    embedding: list[float] = []
+    vec_str = None
+    if media_type == "image":
+        embedding = _embed(gc, media_bytes, mime_type, caption)
+        vec_str = "[" + ",".join(str(v) for v in embedding) + "]"
 
     supabase.table("user_media").insert({
         "user_id": user_id,
         "photo_url": photo_url,
         "caption": caption,
         "embedding": vec_str,
+        "media_type": media_type,
     }).execute()
 
-    _update_media_wiki(user_id, photo_url, caption)
+    _update_media_wiki(user_id, photo_url, caption, media_type)
 
-    return {"caption": caption, "dims": len(embedding)}
+    return {"caption": caption, "dims": len(embedding), "media_type": media_type}

@@ -80,7 +80,14 @@ async def _update_page(
         current=current or "(empty — write the first entry based on the conversation above)",
     )
     result = await llm.ainvoke([HumanMessage(content=filled)])
-    updated = result.content.strip()
+    raw = result.content
+    # LangChain may return a list of content blocks (Gemini) — extract text
+    if isinstance(raw, list):
+        raw = " ".join(
+            block.get("text", "") if isinstance(block, dict) else str(block)
+            for block in raw
+        )
+    updated = str(raw).strip()
     if updated:
         write_wiki_page(user_id, page, updated)
 

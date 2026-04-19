@@ -12,6 +12,7 @@ class UserProfile {
   final String? locationRegion;
   final String communityProfile;
   final bool onboardingComplete;
+  final bool matchingPaused;
 
   const UserProfile({
     required this.id,
@@ -27,6 +28,7 @@ class UserProfile {
     this.locationRegion,
     required this.communityProfile,
     required this.onboardingComplete,
+    required this.matchingPaused,
   });
 
   factory UserProfile.fromMap(Map<String, dynamic> m) => UserProfile(
@@ -43,6 +45,7 @@ class UserProfile {
     locationRegion:       m['location_region'] as String?,
     communityProfile:     (m['community_profile'] as String?) ?? 'dating_standard',
     onboardingComplete:   (m['onboarding_complete'] as bool?) ?? false,
+    matchingPaused:       (m['matching_paused'] as bool?) ?? false,
   );
 
   UserProfile copyWith({
@@ -57,6 +60,7 @@ class UserProfile {
     String? gender,
     String? locationRegion,
     bool? onboardingComplete,
+    bool? matchingPaused,
   }) => UserProfile(
     id:                   id,
     displayName:          displayName ?? this.displayName,
@@ -71,5 +75,6 @@ class UserProfile {
     locationRegion:       locationRegion ?? this.locationRegion,
     communityProfile:     communityProfile,
     onboardingComplete:   onboardingComplete ?? this.onboardingComplete,
+    matchingPaused:       matchingPaused ?? this.matchingPaused,
   );
 }

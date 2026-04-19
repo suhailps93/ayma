@@ -3,17 +3,37 @@ import 'package:flutter_animate/flutter_animate.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../providers/providers.dart';
+import '../../services/backend_service.dart';
 import '../../theme.dart';
 
 // ── Insights screen ────────────────────────────────────────────────────────────
 // Shows all four wiki pages that Ayma maintains about the user.
 // Mobile: single-column cards. Tablet/wide: 2-column grid.
 
-class InsightsScreen extends ConsumerWidget {
+class InsightsScreen extends ConsumerStatefulWidget {
   const InsightsScreen({super.key});
 
   @override
-  Widget build(BuildContext context, WidgetRef ref) {
+  ConsumerState<InsightsScreen> createState() => _InsightsScreenState();
+}
+
+class _InsightsScreenState extends ConsumerState<InsightsScreen> {
+  bool _refreshing = false;
+
+  Future<void> _refresh() async {
+    if (_refreshing) return;
+    setState(() => _refreshing = true);
+    try {
+      await BackendService.post('/api/insights/refresh', {});
+    } catch (_) {
+      // Endpoint may not exist; fall through to invalidate anyway
+    }
+    ref.invalidate(insightsProvider);
+    if (mounted) setState(() => _refreshing = false);
+  }
+
+  @override
+  Widget build(BuildContext context) {
     final async = ref.watch(insightsProvider);
 
     return Scaffold(
@@ -22,7 +42,7 @@ class InsightsScreen extends ConsumerWidget {
         child: async.when(
           loading: () => const _LoadingView(),
           error: (e, _) => _ErrorView(message: e.toString()),
-          data: (data) => _InsightsView(data: data),
+          data: (data) => _InsightsView(data: data, onRefresh: _refresh, refreshing: _refreshing),
         ),
       ),
     );
@@ -33,7 +53,9 @@ class InsightsScreen extends ConsumerWidget {
 
 class _InsightsView extends StatelessWidget {
   final Map<String, String> data;
-  const _InsightsView({required this.data});
+  final VoidCallback onRefresh;
+  final bool refreshing;
+  const _InsightsView({required this.data, required this.onRefresh, required this.refreshing});
 
   static const _pages = [
     _PageDef(
@@ -72,7 +94,7 @@ class _InsightsView extends StatelessWidget {
 
     return CustomScrollView(
       slivers: [
-        SliverToBoxAdapter(child: _Header()),
+        SliverToBoxAdapter(child: _Header(onRefresh: onRefresh, refreshing: refreshing)),
         if (isWide)
           SliverPadding(
             padding: const EdgeInsets.fromLTRB(20, 0, 20, 32),
@@ -118,6 +140,10 @@ class _InsightsView extends StatelessWidget {
 // ── Header ─────────────────────────────────────────────────────────────────────
 
 class _Header extends StatelessWidget {
+  final VoidCallback onRefresh;
+  final bool refreshing;
+  const _Header({required this.onRefresh, required this.refreshing});
+
   @override
   Widget build(BuildContext context) {
     return Padding(
@@ -129,27 +155,30 @@ class _Header extends StatelessWidget {
             children: [
               Text(
                 'YOUR STORY',
-                style: Theme.of(context).textTheme.headlineSmall?.copyWith(
-                  color: AymaColors.gold,
-                  letterSpacing: 3,
-                  fontSize: 16,
-                ),
-              )
-                  .animate()
-                  .fadeIn(duration: 400.ms)
-                  .slideX(begin: -0.05, end: 0),
+                style: AymaFonts.serif(size: 36, color: AymaColors.fg),
+              ).animate().fadeIn(duration: 400.ms),
               const Spacer(),
+              // Refresh button
+              GestureDetector(
+                onTap: refreshing ? null : onRefresh,
+                child: AnimatedRotation(
+                  turns: refreshing ? 1 : 0,
+                  duration: const Duration(milliseconds: 600),
+                  child: Icon(
+                    Icons.refresh_rounded,
+                    size: 20,
+                    color: refreshing ? AymaColors.accent : AymaColors.fgMute,
+                  ),
+                ),
+              ),
+              const SizedBox(width: 12),
               _LiveBadge(),
             ],
           ),
           const SizedBox(height: 6),
           Text(
             'What Ayma has learned about you — updated after every conversation.',
-            style: TextStyle(
-              color: AymaColors.textTertiary,
-              fontSize: 12,
-              height: 1.5,
-            ),
+            style: TextStyle(color: AymaColors.fgMute, fontSize: 12, height: 1.5),
           ).animate(delay: 100.ms).fadeIn(duration: 400.ms),
         ],
       ),

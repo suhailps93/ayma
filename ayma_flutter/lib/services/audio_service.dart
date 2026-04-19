@@ -6,41 +6,67 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter_sound/flutter_sound.dart';
 import 'package:logger/logger.dart' show Level;
 import 'package:permission_handler/permission_handler.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import 'package:uuid/uuid.dart';
 import 'package:web_socket_channel/web_socket_channel.dart';
 
 import 'auth_storage.dart';
 import 'backend_service.dart';
 import '../env.dart';
-import 'audio_dump_stub.dart'
-    if (dart.library.io) 'audio_dump_io.dart';
-import 'web_audio_stub.dart'
-    if (dart.library.html) 'web_audio_impl.dart';
+import 'audio_dump_stub.dart' if (dart.library.io) 'audio_dump_io.dart';
+import 'web_audio_stub.dart' if (dart.library.html) 'web_audio_impl.dart';
 
 // ignore_for_file: deprecated_member_use
 
-enum SessionState { disconnected, connecting, ready, listening, thinking, speaking }
+enum SessionState {
+  disconnected,
+  connecting,
+  ready,
+  listening,
+  thinking,
+  speaking
+}
 
 class TranscriptLine {
   final String text;
   final bool isUser;
   final DateTime time;
-  TranscriptLine(this.text, {required this.isUser}) : time = DateTime.now();
+  TranscriptLine(
+    this.text, {
+    required this.isUser,
+    DateTime? time,
+  }) : time = time ?? DateTime.now();
+
+  Map<String, dynamic> toMap() => {
+        'text': text,
+        'is_user': isUser,
+        'time': time.toIso8601String(),
+      };
+
+  static TranscriptLine fromMap(Map<String, dynamic> map) {
+    final parsedTime = DateTime.tryParse(map['time'] as String? ?? '');
+    return TranscriptLine(
+      (map['text'] as String? ?? '').trim(),
+      isUser: (map['is_user'] as bool?) ?? false,
+      time: parsedTime,
+    );
+  }
 }
 
 class AymaAudioService extends ChangeNotifier {
+  static const _transcriptStorageKey = 'ayma.chat.transcript';
+
   WebSocketChannel? _channel;
 
   // Mobile audio (flutter_sound) — skipped on web
   final _recorder = FlutterSoundRecorder(logLevel: Level.nothing);
-  final _player   = FlutterSoundPlayer(logLevel: Level.nothing);
-  bool  _playerStarted  = false;
-  final BytesBuilder _turnOutputAudio = BytesBuilder(copy: false);
+  final _player = FlutterSoundPlayer(logLevel: Level.nothing);
+  bool _playerStreaming = false;
   int _playerSampleRate = 24000;
   int _playerChannels = 1;
 
   // Web audio (dart:html Web Audio API) — skipped on mobile
-  final _webMic    = WebMicCapture();
+  final _webMic = WebMicCapture();
   final _webPlayer = WebPcmPlayer();
 
   StreamSubscription? _wsSub;
@@ -48,14 +74,14 @@ class AymaAudioService extends ChangeNotifier {
   SessionState _state = SessionState.disconnected;
   SessionState get state => _state;
 
-  double _inputVolume  = 0;
+  double _inputVolume = 0;
   double _outputVolume = 0;
-  double get inputVolume  => _inputVolume;
+  double get inputVolume => _inputVolume;
   double get outputVolume => _outputVolume;
 
-  bool _muted        = false;
+  bool _muted = false;
   bool _speakerMuted = false;
-  bool get muted        => _muted;
+  bool get muted => _muted;
   bool get speakerMuted => _speakerMuted;
 
   final List<TranscriptLine> _transcript = [];
@@ -70,7 +96,7 @@ class AymaAudioService extends ChangeNotifier {
   String _pendingAgentText = '';
   String _pendingUserText = '';
 
-  bool   _firstContentSent = false;
+  bool _firstContentSent = false;
   bool _audioInitialized = false;
   Future<void>? _audioInitFuture;
   Future<void>? _connectFuture;
@@ -84,11 +110,46 @@ class AymaAudioService extends ChangeNotifier {
   static const _micFlushInterval = Duration(milliseconds: 120);
   static const _debugDumpTargetBytes = 24 * 2 * 2000;
   bool _debugAudioDumpWritten = false;
+  bool _restoredTranscript = false;
+
+  AymaAudioService() {
+    unawaited(_restoreTranscript());
+  }
 
   // ── Init ────────────────────────────────────────────────────────────────────
 
   Future<void> init() async {
+    await _restoreTranscript();
     await _ensureAudioInitialized();
+  }
+
+  Future<void> _restoreTranscript() async {
+    if (_restoredTranscript) return;
+    _restoredTranscript = true;
+
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final raw = prefs.getString(_transcriptStorageKey);
+      if (raw == null || raw.isEmpty) return;
+      final decoded = jsonDecode(raw) as List<dynamic>;
+      _transcript
+        ..clear()
+        ..addAll(decoded
+            .whereType<Map<String, dynamic>>()
+            .map(TranscriptLine.fromMap)
+            .where((line) => line.text.isNotEmpty));
+      notifyListeners();
+    } catch (_) {}
+  }
+
+  Future<void> _persistTranscript() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setString(
+        _transcriptStorageKey,
+        jsonEncode(_transcript.map((line) => line.toMap()).toList()),
+      );
+    } catch (_) {}
   }
 
   Future<void> _ensureAudioInitialized() async {
@@ -136,9 +197,11 @@ class AymaAudioService extends ChangeNotifier {
     }
   }
 
-  Future<void> _connect(String wsUrl, {required bool preserveTranscript}) async {
+  Future<void> _connect(String wsUrl,
+      {required bool preserveTranscript}) async {
     if (_state != SessionState.disconnected) {
-      debugPrint('[ws] connect requested while state=$_state, closing current transport first');
+      debugPrint(
+          '[ws] connect requested while state=$_state, closing current transport first');
       _closeTransport();
       _setState(SessionState.disconnected);
     }
@@ -147,7 +210,7 @@ class AymaAudioService extends ChangeNotifier {
     _pendingAgentText = '';
     _pendingUserText = '';
     _debugOutputAudio.clear();
-    _turnOutputAudio.clear();
+
     _debugAudioDumpWritten = false;
     _setState(SessionState.connecting);
     if (!preserveTranscript) {
@@ -236,23 +299,22 @@ class AymaAudioService extends ChangeNotifier {
       if (_recorder.isRecording) {
         _recorder.stopRecorder();
       }
-      if (!_player.isStopped) {
-        _player.stopPlayer();
-      }
-      _playerStarted = false;
-      _turnOutputAudio.clear();
+      _stopStreamPlayer();
     }
   }
 
   void _scheduleReconnect() {
-    if (_manualDisconnect || _lastWsUrl == null || _connectFuture != null) return;
+    if (_manualDisconnect || _lastWsUrl == null || _connectFuture != null) {
+      return;
+    }
     if (_reconnectAttempts >= 5) {
       debugPrint('[ws] reconnect limit reached');
       return;
     }
     _reconnectAttempts += 1;
     final delay = Duration(milliseconds: 800 * _reconnectAttempts);
-    debugPrint('[ws] scheduling reconnect attempt=$_reconnectAttempts delay=${delay.inMilliseconds}ms');
+    debugPrint(
+        '[ws] scheduling reconnect attempt=$_reconnectAttempts delay=${delay.inMilliseconds}ms');
     _reconnectTimer?.cancel();
     _reconnectTimer = Timer(delay, () {
       final wsUrl = _lastWsUrl;
@@ -283,8 +345,11 @@ class AymaAudioService extends ChangeNotifier {
 
   void _onMessage(dynamic raw) {
     final Map<String, dynamic> msg;
-    try { msg = jsonDecode(raw as String) as Map<String, dynamic>; }
-    catch (_) { return; }
+    try {
+      msg = jsonDecode(raw as String) as Map<String, dynamic>;
+    } catch (_) {
+      return;
+    }
 
     if (msg.containsKey('setupComplete')) {
       debugPrint('[ws] setupComplete');
@@ -296,30 +361,31 @@ class AymaAudioService extends ChangeNotifier {
     if (msg.containsKey('status')) return;
 
     final sc = msg['serverContent'] as Map<String, dynamic>?;
-    final interrupted = (sc?['interrupted'] as bool?) ?? (msg['interrupted'] as bool?) ?? false;
+    final interrupted =
+        (sc?['interrupted'] as bool?) ?? (msg['interrupted'] as bool?) ?? false;
     if (interrupted) {
-      debugPrint('[ws] interrupted');
-      if (kIsWeb) { _webPlayer.stop(); }
-      else        { _player.stopPlayer(); _playerStarted = false; _turnOutputAudio.clear(); }
+      debugPrint('[ws] interrupted — stopping playback for barge-in');
+      if (kIsWeb) {
+        _webPlayer.stop();
+      } else {
+        _stopStreamPlayer();
+      }
       _flushPendingAgentText();
       _setState(SessionState.listening);
       return;
     }
 
-    final turnComplete =
-        (sc?['turnComplete'] as bool?) ??
+    final turnComplete = (sc?['turnComplete'] as bool?) ??
         (sc?['turn_complete'] as bool?) ??
         (msg['turnComplete'] as bool?) ??
         (msg['turn_complete'] as bool?) ??
         false;
 
-    final outTx =
-        (sc?['outputTranscription'] as Map<String, dynamic>?) ??
+    final outTx = (sc?['outputTranscription'] as Map<String, dynamic>?) ??
         (sc?['output_transcription'] as Map<String, dynamic>?) ??
         (msg['output_transcription'] as Map<String, dynamic>?) ??
         (msg['outputTranscription'] as Map<String, dynamic>?);
-    final inTx =
-        (sc?['inputTranscription'] as Map<String, dynamic>?) ??
+    final inTx = (sc?['inputTranscription'] as Map<String, dynamic>?) ??
         (sc?['input_transcription'] as Map<String, dynamic>?) ??
         (msg['input_transcription'] as Map<String, dynamic>?) ??
         (msg['inputTranscription'] as Map<String, dynamic>?);
@@ -339,12 +405,10 @@ class AymaAudioService extends ChangeNotifier {
       final parts = content['parts'] as List<dynamic>? ?? [];
       for (final part in parts) {
         final p = part as Map<String, dynamic>;
-        final inline =
-            (p['inlineData'] as Map<String, dynamic>?) ??
+        final inline = (p['inlineData'] as Map<String, dynamic>?) ??
             (p['inline_data'] as Map<String, dynamic>?);
         if (inline != null) {
-          final mime =
-              (inline['mimeType'] as String?) ??
+          final mime = (inline['mimeType'] as String?) ??
               (inline['mime_type'] as String?) ??
               '';
           final data = inline['data'] as String?;
@@ -357,7 +421,10 @@ class AymaAudioService extends ChangeNotifier {
 
         final text = p['text'] as String?;
         final isThought = (p['thought'] as bool?) ?? false;
-        if (text != null && text.trim().isNotEmpty && !hasOutputTranscription && !isThought) {
+        if (text != null &&
+            text.trim().isNotEmpty &&
+            !hasOutputTranscription &&
+            !isThought) {
           _setPendingAgentText(text);
         }
       }
@@ -387,7 +454,10 @@ class AymaAudioService extends ChangeNotifier {
       if (kIsWeb) {
         _setState(SessionState.listening);
       } else {
-        unawaited(_playBufferedTurnAudio());
+        // Audio already streaming — switch to listening so mic stays live.
+        // The stream player keeps draining remaining audio in the background.
+        _outputVolume = 0;
+        _setState(SessionState.listening);
       }
     }
   }
@@ -399,7 +469,8 @@ class AymaAudioService extends ChangeNotifier {
       _pendingAgentText = normalized;
       return;
     }
-    if (_pendingAgentText == normalized || _pendingAgentText.endsWith(normalized)) {
+    if (_pendingAgentText == normalized ||
+        _pendingAgentText.endsWith(normalized)) {
       return;
     }
     if (normalized.startsWith(_pendingAgentText)) {
@@ -435,7 +506,8 @@ class AymaAudioService extends ChangeNotifier {
     debugPrint('[audio] start recorder');
     if (kIsWeb) {
       await _webMic.start((pcm16) {
-        _inputVolume = 0.5; // web doesn't give dB; use flat value while speaking
+        _inputVolume =
+            0.5; // web doesn't give dB; use flat value while speaking
         _sendAudio(pcm16);
         notifyListeners();
       });
@@ -466,7 +538,9 @@ class AymaAudioService extends ChangeNotifier {
 
   void _bufferAudio(Uint8List pcm) {
     if (_channel == null || _state == SessionState.disconnected) return;
-    if (_muted || _state == SessionState.speaking) return;
+    if (_muted) return;
+    // Keep sending mic even while speaking — Gemini Live's server-side VAD
+    // detects user speech and sends an `interrupted` event to stop playback.
 
     _pendingMicAudio.add(pcm);
     _micFlushTimer ??= Timer(_micFlushInterval, _flushBufferedAudio);
@@ -480,7 +554,7 @@ class AymaAudioService extends ChangeNotifier {
       _clearPendingMicAudio();
       return;
     }
-    if (_muted || _state == SessionState.speaking) {
+    if (_muted) {
       _clearPendingMicAudio();
       return;
     }
@@ -513,8 +587,10 @@ class AymaAudioService extends ChangeNotifier {
   }
 
   ({int sampleRate, int channels}) _parsePcmConfig(String mimeType) {
-    final rateMatch = RegExp(r'rate=(\d+)', caseSensitive: false).firstMatch(mimeType);
-    final channelsMatch = RegExp(r'channels=(\d+)', caseSensitive: false).firstMatch(mimeType);
+    final rateMatch =
+        RegExp(r'rate=(\d+)', caseSensitive: false).firstMatch(mimeType);
+    final channelsMatch =
+        RegExp(r'channels=(\d+)', caseSensitive: false).firstMatch(mimeType);
     final sampleRate = int.tryParse(rateMatch?.group(1) ?? '') ?? 24000;
     final channels = int.tryParse(channelsMatch?.group(1) ?? '') ?? 1;
     return (sampleRate: sampleRate, channels: channels);
@@ -573,46 +649,44 @@ class AymaAudioService extends ChangeNotifier {
       _outputVolume = _pcmRms(data);
       _webPlayer.play(data);
     } else {
-      if (_playerStarted &&
-          (_playerSampleRate != pcmConfig.sampleRate ||
-              _playerChannels != pcmConfig.channels)) {
-        _restartPlayer();
-      }
-      _playerSampleRate = pcmConfig.sampleRate;
-      _playerChannels = pcmConfig.channels;
       _outputVolume = _pcmRms(data);
-      _turnOutputAudio.add(data);
+      if (!_playerStreaming ||
+          _playerSampleRate != pcmConfig.sampleRate ||
+          _playerChannels != pcmConfig.channels) {
+        // Config changed or not yet streaming — (re)start stream player
+        _stopStreamPlayer();
+        _playerSampleRate = pcmConfig.sampleRate;
+        _playerChannels = pcmConfig.channels;
+        _startStreamPlayer();
+      }
+      // Feed PCM chunk directly — plays immediately without waiting for turnComplete
+      _player.uint8ListSink?.add(data);
     }
   }
 
-  Future<void> _playBufferedTurnAudio() async {
-    if (_speakerMuted || _turnOutputAudio.length == 0) {
-      _turnOutputAudio.clear();
-      _setState(SessionState.listening);
-      return;
-    }
-
-    final buffered = _turnOutputAudio.takeBytes();
+  Future<void> _startStreamPlayer() async {
+    if (_playerStreaming) return;
+    _playerStreaming = true;
     try {
-      if (!_player.isStopped) {
-        await _player.stopPlayer();
-      }
-      _playerStarted = false;
-
-      await _player.startPlayer(
-        fromDataBuffer: buffered,
+      await _player.startPlayerFromStream(
         codec: Codec.pcm16,
+        interleaved: false,
         sampleRate: _playerSampleRate,
         numChannels: _playerChannels,
-        whenFinished: () {
-          _outputVolume = 0;
-          _setState(SessionState.listening);
-        },
+        bufferSize: 8192,
       );
-    } catch (e, st) {
-      debugPrint('[player] buffered turn playback error: $e\n$st');
-      _setState(SessionState.listening);
+    } catch (e) {
+      debugPrint('[player] stream start error: $e');
+      _playerStreaming = false;
     }
+  }
+
+  void _stopStreamPlayer() {
+    if (!_playerStreaming && _player.isStopped) return;
+    try {
+      _player.stopPlayer();
+    } catch (_) {}
+    _playerStreaming = false;
   }
 
   // ── Send helpers ─────────────────────────────────────────────────────────────
@@ -620,9 +694,8 @@ class AymaAudioService extends ChangeNotifier {
   void _sendAudio(Uint8List pcm) {
     if (_channel == null || _state == SessionState.disconnected) return;
     if (_muted) return;
-    // Don't send mic audio while agent is speaking — avoids echo feedback loop
-    // and reduces unnecessary bandwidth while output is playing
-    if (_state == SessionState.speaking) return;
+    // Always send mic — Gemini Live's server-side VAD handles barge-in
+    // and sends `interrupted` when user speech is detected
     final b64 = base64Encode(pcm);
     final Map<String, dynamic> payload;
     if (!_firstContentSent) {
@@ -633,7 +706,9 @@ class AymaAudioService extends ChangeNotifier {
         },
       };
     } else {
-      payload = {'blob': {'mimeType': 'audio/pcm;rate=16000', 'data': b64}};
+      payload = {
+        'blob': {'mimeType': 'audio/pcm;rate=16000', 'data': b64}
+      };
     }
     _channel!.sink.add(jsonEncode(payload));
   }
@@ -711,8 +786,11 @@ class AymaAudioService extends ChangeNotifier {
   void toggleSpeaker() {
     _speakerMuted = !_speakerMuted;
     if (_speakerMuted) {
-      if (kIsWeb) { _webPlayer.stop(); }
-      else        { _player.stopPlayer(); _playerStarted = false; _turnOutputAudio.clear(); }
+      if (kIsWeb) {
+        _webPlayer.stop();
+      } else {
+        _stopStreamPlayer();
+      }
     }
     notifyListeners();
   }
@@ -743,15 +821,8 @@ class AymaAudioService extends ChangeNotifier {
     }
 
     _transcript.add(TranscriptLine(normalized, isUser: isUser));
+    unawaited(_persistTranscript());
     notifyListeners();
-  }
-
-  void _restartPlayer() {
-    try {
-      _player.stopPlayer();
-    } catch (_) {}
-    _playerStarted = false;
-    _turnOutputAudio.clear();
   }
 
   @override

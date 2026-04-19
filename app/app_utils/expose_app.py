@@ -16,6 +16,7 @@ import asyncio
 import json
 import logging
 import os
+import shutil
 import uuid
 from collections.abc import Callable
 from contextlib import suppress
@@ -491,6 +492,14 @@ class ProfileUpdatePayload(BaseModel):
     profile_private: str
 
 
+class MatchingPausePayload(BaseModel):
+    paused: bool
+
+
+class SuggestionActionPayload(BaseModel):
+    action: Literal["accept", "dismiss"]
+
+
 class LoginPayload(BaseModel):
     email: str
     password: str
@@ -621,6 +630,46 @@ async def _nominatim_get(path: str, params: dict[str, Any]) -> Any:
         )
         response.raise_for_status()
         return response.json()
+
+
+def _cleanup_local_tree(root: Path, user_id: str) -> None:
+    path = root / user_id
+    if path.exists():
+        shutil.rmtree(path, ignore_errors=True)
+
+
+def _cleanup_bucket_prefix(bucket_name: str, user_id: str) -> None:
+    if not bucket_name:
+        return
+    try:
+        client = storage.Client()
+        bucket = client.bucket(bucket_name)
+        for blob in bucket.list_blobs(prefix=f"{user_id}/"):
+            blob.delete()
+    except Exception:
+        pass
+
+
+def _cleanup_user_artifacts(user_id: str) -> None:
+    try:
+        from app.wiki import _local_wiki_root  # type: ignore
+        _cleanup_local_tree(_local_wiki_root(), user_id)
+    except Exception:
+        pass
+    try:
+        _cleanup_local_tree(_local_media_root(), user_id)
+    except Exception:
+        pass
+    _cleanup_bucket_prefix(os.environ.get("WIKI_BUCKET_NAME", "").strip(), user_id)
+    _cleanup_bucket_prefix(_media_bucket_name(), user_id)
+    try:
+        from mem0 import MemoryClient
+        mem0 = MemoryClient(api_key=os.environ["MEM0_API_KEY"])
+        delete_all = getattr(mem0, "delete_all", None)
+        if callable(delete_all):
+            delete_all(user_id=user_id)
+    except Exception:
+        pass
 
 
 @app.post("/api/auth/login")
@@ -779,7 +828,7 @@ def get_onboarding_status(authorization: str | None = Header(default=None)) -> d
 
 
 @app.post("/api/onboarding")
-def save_onboarding(
+async def save_onboarding(
     payload: OnboardingPayload,
     authorization: str | None = Header(default=None),
 ) -> dict[str, str]:
@@ -796,6 +845,7 @@ def save_onboarding(
             "onboarding_complete": True,
         }
     ).execute()
+    await _schedule_match_generation(user_id)
     return {"status": "ok"}
 
 
@@ -808,7 +858,7 @@ def get_profile(authorization: str | None = Header(default=None)) -> dict[str, A
         .select(
             "id, display_name, profile_public, profile_private, "
             "profile_public_locked, agent_name, voice_preference, matching_prefs, "
-            "age, gender, location_region, community_profile, onboarding_complete"
+            "age, gender, location_region, community_profile, onboarding_complete, matching_paused"
         )
         .eq("id", user_id)
         .single()
@@ -818,7 +868,7 @@ def get_profile(authorization: str | None = Header(default=None)) -> dict[str, A
 
 
 @app.post("/api/profile")
-def update_profile(
+async def update_profile(
     payload: ProfileUpdatePayload,
     authorization: str | None = Header(default=None),
 ) -> dict[str, str]:
@@ -831,6 +881,129 @@ def update_profile(
             "profile_public_locked": True,
         }
     ).eq("id", user_id).execute()
+    await _schedule_match_generation(user_id)
+    return {"status": "ok"}
+
+
+@app.post("/api/settings/pause-matching")
+async def set_pause_matching(
+    payload: MatchingPausePayload,
+    authorization: str | None = Header(default=None),
+) -> dict[str, Any]:
+    user_id = _get_current_user_id(authorization)
+    _get_supabase().table("user_profiles").update({"matching_paused": payload.paused}).eq("id", user_id).execute()
+    return {"status": "ok", "matching_paused": payload.paused}
+
+
+@app.get("/api/notifications")
+def get_notifications(authorization: str | None = Header(default=None)) -> list[dict[str, Any]]:
+    user_id = _get_current_user_id(authorization)
+    result = (
+        _get_supabase().table("notifications")
+        .select("id, type, title, body, read, created_at, meta")
+        .eq("user_id", user_id)
+        .order("created_at", desc=True)
+        .limit(100)
+        .execute()
+    )
+    return result.data or []
+
+
+@app.post("/api/notifications/{notification_id}/read")
+def mark_notification_read(notification_id: str, authorization: str | None = Header(default=None)) -> dict[str, str]:
+    user_id = _get_current_user_id(authorization)
+    _get_supabase().table("notifications").update({"read": True}).eq("id", notification_id).eq("user_id", user_id).execute()
+    return {"status": "ok"}
+
+
+@app.post("/api/notifications/read-all")
+def mark_all_notifications_read(authorization: str | None = Header(default=None)) -> dict[str, str]:
+    user_id = _get_current_user_id(authorization)
+    _get_supabase().table("notifications").update({"read": True}).eq("user_id", user_id).eq("read", False).execute()
+    return {"status": "ok"}
+
+
+@app.get("/api/profile/suggestions")
+def get_profile_suggestions(authorization: str | None = Header(default=None)) -> list[dict[str, Any]]:
+    user_id = _get_current_user_id(authorization)
+    result = (
+        _get_supabase().table("profile_suggestions")
+        .select("id, tier, draft, status, created_at")
+        .eq("user_id", user_id)
+        .order("created_at", desc=True)
+        .limit(50)
+        .execute()
+    )
+    return result.data or []
+
+
+@app.post("/api/profile/suggestions/{suggestion_id}")
+async def apply_profile_suggestion(
+    suggestion_id: str,
+    payload: SuggestionActionPayload,
+    authorization: str | None = Header(default=None),
+) -> dict[str, str]:
+    user_id = _get_current_user_id(authorization)
+    supabase = _get_supabase()
+    result = (
+        supabase.table("profile_suggestions")
+        .select("id, tier, draft, status")
+        .eq("id", suggestion_id)
+        .eq("user_id", user_id)
+        .single()
+        .execute()
+    )
+    suggestion = result.data or {}
+    if not suggestion:
+        raise HTTPException(status_code=404, detail="Suggestion not found")
+
+    if payload.action == "accept":
+        if suggestion.get("tier") == "public":
+            supabase.table("user_profiles").update({"profile_public": suggestion.get("draft", "")}).eq("id", user_id).execute()
+        supabase.table("profile_suggestions").update({"status": "accepted"}).eq("id", suggestion_id).eq("user_id", user_id).execute()
+        await _schedule_match_generation(user_id)
+    else:
+        supabase.table("profile_suggestions").update({"status": "dismissed"}).eq("id", suggestion_id).eq("user_id", user_id).execute()
+    return {"status": "ok"}
+
+
+@app.get("/api/profile/exclusions")
+def get_profile_exclusions(authorization: str | None = Header(default=None)) -> list[dict[str, Any]]:
+    user_id = _get_current_user_id(authorization)
+    result = (
+        _get_supabase().table("profile_exclusions")
+        .select("id, topic, tier, created_at")
+        .eq("user_id", user_id)
+        .order("created_at", desc=True)
+        .execute()
+    )
+    return result.data or []
+
+
+@app.delete("/api/profile/exclusions/{exclusion_id}")
+async def delete_profile_exclusion(exclusion_id: str, authorization: str | None = Header(default=None)) -> dict[str, str]:
+    user_id = _get_current_user_id(authorization)
+    _get_supabase().table("profile_exclusions").delete().eq("id", exclusion_id).eq("user_id", user_id).execute()
+    try:
+        from app.internal.profile_update import handle_profile_update
+        await handle_profile_update(user_id)
+    except Exception:
+        pass
+    return {"status": "ok"}
+
+
+@app.delete("/api/account")
+async def delete_account(authorization: str | None = Header(default=None)) -> dict[str, str]:
+    user_id = _get_current_user_id(authorization)
+    _cleanup_user_artifacts(user_id)
+    admin_url = f"{os.environ['SUPABASE_URL']}/auth/v1/admin/users/{user_id}"
+    headers = {
+        "apikey": os.environ["SUPABASE_SERVICE_ROLE_KEY"],
+        "Authorization": f"Bearer {os.environ['SUPABASE_SERVICE_ROLE_KEY']}",
+    }
+    response = httpx.delete(admin_url, headers=headers, timeout=20.0)
+    if response.status_code >= 300:
+        raise HTTPException(status_code=500, detail=f"Delete failed: {response.text[:200]}")
     return {"status": "ok"}
 
 
@@ -920,6 +1093,33 @@ class MediaProcessPayload(BaseModel):
     photo_url: str
 
 
+class MatchGenerationPayload(BaseModel):
+    user_id: str
+
+
+async def _schedule_match_generation(user_id: str) -> None:
+    queue = os.environ.get("CLOUD_TASKS_QUEUE", "")
+    backend_url = os.environ.get("BACKEND_URL", "http://localhost:8000")
+    if queue:
+        import json as _json
+        from google.cloud import tasks_v2 as _tasks
+
+        client = _tasks.CloudTasksClient()
+        task = {
+            "http_request": {
+                "http_method": _tasks.HttpMethod.POST,
+                "url": f"{backend_url}/internal/generate-matches",
+                "headers": {"Content-Type": "application/json"},
+                "body": _json.dumps({"user_id": user_id}).encode(),
+            }
+        }
+        client.create_task(parent=queue, task=task)
+        return
+
+    from app.internal.match_generation import handle_match_generation
+    asyncio.create_task(handle_match_generation(user_id))
+
+
 @app.post("/internal/memory-write")
 async def internal_memory_write(payload: MemoryWritePayload) -> dict[str, str]:
     from app.internal.memory_write import handle_memory_write
@@ -945,6 +1145,13 @@ async def internal_wiki_update(payload: WikiUpdatePayload) -> dict[str, str]:
 async def internal_process_photo(payload: MediaProcessPayload) -> dict[str, Any]:
     from app.internal.media_process import handle_media_process
     result = await handle_media_process(payload.user_id, payload.photo_url)
+    return {"status": "ok", **result}
+
+
+@app.post("/internal/generate-matches")
+async def internal_generate_matches(payload: MatchGenerationPayload) -> dict[str, Any]:
+    from app.internal.match_generation import handle_match_generation
+    result = await handle_match_generation(payload.user_id)
     return {"status": "ok", **result}
 
 
@@ -1008,12 +1215,10 @@ async def upload_photo(
     user_id = _get_current_user_id(authorization)
     media_url = await _save_uploaded_photo(user_id, file)
     suffix = Path(file.filename or "").suffix.lower()
-    if suffix in {".jpg", ".jpeg", ".png"}:
-        body = MediaProcessPayload(user_id=user_id, photo_url=media_url)
-        result = await process_existing_photo(body, authorization)
-        return {"photo_url": media_url, "media_type": "image", **result}
-
-    return {"photo_url": media_url, "media_type": "video", "status": "uploaded"}
+    body = MediaProcessPayload(user_id=user_id, photo_url=media_url)
+    result = await process_existing_photo(body, authorization)
+    media_type = "video" if suffix in {".mp4", ".mov"} else "image"
+    return {"photo_url": media_url, "media_type": media_type, **result}
 
 
 @app.get("/api/insights")

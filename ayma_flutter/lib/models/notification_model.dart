@@ -23,4 +23,27 @@ class NotificationModel {
     id: id, type: type, title: title, body: body,
     read: read ?? this.read, createdAt: createdAt, meta: meta,
   );
+
+  factory NotificationModel.fromMap(Map<String, dynamic> m) => NotificationModel(
+    id: m['id'] as String,
+    type: notificationTypeFromWire((m['type'] as String?) ?? 'system'),
+    title: (m['title'] as String?) ?? '',
+    body: (m['body'] as String?) ?? '',
+    read: (m['read'] as bool?) ?? false,
+    createdAt: DateTime.parse(m['created_at'] as String),
+    meta: (m['meta'] as Map?)?.cast<String, dynamic>(),
+  );
+}
+
+NotificationType notificationTypeFromWire(String raw) {
+  switch (raw) {
+    case 'new_match':
+      return NotificationType.newMatch;
+    case 'agent_update':
+      return NotificationType.agentUpdate;
+    case 'profile_suggestion':
+      return NotificationType.profileSuggestion;
+    default:
+      return NotificationType.system;
+  }
 }

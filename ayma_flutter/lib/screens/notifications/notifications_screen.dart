@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_animate/flutter_animate.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:go_router/go_router.dart';
 
 import '../../models/notification_model.dart';
 import '../../providers/providers.dart';
@@ -22,32 +23,36 @@ class NotificationsScreen extends ConsumerWidget {
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             Padding(
-              padding: const EdgeInsets.fromLTRB(20, 20, 16, 0),
-              child: Row(
+              padding: const EdgeInsets.fromLTRB(24, 16, 20, 0),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  Text('Notifications',
-                      style: Theme.of(context).textTheme.headlineSmall?.copyWith(
-                          color: AymaColors.textPrimary,
-                          fontWeight: FontWeight.w600))
-                      .animate().fadeIn(duration: 400.ms),
-                  const Spacer(),
-                  if (unread > 0)
-                    TextButton(
-                      onPressed: notifier.markAllRead,
-                      child: Text('Mark all read',
-                          style: TextStyle(color: AymaColors.accent, fontSize: 13)),
-                    ),
+                  Row(
+                    children: [
+                      Text(
+                        unread > 0 ? '$unread unread' : 'Up to date',
+                        style: AymaFonts.mono(size: 10, color: AymaColors.fgMute),
+                      ).animate().fadeIn(duration: 300.ms),
+                      const Spacer(),
+                      if (unread > 0)
+                        GestureDetector(
+                          onTap: notifier.markAllRead,
+                          child: Text(
+                            'Mark all read',
+                            style: AymaFonts.mono(size: 9, color: AymaColors.accent),
+                          ),
+                        ),
+                    ],
+                  ),
+                  const SizedBox(height: 8),
+                  Text(
+                    'Signals',
+                    style: AymaFonts.serif(size: 36, color: AymaColors.fg),
+                  ).animate(delay: 60.ms).fadeIn(duration: 400.ms),
+                  const SizedBox(height: 16),
                 ],
               ),
             ),
-            const SizedBox(height: 4),
-            if (unread > 0)
-              Padding(
-                padding: const EdgeInsets.fromLTRB(20, 0, 20, 12),
-                child: Text('$unread unread',
-                    style: TextStyle(color: AymaColors.textSecondary, fontSize: 13))
-                    .animate(delay: 100.ms).fadeIn(),
-              ),
             Expanded(
               child: notifs.isEmpty
                   ? _EmptyState()
@@ -57,7 +62,10 @@ class NotificationsScreen extends ConsumerWidget {
                       itemBuilder: (_, i) => _NotifCard(
                         notif: notifs[i],
                         delay: i * 50,
-                        onTap: () => notifier.markRead(notifs[i].id),
+                        onTap: () {
+                          notifier.markRead(notifs[i].id);
+                          _navigate(context, notifs[i]);
+                        },
                       ),
                     ),
             ),
@@ -65,6 +73,19 @@ class NotificationsScreen extends ConsumerWidget {
         ),
       ),
     );
+  }
+}
+
+void _navigate(BuildContext context, NotificationModel n) {
+  switch (n.type) {
+    case NotificationType.newMatch:
+      context.go('/matches');
+    case NotificationType.agentUpdate:
+      context.go('/insights');
+    case NotificationType.profileSuggestion:
+      context.go('/profile');
+    case NotificationType.system:
+      break;
   }
 }
 
@@ -119,14 +140,15 @@ class _NotifCard extends StatelessWidget {
       child: AnimatedContainer(
         duration: const Duration(milliseconds: 300),
         margin: const EdgeInsets.only(bottom: 10),
-        padding: const EdgeInsets.all(14),
+        padding: const EdgeInsets.all(16),
         decoration: BoxDecoration(
-          color: notif.read ? AymaColors.card : AymaColors.surface,
-          borderRadius: BorderRadius.circular(14),
+          color: AymaColors.bgElev,
+          borderRadius: BorderRadius.circular(18),
           border: Border.all(
             color: notif.read
-                ? AymaColors.border
-                : AymaColors.accent.withValues(alpha: 0.2),
+                ? AymaColors.lineSoft
+                : AymaColors.accent.withValues(alpha: 0.25),
+            width: 0.5,
           ),
         ),
         child: Row(

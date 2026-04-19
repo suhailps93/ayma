@@ -1,10 +1,18 @@
 import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
-import 'package:flutter_animate/flutter_animate.dart';
 
 import '../services/audio_service.dart';
 import '../theme.dart';
+
+// Organic animated blob orb — matches the Claude Design prototype.
+//
+// State map:
+//   disconnected / ready  →  idle    (amp 0.03, slow)
+//   connecting            →  thinking (amp 0.06, 3 dots)
+//   listening             →  listening (amp 0.10)
+//   thinking              →  thinking  (amp 0.06 + dots)
+//   speaking              →  speaking  (amp 0.14, fast)
 
 class VoiceOrb extends StatefulWidget {
   final SessionState state;
@@ -19,7 +27,7 @@ class VoiceOrb extends StatefulWidget {
     this.inputVolume  = 0,
     this.outputVolume = 0,
     this.onTap,
-    this.size = 160,
+    this.size = 190,
   });
 
   @override
@@ -32,244 +40,188 @@ class _VoiceOrbState extends State<VoiceOrb> with SingleTickerProviderStateMixin
   @override
   void initState() {
     super.initState();
-    _ctrl = AnimationController(vsync: this, duration: const Duration(seconds: 4))..repeat();
+    _ctrl = AnimationController(vsync: this, duration: const Duration(seconds: 60))
+      ..repeat();
   }
 
   @override
-  void dispose() { _ctrl.dispose(); super.dispose(); }
+  void dispose() {
+    _ctrl.dispose();
+    super.dispose();
+  }
 
-  double get _activity {
+  String get _orbState {
     switch (widget.state) {
-      case SessionState.listening: return widget.inputVolume;
-      case SessionState.speaking:  return widget.outputVolume;
-      default: return 0;
+      case SessionState.listening:   return 'listening';
+      case SessionState.speaking:    return 'speaking';
+      case SessionState.thinking:    return 'thinking';
+      case SessionState.connecting:  return 'thinking';
+      default:                       return 'idle';
     }
   }
 
-  bool get _active =>
-      widget.state == SessionState.listening || widget.state == SessionState.speaking;
-
   @override
   Widget build(BuildContext context) {
-    final s = widget.size;
     return GestureDetector(
       onTap: widget.onTap,
-      child: SizedBox(
-        width: s * 1.7,
-        height: s * 1.7,
-        child: Stack(
-          alignment: Alignment.center,
-          children: [
-            // Rotating scan sweep
-            AnimatedBuilder(
-              animation: _ctrl,
-              builder: (_, __) => Transform.rotate(
-                angle: _ctrl.value * 2 * math.pi,
-                child: CustomPaint(
-                  size: Size(s * 1.55, s * 1.55),
-                  painter: _ScanRingPainter(active: _active, activity: _activity),
-                ),
-              ),
+      child: AnimatedBuilder(
+        animation: _ctrl,
+        builder: (_, __) {
+          final t = _ctrl.value * 60.0; // seconds
+          return CustomPaint(
+            size: Size(widget.size, widget.size),
+            painter: _OrbPainter(
+              t: t,
+              orbState: _orbState,
+              activity: _orbState == 'listening'
+                  ? widget.inputVolume
+                  : _orbState == 'speaking'
+                      ? widget.outputVolume
+                      : 0,
             ),
-
-            // Outer dashed ring (breathing)
-            _GoldRing(size: s * 1.25, opacity: _active ? 0.18 : 0.06, dashed: true)
-                .animate(controller: _ctrl)
-                .scale(begin: const Offset(0.97, 0.97), end: const Offset(1.03, 1.03),
-                       curve: Curves.easeInOut),
-
-            // Mid ring
-            _GoldRing(size: s * 0.95, opacity: _active ? 0.28 : 0.08)
-                .animate(controller: _ctrl)
-                .scale(begin: const Offset(0.99, 0.99), end: const Offset(1.01, 1.01),
-                       curve: Curves.easeInOut, delay: 400.ms),
-
-            // Core orb
-            AnimatedContainer(
-              duration: const Duration(milliseconds: 150),
-              width:  s * (0.62 + _activity * 0.14),
-              height: s * (0.62 + _activity * 0.14),
-              decoration: BoxDecoration(
-                shape: BoxShape.circle,
-                gradient: _active
-                    ? AymaColors.orbGradient
-                    : const RadialGradient(
-                        colors: [Color(0xFF1C1508), Color(0xFF080808)],
-                        center: Alignment(-0.3, -0.3),
-                      ),
-                boxShadow: _active
-                    ? [
-                        BoxShadow(
-                          color: AymaColors.gold.withValues(alpha: 0.35 + _activity * 0.25),
-                          blurRadius: 40 + _activity * 20,
-                          spreadRadius: 4,
-                        ),
-                        BoxShadow(
-                          color: AymaColors.goldBright.withValues(alpha: 0.12),
-                          blurRadius: 80,
-                          spreadRadius: 8,
-                        ),
-                      ]
-                    : [
-                        BoxShadow(
-                          color: AymaColors.gold.withValues(alpha: 0.07),
-                          blurRadius: 20,
-                        ),
-                      ],
-                border: Border.all(
-                  color: _active
-                      ? AymaColors.gold.withValues(alpha: 0.55)
-                      : AymaColors.goldDim.withValues(alpha: 0.2),
-                  width: 0.5,
-                ),
-              ),
-              child: _OrbIcon(state: widget.state, size: s * 0.28),
-            ),
-          ],
-        ),
+          );
+        },
       ),
     );
   }
 }
 
-class _GoldRing extends StatelessWidget {
-  final double size;
-  final double opacity;
-  final bool dashed;
-  const _GoldRing({required this.size, required this.opacity, this.dashed = false});
-
-  @override
-  Widget build(BuildContext context) => CustomPaint(
-    size: Size(size, size),
-    painter: _RingPainter(opacity: opacity, dashed: dashed),
-  );
-}
-
-class _RingPainter extends CustomPainter {
-  final double opacity;
-  final bool dashed;
-  _RingPainter({required this.opacity, required this.dashed});
-
-  @override
-  void paint(Canvas c, Size s) {
-    final center = Offset(s.width / 2, s.height / 2);
-    final r = s.width / 2;
-    final paint = Paint()
-      ..color = AymaColors.gold.withValues(alpha: opacity)
-      ..strokeWidth = dashed ? 0.8 : 0.5
-      ..style = PaintingStyle.stroke;
-    if (!dashed) { c.drawCircle(center, r, paint); return; }
-    const dashCount = 48;
-    final dashAngle = (2 * math.pi) / dashCount;
-    for (int i = 0; i < dashCount; i++) {
-      if (i % 3 == 2) continue;
-      c.drawArc(Rect.fromCircle(center: center, radius: r), i * dashAngle, dashAngle * 0.6, false, paint);
-    }
-  }
-
-  @override
-  bool shouldRepaint(_RingPainter o) => o.opacity != opacity;
-}
-
-class _ScanRingPainter extends CustomPainter {
-  final bool active;
-  final double activity;
-  _ScanRingPainter({required this.active, required this.activity});
-
-  @override
-  void paint(Canvas c, Size s) {
-    if (!active && activity < 0.01) return;
-    final center = Offset(s.width / 2, s.height / 2);
-    final r = s.width / 2 - 1;
-    final paint = Paint()
-      ..shader = SweepGradient(
-        startAngle: 0,
-        endAngle: math.pi * 0.7,
-        colors: [Colors.transparent, AymaColors.gold.withValues(alpha: active ? 0.3 : 0.08)],
-      ).createShader(Rect.fromCircle(center: center, radius: r))
-      ..strokeWidth = 0.8
-      ..style = PaintingStyle.stroke;
-    c.drawArc(Rect.fromCircle(center: center, radius: r), -math.pi / 2, math.pi * 0.7, false, paint);
-  }
-
-  @override
-  bool shouldRepaint(_ScanRingPainter o) => o.active != active;
-}
-
-class _OrbIcon extends StatelessWidget {
-  final SessionState state;
-  final double size;
-  const _OrbIcon({required this.state, required this.size});
-
-  @override
-  Widget build(BuildContext context) {
-    switch (state) {
-      case SessionState.thinking:    return _GoldSpinner(size: size);
-      case SessionState.connecting:  return _ConnectingDots(size: size);
-      case SessionState.disconnected:
-        return Icon(Icons.mic_none_rounded, color: AymaColors.goldDim, size: size);
-      case SessionState.ready:
-        return Icon(Icons.mic_rounded, color: AymaColors.gold.withValues(alpha: 0.45), size: size);
-      case SessionState.listening:
-        return Icon(Icons.mic_rounded, color: Colors.white, size: size)
-            .animate(onPlay: (c) => c.repeat(reverse: true))
-            .scaleXY(begin: 0.88, end: 1.12, duration: 600.ms, curve: Curves.easeInOut);
-      case SessionState.speaking:
-        return Icon(Icons.volume_up_rounded, color: Colors.white, size: size)
-            .animate(onPlay: (c) => c.repeat(reverse: true))
-            .scaleXY(begin: 0.9, end: 1.1, duration: 700.ms, curve: Curves.easeInOut);
-    }
-  }
-}
-
-class _GoldSpinner extends StatefulWidget {
-  final double size;
-  const _GoldSpinner({required this.size});
-  @override State<_GoldSpinner> createState() => _GoldSpinnerState();
-}
-
-class _GoldSpinnerState extends State<_GoldSpinner> with SingleTickerProviderStateMixin {
-  late AnimationController _c;
-  @override void initState() { super.initState(); _c = AnimationController(vsync: this, duration: 1000.ms)..repeat(); }
-  @override void dispose() { _c.dispose(); super.dispose(); }
-
-  @override
-  Widget build(BuildContext context) => AnimatedBuilder(
-    animation: _c,
-    builder: (_, __) => CustomPaint(size: Size(widget.size, widget.size), painter: _ArcPainter(_c.value)),
-  );
-}
-
-class _ArcPainter extends CustomPainter {
+class _OrbPainter extends CustomPainter {
   final double t;
-  _ArcPainter(this.t);
-  @override
-  void paint(Canvas c, Size s) {
-    final p = Paint()
-      ..shader = SweepGradient(colors: [Colors.transparent, AymaColors.goldBright])
-          .createShader(Rect.fromLTWH(0, 0, s.width, s.height))
-      ..strokeWidth = 2.5
-      ..style = PaintingStyle.stroke
-      ..strokeCap = StrokeCap.round;
-    c.drawArc(Rect.fromLTWH(0, 0, s.width, s.height), t * 2 * math.pi, math.pi * 1.4, false, p);
-  }
-  @override bool shouldRepaint(_ArcPainter o) => o.t != t;
-}
+  final String orbState;
+  final double activity;
 
-class _ConnectingDots extends StatelessWidget {
-  final double size;
-  const _ConnectingDots({required this.size});
+  _OrbPainter({required this.t, required this.orbState, required this.activity});
+
+  static const _pts = 64;
+
+  double get _amp {
+    switch (orbState) {
+      case 'listening': return 0.10 + activity * 0.08;
+      case 'speaking':  return 0.14 + activity * 0.06;
+      case 'thinking':  return 0.06;
+      default:          return 0.03;
+    }
+  }
+
+  double get _speed {
+    switch (orbState) {
+      case 'thinking': return 0.6;
+      case 'speaking': return 1.8;
+      default:         return 1.0;
+    }
+  }
+
   @override
-  Widget build(BuildContext context) => Row(
-    mainAxisSize: MainAxisSize.min,
-    children: List.generate(3, (i) =>
-      Container(
-        margin: const EdgeInsets.symmetric(horizontal: 2),
-        width: size * 0.20, height: size * 0.20,
-        decoration: BoxDecoration(shape: BoxShape.circle, color: AymaColors.gold.withValues(alpha: 0.6)),
-      ).animate(onPlay: (c) => c.repeat(reverse: true))
-       .fadeIn(delay: (i * 180).ms, duration: 400.ms)
-       .scaleXY(begin: 0.5, end: 1.0),
-    ),
-  );
+  void paint(Canvas canvas, Size size) {
+    final cx = size.width / 2;
+    final cy = size.height / 2;
+    final R  = size.width * 0.38;
+    final amp   = _amp;
+    final speed = _speed;
+
+    // ── Build blob path ──────────────────────────────────────────
+    final pts = List<Offset>.generate(_pts, (i) {
+      final a = (i / _pts) * math.pi * 2;
+      final n =
+          math.sin(a * 3 + t * speed)          * amp +
+          math.sin(a * 5 - t * speed * 1.3)    * amp * 0.5 +
+          math.sin(a * 2 + t * speed * 0.7)    * amp * 0.8;
+      final r = R * (1 + n);
+      return Offset(cx + math.cos(a) * r, cy + math.sin(a) * r);
+    });
+
+    // Smooth quadratic bezier path via midpoints
+    final path = Path();
+    path.moveTo((pts[0].dx + pts[1].dx) / 2, (pts[0].dy + pts[1].dy) / 2);
+    for (int i = 0; i < _pts; i++) {
+      final p0 = pts[i];
+      final p1 = pts[(i + 1) % _pts];
+      final mx = (p0.dx + p1.dx) / 2;
+      final my = (p0.dy + p1.dy) / 2;
+      path.quadraticBezierTo(p0.dx, p0.dy, mx, my);
+    }
+    path.close();
+
+    final rect = Rect.fromCenter(center: Offset(cx, cy), width: size.width, height: size.height);
+
+    // ── Outer halo rings ─────────────────────────────────────────
+    final haloPaint = Paint()
+      ..color = AymaColors.accent.withValues(alpha: 0.08)
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = 0.5;
+    canvas.drawCircle(Offset(cx, cy), R * 1.5, haloPaint);
+    haloPaint.color = AymaColors.accent.withValues(alpha: 0.12);
+    canvas.drawCircle(Offset(cx, cy), R * 1.25, haloPaint);
+
+    // Soft outer glow
+    final pulse = 1 + math.sin(t * 1.5) * 0.015;
+    final glowPaint = Paint()
+      ..color = AymaColors.accent.withValues(
+          alpha: orbState == 'idle' ? 0.04 : 0.09)
+      ..style = PaintingStyle.fill;
+    canvas.save();
+    canvas.scale(pulse, pulse);
+    canvas.translate(cx * (1 - pulse), cy * (1 - pulse));
+    canvas.drawCircle(Offset(cx, cy), R * 1.15, glowPaint);
+    canvas.restore();
+
+    // ── Main blob fill — radial gradient ─────────────────────────
+    // Approximate the design's RadialGradient from cx=50% cy=42%
+    final fillPaint = Paint()
+      ..shader = RadialGradient(
+        center: Alignment(-0.0, -0.16), // ~cy=42%
+        radius: 0.55,
+        colors: const [
+          Color(0xFFEBD5A8), // warm white highlight
+          AymaColors.accent,
+          Color(0xFF5A3A08), // oklch(0.35 0.06 40)
+          Color(0xFF2A1A04), // oklch(0.20 0.03 40)
+        ],
+        stops: const [0.0, 0.40, 0.85, 1.0],
+      ).createShader(rect)
+      ..style = PaintingStyle.fill;
+
+    canvas.drawPath(path, fillPaint);
+
+    // Highlight overlay
+    final highlightPaint = Paint()
+      ..shader = RadialGradient(
+        center: const Alignment(-0.1, -0.3), // cx=45% cy=35%
+        radius: 0.30,
+        colors: [
+          Colors.white.withValues(alpha: 0.5),
+          Colors.white.withValues(alpha: 0.0),
+        ],
+      ).createShader(rect)
+      ..style = PaintingStyle.fill;
+    canvas.drawPath(path, highlightPaint);
+
+    // Inner depth ring
+    final innerRing = Paint()
+      ..color = Colors.white.withValues(alpha: 0.08)
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = 0.5;
+    canvas.drawCircle(Offset(cx, cy), R * 0.85, innerRing);
+
+    // ── Thinking dots ─────────────────────────────────────────────
+    if (orbState == 'thinking') {
+      final dotPaint = Paint()..style = PaintingStyle.fill;
+      const dotR = 3.5;
+      const spacing = 12.0;
+      for (int i = 0; i < 3; i++) {
+        final opacity = 0.3 + 0.7 * math.max(0, math.sin(t * 3 - i * 0.8));
+        dotPaint.color = Colors.white.withValues(alpha: opacity);
+        canvas.drawCircle(
+          Offset(cx + (i - 1) * spacing, cy),
+          dotR,
+          dotPaint,
+        );
+      }
+    }
+  }
+
+  @override
+  bool shouldRepaint(_OrbPainter o) =>
+      o.t != t || o.orbState != orbState || o.activity != activity;
 }

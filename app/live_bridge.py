@@ -6,6 +6,8 @@ from contextlib import suppress
 from pathlib import Path
 from typing import Any
 
+from app.graph.nodes.memorize import run_post_turn_updates
+
 from fastapi import WebSocket
 from google.genai import types
 from websockets.exceptions import ConnectionClosedError
@@ -132,6 +134,9 @@ class GeminiLiveBridge:
         self.websocket = websocket
         self.user_id = user_id
         self._closed = False
+        self._pending_user_text = ""
+        self._pending_agent_text = ""
+        self._last_flushed_signature = ""
 
     async def _build_config(self) -> types.LiveConnectConfig:
         instruction = await _build_instruction(_InstructionContext(self.user_id))  # type: ignore[arg-type]
@@ -215,6 +220,93 @@ class GeminiLiveBridge:
         ]
         return "\n".join(texts).strip()
 
+    def _merge_transcript_text(self, current: str, incoming: str) -> str:
+        normalized = incoming.strip()
+        if not normalized:
+            return current
+        if not current:
+            return normalized
+        if current == normalized or current.endswith(normalized):
+            return current
+        if normalized.startswith(current):
+            return normalized
+        return f"{current} {normalized}".strip()
+
+    def _capture_user_text(self, text: str) -> None:
+        self._pending_user_text = self._merge_transcript_text(self._pending_user_text, text)
+
+    def _capture_agent_text(self, text: str) -> None:
+        self._pending_agent_text = self._merge_transcript_text(self._pending_agent_text, text)
+
+    def _capture_turn_from_payload(self, payload: dict[str, Any]) -> bool:
+        sc = payload.get("serverContent") if isinstance(payload.get("serverContent"), dict) else {}
+
+        out_tx = (
+            sc.get("outputTranscription")
+            or sc.get("output_transcription")
+            or payload.get("outputTranscription")
+            or payload.get("output_transcription")
+            or {}
+        )
+        in_tx = (
+            sc.get("inputTranscription")
+            or sc.get("input_transcription")
+            or payload.get("inputTranscription")
+            or payload.get("input_transcription")
+            or {}
+        )
+        model_turn = sc.get("modelTurn") or payload.get("modelTurn") or payload.get("content") or {}
+
+        if isinstance(in_tx, dict):
+            text = in_tx.get("text")
+            if isinstance(text, str) and text.strip():
+                self._capture_user_text(text)
+
+        if isinstance(out_tx, dict):
+            text = out_tx.get("text")
+            if isinstance(text, str) and text.strip():
+                self._capture_agent_text(text)
+
+        if isinstance(model_turn, dict):
+            for part in model_turn.get("parts", []):
+                if not isinstance(part, dict):
+                    continue
+                text = part.get("text")
+                is_thought = bool(part.get("thought", False))
+                if isinstance(text, str) and text.strip() and not is_thought:
+                    self._capture_agent_text(text)
+
+        turn_complete = (
+            sc.get("turnComplete")
+            or sc.get("turn_complete")
+            or payload.get("turnComplete")
+            or payload.get("turn_complete")
+            or False
+        )
+        return bool(turn_complete)
+
+    async def _flush_turn_updates(self, *, reason: str) -> None:
+        messages: list[dict[str, str]] = []
+        if self._pending_user_text.strip():
+            messages.append({"role": "human", "content": self._pending_user_text.strip()})
+        if self._pending_agent_text.strip():
+            messages.append({"role": "ai", "content": self._pending_agent_text.strip()})
+
+        self._pending_user_text = ""
+        self._pending_agent_text = ""
+
+        if not messages:
+            return
+
+        signature = json.dumps(messages, ensure_ascii=True, sort_keys=True)
+        if signature == self._last_flushed_signature:
+            logger.info("[live] skipping duplicate post-turn update reason=%s", reason)
+            return
+
+        self._last_flushed_signature = signature
+        logger.info("[live] flushing post-turn updates reason=%s messages=%s", reason, len(messages))
+        await run_post_turn_updates(self.user_id, messages)
+
     async def _forward_client_to_live(self, session: Any) -> None:
         try:
             while True:
@@ -252,6 +344,7 @@ class GeminiLiveBridge:
 
                 if "text" in live_payload and isinstance(live_payload["text"], str):
                     logger.info("[live] forwarding direct text to Gemini")
+                    self._capture_user_text(live_payload["text"])
                     await session.send_realtime_input(text=live_payload["text"])
                     continue
 
@@ -259,6 +352,7 @@ class GeminiLiveBridge:
                     text = self._text_from_payload(live_payload)
                     if text and not live_payload.get("attachments"):
                         logger.info("[live] forwarding content text to Gemini")
+                        self._capture_user_text(text)
                         await session.send_realtime_input(text=text)
                         continue
 
@@ -284,29 +378,38 @@ class GeminiLiveBridge:
 
     async def _forward_live_to_client(self, session: Any) -> None:
         try:
-            async for response in session.receive():
-                if response.tool_call and response.tool_call.function_calls:
-                    logger.info("[live] Gemini requested %s tool call(s)", len(response.tool_call.function_calls))
-                    function_responses = [
-                        await _tool_response(function_call, self.user_id)
-                        for function_call in response.tool_call.function_calls
-                    ]
-                    await session.send_tool_response(function_responses=function_responses)
-                    continue
+            while not self._closed:
+                async for response in session.receive():
+                    if response.tool_call and response.tool_call.function_calls:
+                        logger.info("[live] Gemini requested %s tool call(s)", len(response.tool_call.function_calls))
+                        function_responses = [
+                            await _tool_response(function_call, self.user_id)
+                            for function_call in response.tool_call.function_calls
+                        ]
+                        await session.send_tool_response(function_responses=function_responses)
+                        continue
 
-                payload = self._json_safe(
-                    response.model_dump(by_alias=True, exclude_none=True)
-                )
-                if payload:
-                    logger.info("[live] forwarding Gemini event keys=%s", sorted(payload.keys()))
-                    if not await self._safe_send_json(payload):
-                        logger.info("[live] websocket send failed while forwarding Gemini event")
-                        break
-            logger.info("[live] Gemini session.receive() stream ended")
+                    payload = self._json_safe(
+                        response.model_dump(by_alias=True, exclude_none=True)
+                    )
+                    if payload:
+                        logger.info("[live] forwarding Gemini event keys=%s", sorted(payload.keys()))
+                        turn_complete = self._capture_turn_from_payload(payload)
+                        if not await self._safe_send_json(payload):
+                            logger.info("[live] websocket send failed while forwarding Gemini event")
+                            return
+                        if turn_complete:
+                            await self._flush_turn_updates(reason="turn_complete")
+
+                logger.info("[live] Gemini session.receive() stream ended, restarting for next turn")
         except Exception as exc:
             logger.exception("[live] live->client bridge failed: %s", exc)
             await self._safe_send_json({"error": str(exc)})
         finally:
+            try:
+                await self._flush_turn_updates(reason="live_loop_end")
+            except Exception:
+                logger.exception("[live] failed flushing post-turn updates on shutdown")
             self._closed = True
             logger.info("[live] live->client loop ended closed=%s", self._closed)
 
@@ -332,6 +435,7 @@ class GeminiLiveBridge:
                     from_client.done(),
                     from_model.done(),
                 )
+                self._closed = True
                 for task in (from_client, from_model):
                     if not task.done():
                         task.cancel()

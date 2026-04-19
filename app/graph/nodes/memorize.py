@@ -35,17 +35,48 @@ def _enqueue(client: tasks_v2.CloudTasksClient, endpoint: str, body: dict) -> No
     client.create_task(parent=CLOUD_TASKS_QUEUE, task=task)
 
 
+import logging as _logging
+_log = _logging.getLogger(__name__)
+
+
 async def _run_local_handlers(user_id: str, messages: list[dict]) -> None:
     from app.internal.memory_write import handle_memory_write
     from app.internal.profile_update import handle_profile_update
     from app.internal.wiki_update import handle_wiki_update
 
+    results = await asyncio.gather(
+        handle_memory_write(user_id, messages),
+        handle_profile_update(user_id),
+        handle_wiki_update(user_id, messages),
+        return_exceptions=True,
+    )
+    labels = ["memory_write", "profile_update", "wiki_update"]
+    for label, result in zip(labels, results):
+        if isinstance(result, Exception):
+            _log.error("[post-turn] %s failed for %s: %s", label, user_id, result)
+
+
+async def run_post_turn_updates(user_id: str, messages: list[dict]) -> None:
+    if not messages:
+        return
+
+    if not CLOUD_TASKS_QUEUE:
+        asyncio.create_task(_run_local_handlers(user_id, messages))
+        return
+
     try:
-        await asyncio.gather(
-            handle_memory_write(user_id, messages),
-            handle_profile_update(user_id),
-            handle_wiki_update(user_id, messages),
-        )
+        client = tasks_v2.CloudTasksClient()
+        _enqueue(client, "/internal/memory-write", {
+            "user_id": user_id,
+            "messages": messages,
+        })
+        _enqueue(client, "/internal/update-profile", {
+            "user_id": user_id,
+        })
+        _enqueue(client, "/internal/wiki-update", {
+            "user_id": user_id,
+            "messages": messages,
+        })
     except Exception:
         pass
 
@@ -58,24 +89,5 @@ async def memorize(state: AgentState) -> AgentState:
     ]
     serialized = [{"role": m.type, "content": m.content} for m in last_exchange]
 
-    if not CLOUD_TASKS_QUEUE:
-        asyncio.create_task(_run_local_handlers(user_id, serialized))
-        return state
-
-    try:
-        client = tasks_v2.CloudTasksClient()
-        _enqueue(client, "/internal/memory-write", {
-            "user_id": user_id,
-            "messages": serialized,
-        })
-        _enqueue(client, "/internal/update-profile", {
-            "user_id": user_id,
-        })
-        _enqueue(client, "/internal/wiki-update", {
-            "user_id": user_id,
-            "messages": serialized,
-        })
-    except Exception:
-        pass
-
+    await run_post_turn_updates(user_id, serialized)
     return state
