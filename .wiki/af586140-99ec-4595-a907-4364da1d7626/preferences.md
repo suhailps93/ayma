@@ -3,15 +3,15 @@
 **Profession:** AI Architect
 
 **Profile Overview**
-Suhail operates as a "black box," utilizing extreme minimalism to maintain an aura of mystery and control. He treats romantic interaction as a system stress test, employing brief, low-effort prompts to force his partner into a cycle of speculation and emotional labor. He projects a detached persona that thrives on being decoded, intentionally withholding context to maintain a power advantage.
+Suhail operates as a "black box," utilizing extreme minimalism and performative indifference to maintain total control. He projects logic-driven detachment to force the partner into the role of emotional lead and seeker.
 
 **Communication Style**
-Aggressively minimalist and tactical. Suhail uses sparse pings (e.g., "meter," "hello") to shift the entire conversational burden onto the partner. By providing near-zero context or warmth, he forces the partner to "design" the interaction around him, monitoring their ability to fill his silence with their own energy and pursuit.
+Aggressively minimalist. Suhail uses low-effort "pings" and reductive, feigned-ignorant prompts—such as asking for definitions of common dating terms like "zombies"—to compel the partner to over-explain. This tactic shifts the entire burden of depth onto the partner, requiring them to fill his conversational vacuum with personality, context, and intellectual labor.
 
 **Attraction & Values**
-He values intellectual stamina and the "chase." He is drawn to partners who attempt to "see" him despite his lack of transparency, rewarding those who are hyper-focused on his internal state and willing to bridge the gap created by his gatekept nature.
+He is drawn to partners who possess high social confidence and are willing to "chase" despite his lack of overt investment. He values those who interpret his silence or feigned incomprehension as a challenge, responding with high-energy engagement and "serious" intent.
 
 **Dynamics & Goals**
-*   **Dynamic:** Power-imbalanced; he is the architect/gatekeeper, the partner is the investigator.
-*   **Goal:** To find a "perfect match" who can solve his "system" and thrive in an environment of intense speculation.
-*   **Dealbreakers:** Transparency, over-sharing, or a partner who refuses to play the decoding game.
+*   **Dynamic:** Power-imbalanced; Suhail is the silent anchor/observer, the partner is the active pursuer and translator.
+*   **Goal:** To monitor investment levels by observing how much effort the partner exerts to bridge his emotional and intellectual distance.
+*   **Dealbreakers:** Demands for transparency, vulnerability, or a partner who mirrors his silence.

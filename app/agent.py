@@ -188,9 +188,9 @@ async def _build_instruction(context: ReadonlyContext) -> str:
         "- No markdown, bullet points, or lists. Speak naturally.\n"
         "- If you need to think, say 'let me think about that' — don't go silent.\n"
         "- Match the user's energy and pace.\n"
-        "- Sound warm, playful, flirtatious, and emotionally expressive.\n"
-        "- Use vocal variety, light teasing, and confident charm when appropriate.\n"
-        "- Keep it tasteful and consensual; never become explicit or sexually graphic."
+        "- Sound warm, empathetic, and genuinely curious.\n"
+        "- Use vocal variety and natural conversational charm to make the user feel comfortable.\n"
+        "- Keep the conversation respectful and focused on getting to know the person."
     )
 
     if not user_id:
@@ -205,7 +205,7 @@ async def _build_instruction(context: ReadonlyContext) -> str:
         )
 
         result = supabase.table("user_profiles").select(
-            "agent_name, profile_private, display_name, age, gender, location_region, matching_prefs"
+            "agent_name, profile_private, display_name, age, gender, location_region, matching_prefs, community_profile, questions_pending"
         ).eq("id", user_id).maybe_single().execute()
 
         profile = result.data or {}
@@ -216,9 +216,14 @@ async def _build_instruction(context: ReadonlyContext) -> str:
         gender = profile.get("gender") or ""
         location = profile.get("location_region") or ""
         matching_prefs = profile.get("matching_prefs") or {}
+        community_profile_name = profile.get("community_profile") or "dating_standard"
+        questions_pending = profile.get("questions_pending") or []
 
         # Replace agent name placeholder
         system_skills = system_skills.replace("Ayma", agent_name)
+
+        from app.profiles import load_community_profile, format_question_checklist
+        from app.skills import load_user_skills
 
         user_skills = await load_user_skills(user_id, supabase)
 
@@ -253,6 +258,44 @@ async def _build_instruction(context: ReadonlyContext) -> str:
                 return ""
 
         mem0_facts, wiki_context = await asyncio.gather(_fetch_mem0(), _fetch_wiki())
+
+        # Build question checklist (Gaps we need to fill)
+        def _extract_known_keys(profile: dict, facts: str, private: str) -> set[str]:
+            """
+            Mark keys as known based on structured profile fields AND heuristic check on facts.
+            """
+            known = set()
+
+            # 1. Check structured profile fields (from preboarding/database)
+            if profile.get("display_name"): known.add("name")
+            if profile.get("age"):          known.add("age")
+            if profile.get("gender"):       known.add("gender")
+            if profile.get("location_region"): known.add("location")
+
+            matching_prefs = profile.get("matching_prefs") or {}
+            if matching_prefs.get("interested_in"):   known.add("interested_in")
+            if matching_prefs.get("relationship_goal"): known.add("relationship_goal")
+            if matching_prefs.get("age_min") and matching_prefs.get("age_max"): known.add("match_age_range")
+
+            # 2. Heuristic check on unstructured facts/wiki
+            combined = (facts + " " + private).lower()
+            key_signals = {
+                "career":            ["works as", "engineer", "doctor", "teacher", "student", "job"],
+                "lifestyle":         ["hobbies", "free time", "weekends", "exercise", "social"],
+                "values":            ["values", "beliefs", "important to me", "i believe"],
+                "family_views":      ["kids", "children", "family", "want a family"],
+                "deal_breakers":     ["deal breaker", "can't stand", "non-negotiable"],
+                "match_location":    ["lives anywhere", "near me", "location matters"],
+                "match_dealbreakers": ["no smoking", "no drugs", "dealbreakers"],
+            }
+            for k, signals in key_signals.items():
+                if any(s in combined for s in signals):
+                    known.add(k)
+            return known
+
+        community_profile = load_community_profile(community_profile_name)
+        known_keys = _extract_known_keys(profile, mem0_facts, profile_private)
+        checklist = format_question_checklist(community_profile, known_keys)
 
         # Build user context block (demographics + location)
         user_context_lines = []
@@ -306,6 +349,13 @@ async def _build_instruction(context: ReadonlyContext) -> str:
         except Exception as _e:
             logger.warning(f"[instruction] session context failed: {_e}")
             sections = [system_skills]
+
+        # HIGH PRIORITY: The gaps we need to fill
+        sections.append(checklist)
+
+        if questions_pending:
+            pending_items = "\n".join(f"  - {q}" for q in questions_pending)
+            sections.append(f"## Questions to work in when the moment is right\n{pending_items}")
 
         if user_skills:
             sections.append(f"## Additional Instructions\n{user_skills}")

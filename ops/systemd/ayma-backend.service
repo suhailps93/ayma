@@ -1,0 +1,15 @@
+[Unit]
+Description=Ayma backend server
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/latest_claude/ayma
+Environment=PYTHONUNBUFFERED=1
+ExecStart=%h/latest_claude/ayma/ops/run_backend_server.sh
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=default.target

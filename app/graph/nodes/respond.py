@@ -116,9 +116,20 @@ async def respond(state: AgentState) -> AgentState:
         parsed = json.loads(raw.strip())
         if parsed.get("has_deferred") and parsed.get("question"):
             q = parsed["question"]
-            if q not in new_pending:
-                new_pending.append(q)
-    except Exception:
+            
+            # Fetch current from DB to ensure we have the latest
+            supabase = _get_supabase()
+            current_db = supabase.table("user_profiles").select("questions_pending").eq("id", user_id).single().execute()
+            db_pending = current_db.data.get("questions_pending") if current_db.data else []
+            if not isinstance(db_pending, list): db_pending = []
+            
+            if q not in db_pending:
+                db_pending.append(q)
+                supabase.table("user_profiles").update({"questions_pending": db_pending}).eq("id", user_id).execute()
+            
+            new_pending = db_pending
+    except Exception as e:
+        print(f"Error updating pending questions: {e}")
         pass
 
     return {

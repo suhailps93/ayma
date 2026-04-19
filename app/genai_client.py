@@ -14,4 +14,7 @@ def create_genai_client() -> google_genai.Client:
             project=os.environ["GOOGLE_CLOUD_PROJECT"],
             location=os.environ["GOOGLE_CLOUD_LOCATION"],
         )
-    return google_genai.Client(api_key=os.environ["GOOGLE_API_KEY"])
+    return google_genai.Client(
+        api_key=os.environ["GOOGLE_API_KEY"],
+        http_options={"api_version": "v1alpha"},
+    )

@@ -20,6 +20,7 @@ import shutil
 import uuid
 from collections.abc import Callable
 from contextlib import suppress
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Literal
 
@@ -28,6 +29,7 @@ import google.auth
 import httpx
 import vertexai
 from google.adk.agents.run_config import RunConfig as _RunConfig
+from google import genai as google_genai
 from google.genai import types as _genai_types
 from fastapi import FastAPI, File, Header, HTTPException, Query, UploadFile, WebSocket, WebSocketException, status
 from fastapi.middleware.cors import CORSMiddleware
@@ -40,7 +42,8 @@ from supabase import Client, create_client
 from websockets.exceptions import ConnectionClosedError
 
 from app.genai_client import create_genai_client
-from app.live_bridge import GeminiLiveBridge
+from app.live_bridge import GeminiLiveBridge, build_live_connect_config, build_live_setup_payload, execute_live_function_calls
+from app.model_config import LIVE_MODEL
 
 app = FastAPI()
 app.add_middleware(
@@ -718,6 +721,94 @@ class TextChatPayload(BaseModel):
     attachments: list[dict[str, Any]] = []
 
 
+class LiveToolCallPayload(BaseModel):
+    function_calls: list[dict[str, Any]]
+
+
+class LiveTurnUpdatePayload(BaseModel):
+    messages: list[dict[str, str]]
+
+
+class LiveBootstrapResponse(BaseModel):
+    websocket_url: str
+    token: str
+    model: str
+    setup: dict[str, Any]
+    expires_at: str | None = None
+    new_session_expires_at: str | None = None
+
+
+def _create_gemini_live_client_for_tokens() -> google_genai.Client:
+    return google_genai.Client(
+        api_key=os.environ["GOOGLE_API_KEY"],
+        http_options={"api_version": "v1alpha"},
+    )
+
+
+@app.post("/api/live/bootstrap")
+async def live_bootstrap(
+    authorization: str | None = Header(default=None),
+) -> LiveBootstrapResponse:
+    token = _extract_bearer_token(authorization)
+    user_id = _get_current_user_id_from_token(token)
+
+    config = await build_live_connect_config(user_id)
+    setup = await build_live_setup_payload(user_id)
+
+    client = _create_gemini_live_client_for_tokens()
+    now = datetime.now(timezone.utc)
+    auth_token = client.auth_tokens.create(
+        config=_genai_types.CreateAuthTokenConfig(
+            uses=1,
+            expire_time=now + timedelta(minutes=30),
+            new_session_expire_time=now + timedelta(minutes=1),
+            live_connect_constraints=_genai_types.LiveConnectConstraints(
+                model=f"models/{LIVE_MODEL}",
+                config=config,
+            ),
+        )
+    )
+
+    websocket_url = (
+        "wss://generativelanguage.googleapis.com/ws/"
+        "google.ai.generativelanguage.v1alpha.GenerativeService.BidiGenerateContentConstrained"
+    )
+
+    return LiveBootstrapResponse(
+        websocket_url=websocket_url,
+        token=auth_token.name,
+        model=LIVE_MODEL,
+        setup=setup["setup"],
+        expires_at=(now + timedelta(minutes=30)).isoformat(),
+        new_session_expires_at=(now + timedelta(minutes=1)).isoformat(),
+    )
+
+
+@app.post("/api/live/tool")
+async def live_tool_call(
+    payload: LiveToolCallPayload,
+    authorization: str | None = Header(default=None),
+) -> dict[str, Any]:
+    token = _extract_bearer_token(authorization)
+    user_id = _get_current_user_id_from_token(token)
+    responses = await execute_live_function_calls(payload.function_calls, user_id)
+    return {"toolResponse": {"functionResponses": responses}}
+
+
+@app.post("/api/live/turn_update")
+async def live_turn_update(
+    payload: LiveTurnUpdatePayload,
+    authorization: str | None = Header(default=None),
+) -> dict[str, Any]:
+    token = _extract_bearer_token(authorization)
+    user_id = _get_current_user_id_from_token(token)
+    logger.info("[live] received client-side turn update user_id=%s messages=%s", user_id, len(payload.messages))
+    # background task for memory/wiki updates
+    from app.graph.nodes.memorize import run_post_turn_updates
+    asyncio.create_task(run_post_turn_updates(user_id, payload.messages))
+    return {"status": "ok"}
+
+
 def _guess_media_mime(path: str) -> str:
     ext = Path(path).suffix.lower()
     return {
@@ -1225,12 +1316,12 @@ async def upload_photo(
 def get_insights(authorization: str | None = Header(default=None)) -> dict[str, Any]:
     """Return all wiki pages for the authenticated user."""
     user_id = _get_current_user_id(authorization)
-    from app.wiki import read_wiki_page
+    from app.wiki import read_wiki_page, WIKI_PAGES
+    
+    # Return as a dict where keys are the filenames without .md
     return {
-        "about_me":    read_wiki_page(user_id, "about_me.md"),
-        "preferences": read_wiki_page(user_id, "preferences.md"),
-        "context":     read_wiki_page(user_id, "context.md"),
-        "media":       read_wiki_page(user_id, "media.md"),
+        page.replace(".md", ""): read_wiki_page(user_id, page)
+        for page in WIKI_PAGES
     }
 
 

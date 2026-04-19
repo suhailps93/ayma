@@ -17,7 +17,7 @@ from google.cloud import storage
 
 logger = logging.getLogger(__name__)
 
-WIKI_PAGES = ["about_me.md", "preferences.md", "context.md", "media.md"]
+WIKI_PAGES = ["about_me.md", "preferences.md", "context.md", "media.md", "matching_profile.md"]
 
 
 def _bucket_name() -> str:

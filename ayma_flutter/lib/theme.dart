@@ -100,8 +100,20 @@ class AymaFonts {
     FontWeight weight = FontWeight.w400,
     double? letterSpacing,
   }) =>
-      TextStyle(
-        fontFamily: 'sans-serif',
+      GoogleFonts.inter(
+        fontSize: size,
+        color: color,
+        fontWeight: weight,
+        letterSpacing: letterSpacing,
+      );
+
+  static TextStyle elegantSans({
+    double size = 14,
+    Color color = AymaColors.fg,
+    FontWeight weight = FontWeight.w400,
+    double? letterSpacing,
+  }) =>
+      GoogleFonts.inter(
         fontSize: size,
         color: color,
         fontWeight: weight,

@@ -129,6 +129,55 @@ async def _tool_response(function_call: Any, user_id: str) -> types.FunctionResp
     )
 
 
+async def build_live_connect_config(user_id: str) -> types.LiveConnectConfig:
+    instruction = await _build_instruction(_InstructionContext(user_id))  # type: ignore[arg-type]
+    voice_name = _voice_for_gender(_load_user_gender(user_id))
+    return types.LiveConnectConfig(
+        response_modalities=[types.Modality.AUDIO],
+        system_instruction=instruction,
+        speech_config=types.SpeechConfig(
+            voice_config=types.VoiceConfig(
+                prebuilt_voice_config=types.PrebuiltVoiceConfig(
+                    voice_name=voice_name,
+                )
+            )
+        ),
+        input_audio_transcription=types.AudioTranscriptionConfig(),
+        output_audio_transcription=types.AudioTranscriptionConfig(),
+        tools=_build_function_tools(),
+    )
+
+
+async def build_live_setup_payload(user_id: str) -> dict[str, Any]:
+    config = await build_live_connect_config(user_id)
+    setup = types.LiveClientMessage(
+        setup=types.LiveClientSetup(
+            model=f"models/{LIVE_MODEL}",
+            generation_config=types.GenerationConfig(
+                response_modalities=config.response_modalities,
+                speech_config=config.speech_config,
+            ),
+            system_instruction=types.Content(
+                role="system",
+                parts=[types.Part(text=config.system_instruction or "")],
+            ),
+            tools=config.tools,
+            input_audio_transcription=config.input_audio_transcription,
+            output_audio_transcription=config.output_audio_transcription,
+        )
+    )
+    return setup.model_dump(mode="json", by_alias=True, exclude_none=True)
+
+
+async def execute_live_function_calls(function_calls: list[dict[str, Any]], user_id: str) -> list[dict[str, Any]]:
+    responses = []
+    for function_call in function_calls:
+        call = types.FunctionCall.model_validate(function_call)
+        response = await _tool_response(call, user_id)
+        responses.append(response.model_dump(mode="json", by_alias=True, exclude_none=True))
+    return responses
+
+
 class GeminiLiveBridge:
     def __init__(self, websocket: WebSocket, user_id: str) -> None:
         self.websocket = websocket
@@ -139,22 +188,7 @@ class GeminiLiveBridge:
         self._last_flushed_signature = ""
 
     async def _build_config(self) -> types.LiveConnectConfig:
-        instruction = await _build_instruction(_InstructionContext(self.user_id))  # type: ignore[arg-type]
-        voice_name = _voice_for_gender(_load_user_gender(self.user_id))
-        return types.LiveConnectConfig(
-            response_modalities=[types.Modality.AUDIO],
-            system_instruction=instruction,
-            speech_config=types.SpeechConfig(
-                voice_config=types.VoiceConfig(
-                    prebuilt_voice_config=types.PrebuiltVoiceConfig(
-                        voice_name=voice_name,
-                    )
-                )
-            ),
-            input_audio_transcription=types.AudioTranscriptionConfig(),
-            output_audio_transcription=types.AudioTranscriptionConfig(),
-            tools=_build_function_tools(),
-        )
+        return await build_live_connect_config(self.user_id)
 
     async def _safe_send_json(self, payload: dict[str, Any]) -> bool:
         if self._closed:

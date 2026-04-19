@@ -3,7 +3,7 @@
   background: #0f0f0f;
   color: #fff;
   padding: 2rem;
-  max-width: 700px;
+  max-width: 800px;
   margin: 0 auto;
 }
 
@@ -27,7 +27,8 @@
   h2 {
     flex: 1;
     margin: 0;
-    font-size: 1.4rem;
+    font-size: 1.6rem;
+    font-weight: 700;
   }
 
   .back-btn {
@@ -35,7 +36,7 @@
     border: none;
     color: #888;
     cursor: pointer;
-    font-size: 0.9rem;
+    font-size: 1rem;
     padding: 0.5rem 0;
     transition: color 0.15s;
 
@@ -57,57 +58,118 @@
 .profile-body {
   display: flex;
   flex-direction: column;
-  gap: 1.5rem;
+  gap: 2rem;
 }
 
 .profile-section {
   background: #1a1a1a;
   border: 1px solid #2a2a2a;
-  border-radius: 12px;
+  border-radius: 16px;
   overflow: hidden;
+  transition: transform 0.2s ease, border-color 0.2s ease;
+
+  &:hover {
+    border-color: #3a3a3a;
+  }
 
   .section-label {
     display: flex;
     justify-content: space-between;
     align-items: center;
-    padding: 0.75rem 1.25rem;
+    padding: 1rem 1.5rem;
     border-bottom: 1px solid #2a2a2a;
-    font-size: 0.8rem;
-    font-weight: 600;
+    font-size: 0.85rem;
+    font-weight: 700;
     text-transform: uppercase;
-    letter-spacing: 0.05em;
-    color: #aaa;
+    letter-spacing: 0.08em;
+    color: #999;
+  }
+
+  .lock-status, .private-badge, .ai-badge {
+    font-size: 0.75rem;
+    font-weight: 500;
+    text-transform: none;
+    letter-spacing: 0;
+    padding: 0.2rem 0.6rem;
+    border-radius: 4px;
   }
 
   .lock-status {
-    font-size: 0.75rem;
-    color: #666;
-    font-weight: 400;
-    text-transform: none;
-    letter-spacing: 0;
+    color: #888;
+    background: #2a2a2a;
   }
 
   .private-badge {
-    font-size: 0.75rem;
-    color: #888;
-    font-weight: 400;
-    text-transform: none;
-    letter-spacing: 0;
+    color: #fbbf24;
+    background: rgba(251, 191, 36, 0.1);
+  }
+
+  .ai-badge {
+    color: #22d3ee;
+    background: rgba(34, 211, 238, 0.1);
   }
 
   .profile-content {
-    padding: 1.25rem;
-
-    p {
-      margin: 0;
-      line-height: 1.7;
-      color: #ddd;
-      white-space: pre-wrap;
-    }
+    padding: 1.5rem;
 
     .empty {
       color: #555;
       font-style: italic;
     }
   }
+}
+
+.markdown-content {
+  color: #e5e7eb;
+  line-height: 1.6;
+  font-size: 1rem;
+
+  p {
+    margin-top: 0;
+    margin-bottom: 1rem;
+    &:last-child { margin-bottom: 0; }
+  }
+
+  h1, h2, h3, h4 {
+    color: #fff;
+    margin-top: 1.5rem;
+    margin-bottom: 0.75rem;
+    font-weight: 600;
+  }
+
+  h3 { font-size: 1.1rem; }
+
+  ul, ol {
+    padding-left: 1.5rem;
+    margin-bottom: 1rem;
+  }
+
+  li {
+    margin-bottom: 0.5rem;
+  }
+
+  strong {
+    color: #fff;
+    font-weight: 600;
+  }
+
+  code {
+    background: #2a2a2a;
+    padding: 0.2rem 0.4rem;
+    border-radius: 4px;
+    font-family: ui-monospace, monospace;
+    font-size: 0.9em;
+  }
+
+  blockquote {
+    border-left: 4px solid #3a3a3a;
+    padding-left: 1rem;
+    margin-left: 0;
+    color: #9ca3af;
+    font-style: italic;
+  }
+}
+
+.wiki-insight {
+  border-left: 4px solid #22d3ee;
 }

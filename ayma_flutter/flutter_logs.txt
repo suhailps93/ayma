@@ -1,0 +1,54 @@
+Launching lib/main.dart on Pixel 10 Pro Fold in debug mode...
+Running Gradle task 'assembleDebug'...                              7.6s
+✓ Built build/app/outputs/flutter-apk/app-debug.apk
+Installing build/app/outputs/flutter-apk/app-debug.apk...           5.3s
+I/flutter (31344): [IMPORTANT:flutter/shell/platform/android/android_context_gl_impeller.cc(94)] Using the Impeller rendering backend (OpenGLES).
+D/FlutterGeolocator(31344): Attaching Geolocator to activity
+Syncing files to device Pixel 10 Pro Fold...                        55ms
+
+Flutter run key commands.
+r Hot reload. 🔥🔥🔥
+R Hot restart.
+h List all available interactive commands.
+d Detach (terminate "flutter run" but leave application running).
+c Clear the screen
+q Quit (terminate the application on the device).
+
+A Dart VM Service on Pixel 10 Pro Fold is available at: http://127.0.0.1:40523/Iw0jUs4NZws=/
+I/flutter (31344): [ws] state SessionState.disconnected -> SessionState.connecting
+D/FlutterGeolocator(31344): Creating service.
+The Flutter DevTools debugger and profiler on Pixel 10 Pro Fold is available at: http://127.0.0.1:9100?uri=http://127.0.0.1:40523/Iw0jUs4NZws=/
+D/FlutterGeolocator(31344): Binding to location service.
+I/Choreographer(31344): Skipped 320 frames!  The application may be doing too much work on its main thread.
+I/WindowExtensionsImpl(31344): Initializing Window Extensions, vendor API level=9, activity embedding enabled=true
+I/ma.ayma_flutter(31344): Compiler allocated 5049KB to compile void android.view.ViewRootImpl.performTraversals()
+D/VRI[MainActivity](31344): WindowInsets changed: 1080x2364 statusBars:[0,159,0,0] navigationBars:[0,0,0,88] mandatorySystemGestures:[0,188,0,78] 
+D/WindowOnBackDispatcher(31344): setTopOnBackInvokedCallback (unwrapped): android.view.ViewRootImpl$$ExternalSyntheticLambda25@32ea9d
+D/VRI[MainActivity](31344): visibilityChanged oldVisibility=true newVisibility=false
+D/FlutterGeolocator(31344): Geolocator foreground service connected
+D/FlutterGeolocator(31344): Initializing Geolocator services
+D/FlutterGeolocator(31344): Flutter engine connected. Connected engine count 1
+I/Choreographer(31344): Skipped 111 frames!  The application may be doing too much work on its main thread.
+D/WindowLayoutComponentImpl(31344): Register WindowLayoutInfoListener on Context=com.ayma.ayma_flutter.MainActivity@98ce67f, of which baseContext=android.app.ContextImpl@7dd6988
+D/ProfileInstaller(31344): Installing profile for com.ayma.ayma_flutter
+I/flutter (31344): [ws] opening Gemini Live (mobile) wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1alpha.GenerativeService.BidiGenerateContentConstrained
+I/flutter (31344): [ws] full setup sent
+I/flutter (31344): [ws] error: WebSocketChannelException: SocketException: Failed host lookup: 'generativelanguage.googleapis.com' (OS Error: No address associated with hostname, errno = 7)
+I/flutter (31344): [ws] remote disconnect state=SessionState.connecting
+I/flutter (31344): [ws] state SessionState.connecting -> SessionState.disconnected
+I/flutter (31344): [ws] scheduling reconnect attempt=1 delay=800ms
+E/flutter (31344): [ERROR:flutter/runtime/dart_vm_initializer.cc(40)] Unhandled Exception: WebSocketChannelException: SocketException: Failed host lookup: 'generativelanguage.googleapis.com' (OS Error: No address associated with hostname, errno = 7)
+E/flutter (31344): 
+I/flutter (31344): [ws] state SessionState.disconnected -> SessionState.connecting
+I/flutter (31344): [ws] opening Gemini Live (mobile) wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1alpha.GenerativeService.BidiGenerateContentConstrained
+I/flutter (31344): [ws] full setup sent
+I/flutter (31344): [ws] error: WebSocketChannelException: SocketException: Failed host lookup: 'generativelanguage.googleapis.com' (OS Error: No address associated with hostname, errno = 7)
+I/flutter (31344): [ws] remote disconnect state=SessionState.connecting
+I/flutter (31344): [ws] state SessionState.connecting -> SessionState.disconnected
+I/flutter (31344): [ws] scheduling reconnect attempt=1 delay=800ms
+E/flutter (31344): [ERROR:flutter/runtime/dart_vm_initializer.cc(40)] Unhandled Exception: WebSocketChannelException: SocketException: Failed host lookup: 'generativelanguage.googleapis.com' (OS Error: No address associated with hostname, errno = 7)
+E/flutter (31344): 
+I/flutter (31344): [ws] state SessionState.disconnected -> SessionState.connecting
+W/ma.ayma_flutter(31344): userfaultfd: MOVE ioctl seems unsupported: Connection timed out
+Lost connection to device.
+the Dart compiler exited unexpectedly.

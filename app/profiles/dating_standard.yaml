@@ -46,6 +46,14 @@ deeper:
     question: "what their perfect date or evening looks like"
   - key: green_flags
     question: "what immediately draws them to someone"
+  - key: conflict_style
+    question: "how they handle disagreements or difficult conversations"
+  - key: social_energy
+    question: "whether they're an introvert, extrovert, or somewhere in between"
+  - key: humor_style
+    question: "what kind of humor they enjoy (dry, goofy, witty, dark)"
+  - key: life_ambition
+    question: "what their big-picture goals or ambitions are for the next few years"
 
 # Matching preferences — what they want in a match
 matching_prefs:

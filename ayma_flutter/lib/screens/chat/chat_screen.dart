@@ -292,59 +292,7 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
               ),
             ),
 
-            // ── Draft thumbnails ────────────────────────────────────
-            if (_drafts.isNotEmpty)
-              SizedBox(
-                height: 68,
-                child: ListView.separated(
-                  scrollDirection: Axis.horizontal,
-                  padding: const EdgeInsets.symmetric(horizontal: 20),
-                  itemCount: _drafts.length,
-                  separatorBuilder: (_, __) => const SizedBox(width: 8),
-                  itemBuilder: (_, i) {
-                    final d = _drafts[i];
-                    return Stack(
-                      children: [
-                        Container(
-                          width: 54,
-                          decoration: BoxDecoration(
-                            borderRadius: BorderRadius.circular(10),
-                            color: AymaColors.bgElev,
-                            border: Border.all(
-                                color: AymaColors.lineSoft, width: 0.5),
-                          ),
-                          child: d.kind == _DraftKind.image &&
-                                  d.previewBytes != null
-                              ? ClipRRect(
-                                  borderRadius: BorderRadius.circular(10),
-                                  child: Image.memory(d.previewBytes!,
-                                      fit: BoxFit.cover))
-                              : const Icon(Icons.videocam_rounded,
-                                  color: AymaColors.accent),
-                        ),
-                        Positioned(
-                          top: 2,
-                          right: 2,
-                          child: GestureDetector(
-                            onTap: () => _removeDraft(d.id),
-                            child: Container(
-                              width: 14,
-                              height: 14,
-                              decoration: const BoxDecoration(
-                                  shape: BoxShape.circle,
-                                  color: Colors.black54),
-                              child: const Icon(Icons.close,
-                                  size: 9, color: Colors.white),
-                            ),
-                          ),
-                        ),
-                      ],
-                    );
-                  },
-                ),
-              ),
-
-            // ── Input bar (always visible) ──────────────────────────
+            // ── Input bar / dock (always visible) ───────────────────
             _InputBar(
               state: state,
               muted: muted,
@@ -353,9 +301,11 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
               inputVolume: inputVol,
               outputVolume: outputVol,
               hasAttachment: _drafts.isNotEmpty,
+              drafts: _drafts,
               onMicTap: _toggleVoice,
               onSend: _sendText,
               onAttach: _showMediaSheet,
+              onRemoveDraft: _removeDraft,
             ),
           ],
         ),
@@ -456,24 +406,47 @@ class _TranscriptEntry extends StatelessWidget {
   Widget build(BuildContext context) {
     final isAyma = !line.isUser;
     return Padding(
-      padding: const EdgeInsets.only(bottom: 20),
+      padding: const EdgeInsets.only(bottom: 24),
       child: Opacity(
-        opacity: isLatest ? 1.0 : 0.5,
+        opacity: isLatest ? 1.0 : 0.72, // was 0.5 — history stayed readable
         child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
+          crossAxisAlignment:
+              isAyma ? CrossAxisAlignment.start : CrossAxisAlignment.end,
           children: [
-            Text(isAyma ? 'AYMA' : 'YOU',
-                style: AymaFonts.mono(
-                    size: 9,
-                    color: isAyma ? AymaColors.accent : AymaColors.fgMute,
-                    letterSpacing: 0.2)),
-            const SizedBox(height: 4),
-            Text(line.text,
-                style: isAyma
-                    ? AymaFonts.serif(
-                        size: 20, italic: true, color: AymaColors.fg)
-                    : AymaFonts.sans(size: 16, color: AymaColors.fgDim)
-                        .copyWith(height: 1.55)),
+            Text(
+              isAyma ? 'AYMA' : 'YOU',
+              style: AymaFonts.mono(
+                size: 9,
+                color: isAyma ? AymaColors.accent : AymaColors.fgMute,
+                letterSpacing: 0.2,
+              ),
+            ),
+            const SizedBox(height: 5),
+            if (isAyma)
+              Text(
+                line.text,
+                style: AymaFonts.serif(
+                    size: 20, italic: true, color: AymaColors.fg),
+              )
+            else
+              Container(
+                padding:
+                    const EdgeInsets.symmetric(horizontal: 14, vertical: 9),
+                decoration: BoxDecoration(
+                  color: const Color(0xFF1C1710),
+                  borderRadius: BorderRadius.circular(16),
+                  border: Border.all(
+                    color: AymaColors.lineSoft.withValues(alpha: 0.6),
+                    width: 0.5,
+                  ),
+                ),
+                child: Text(
+                  line.text,
+                  textAlign: TextAlign.right,
+                  style: AymaFonts.elegantSans(size: 15, color: AymaColors.fg)
+                      .copyWith(height: 1.5),
+                ),
+              ),
           ],
         ),
       ),
@@ -492,9 +465,11 @@ class _InputBar extends StatefulWidget {
   final double inputVolume;
   final double outputVolume;
   final bool hasAttachment;
+  final List<_DraftAttachment> drafts;
   final VoidCallback onMicTap;
   final Future<void> Function() onSend;
   final VoidCallback onAttach;
+  final ValueChanged<String> onRemoveDraft;
 
   const _InputBar({
     required this.state,
@@ -504,14 +479,27 @@ class _InputBar extends StatefulWidget {
     required this.inputVolume,
     required this.outputVolume,
     required this.hasAttachment,
+    required this.drafts,
     required this.onMicTap,
     required this.onSend,
     required this.onAttach,
+    required this.onRemoveDraft,
   });
 
   @override
   State<_InputBar> createState() => _InputBarState();
 }
+
+// ── Composer geometry — single source of truth for painter + content ──────────
+// Constraint: _kWaveBaseY + _kShellR < _kShellH - _kShellR (valid arc segments)
+// With these values: 18+24=42 < 72-24=48 ✓
+const double _kShellH = 72.0;
+const double _kShellR = 24.0; // reduced so corner arcs are geometrically valid
+const double _kWaveBaseY =
+    18.0; // wave oscillates around this y inside the pill
+const double _kRowH = 36.0;
+const double _kRowTop = 24.0; // 6px below wave baseline
+const double _kHPad = 14.0;
 
 class _InputBarState extends State<_InputBar>
     with SingleTickerProviderStateMixin {
@@ -533,11 +521,14 @@ class _InputBarState extends State<_InputBar>
     super.dispose();
   }
 
-  bool get _aymaActive => widget.state == SessionState.speaking;
+  bool get _aymaActive =>
+      widget.state == SessionState.speaking ||
+      widget.state == SessionState.listening;
   bool get _voiceActive =>
       widget.state == SessionState.listening ||
       widget.state == SessionState.speaking ||
-      widget.state == SessionState.thinking;
+      widget.state == SessionState.thinking ||
+      widget.state == SessionState.ready;
   bool get _hasText => widget.textCtrl.text.trim().isNotEmpty;
   bool get _canSend => _hasText || widget.hasAttachment;
 
@@ -549,193 +540,320 @@ class _InputBarState extends State<_InputBar>
       animation: _glow,
       builder: (_, __) {
         final g = _voiceActive ? (0.55 + _glow.value * 0.45) : 0.0;
-        return Padding(
-          padding: const EdgeInsets.fromLTRB(12, 4, 12, 6),
-          child: Row(
-            crossAxisAlignment: CrossAxisAlignment.center,
+        // ClipRect stops the box shadow from bleeding upward into the transcript.
+        // Box shadows are painted on the parent canvas layer and ignore the
+        // Container's own clipBehavior — an outer ClipRect is the only fix.
+        // Bottom padding (14) is inside the clip so the downward glow is visible.
+        return ClipRect(
+            child: Padding(
+          padding: const EdgeInsets.fromLTRB(12, 4, 12, 14),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
             children: [
-              Expanded(
-                child: Container(
-                  decoration: BoxDecoration(
-                    color: const Color(0xFF15120F),
-                    borderRadius: BorderRadius.circular(32),
-                    border: Border(
-                      left: BorderSide(
-                        color: AymaColors.accent
-                            .withValues(alpha: _voiceActive ? 0.9 : 0.22),
-                        width: 1.0,
-                      ),
-                      right: BorderSide(
-                        color: AymaColors.accent
-                            .withValues(alpha: _voiceActive ? 0.9 : 0.22),
-                        width: 1.0,
-                      ),
-                      bottom: BorderSide(
-                        color: AymaColors.accent
-                            .withValues(alpha: _voiceActive ? 0.9 : 0.22),
-                        width: 1.0,
-                      ),
-                    ),
-                    boxShadow: _voiceActive
-                        ? [
-                            BoxShadow(
-                              color:
-                                  AymaColors.accent.withValues(alpha: g * 0.2),
-                              blurRadius: 14 + g * 8,
-                            ),
-                            BoxShadow(
-                              color:
-                                  AymaColors.accent.withValues(alpha: g * 0.08),
-                              blurRadius: 24,
-                              spreadRadius: 1,
-                            ),
-                          ]
-                        : null,
+              if (widget.drafts.isNotEmpty)
+                _DraftDockStrip(
+                  drafts: widget.drafts,
+                  onRemoveDraft: widget.onRemoveDraft,
+                ),
+              // Shell: no background on the outer Container — background lives
+              // inside ClipRRect so it can never leak outside the pill shape.
+              // Voice-active glow is drawn by the painter (canvas-bounded),
+              // not via boxShadow (which bleeds through ClipRect on Impeller/iOS).
+              DecoratedBox(
+                decoration: BoxDecoration(
+                  borderRadius: BorderRadius.circular(_kShellR),
+                  boxShadow: _voiceActive
+                      ? null // painter handles glow; no upward-bleeding shadow
+                      : [
+                          BoxShadow(
+                            color: Colors.black.withValues(alpha: 0.30),
+                            blurRadius: 12,
+                            offset: const Offset(0, 6),
+                          ),
+                        ],
+                ),
+                child: CustomPaint(
+                  foregroundPainter: _ComposerOutlinePainter(
+                    phase: _glow.value,
+                    volume: _volume,
+                    active: _aymaActive,
+                    glowStrength: g,
                   ),
                   child: ClipRRect(
-                    borderRadius: BorderRadius.circular(32),
-                    child: SizedBox(
-                      height: 60,
-                      child: Stack(
-                        children: [
-                          Positioned.fill(
-                            child: DecoratedBox(
-                              decoration: BoxDecoration(
-                                gradient: LinearGradient(
-                                  begin: Alignment.topCenter,
-                                  end: Alignment.bottomCenter,
-                                  colors: [
-                                    AymaColors.accent.withValues(
-                                      alpha: _aymaActive ? 0.035 : 0.012,
+                    borderRadius: BorderRadius.circular(_kShellR),
+                    child: ColoredBox(
+                      color: const Color(0xFF15120F),
+                      child: SizedBox(
+                        height: _kShellH,
+                        child: Padding(
+                          padding: const EdgeInsets.only(top: _kWaveBaseY),
+                          child: SizedBox(
+                            height: _kShellH - _kWaveBaseY,
+                            child: Center(
+                              child: Padding(
+                                padding: const EdgeInsets.symmetric(horizontal: _kHPad),
+                                child: Row(
+                                  crossAxisAlignment: CrossAxisAlignment.center,
+                                  children: [
+                                    _PillAttachButton(onTap: widget.onAttach),
+                                    const SizedBox(width: 12),
+                                    Expanded(
+                                      child: _aymaActive && !_hasText
+                                          ? _WaveHintText(state: widget.state)
+                                          : TextField(
+                                              controller: widget.textCtrl,
+                                              focusNode: widget.focusNode,
+                                              style: const TextStyle(
+                                                color: AymaColors.fg,
+                                                fontSize: 13.5,
+                                                height: 1.1,
+                                              ),
+                                              cursorColor: AymaColors.accent,
+                                              minLines: 1,
+                                              maxLines: 4,
+                                              onSubmitted: (_) {
+                                                if (_canSend) widget.onSend();
+                                              },
+                                              decoration: InputDecoration(
+                                                isCollapsed: true,
+                                                border: InputBorder.none,
+                                                enabledBorder: InputBorder.none,
+                                                focusedBorder: InputBorder.none,
+                                                filled:
+                                                    true, // must be true to apply fillColor
+                                                fillColor: Colors.transparent,
+                                                contentPadding: EdgeInsets.zero,
+                                                hintText: _voiceActive
+                                                    ? 'Listening...'
+                                                    : 'Speak or type to Ayma',
+                                                hintStyle: TextStyle(
+                                                  color: AymaColors.fgMute,
+                                                  fontSize: 13.5,
+                                                  fontStyle: _voiceActive
+                                                      ? FontStyle.italic
+                                                      : FontStyle.normal,
+                                                ),
+                                              ),
+                                            ),
                                     ),
-                                    Colors.transparent,
+                                    const SizedBox(width: 12),
+                                    _DockActionCircle(
+                                      icon: _canSend
+                                          ? Icons.arrow_upward_rounded
+                                          : _voiceActive
+                                              ? Icons.mic_rounded
+                                              : Icons.mic_none_rounded,
+                                      onTap: _canSend
+                                          ? () => widget.onSend()
+                                          : widget.onMicTap,
+                                      active: _canSend || _voiceActive,
+                                      live: !_canSend && _voiceActive,
+                                      send: _canSend,
+                                    ),
                                   ],
                                 ),
                               ),
                             ),
                           ),
-                          Positioned(
-                            top: 0,
-                            left: 0,
-                            right: 0,
-                            height: 18,
-                            child: _WaveformBg(
-                              volume: _volume,
-                              glow: _glow,
-                              active: _aymaActive,
-                            ),
-                          ),
-                          Padding(
-                            padding: const EdgeInsets.fromLTRB(10, 11, 10, 5),
-                            child: Row(
-                              children: [
-                                _PillAttachButton(
-                                  onTap: widget.onAttach,
-                                ),
-                                const SizedBox(width: 10),
-                                Expanded(
-                                  child: _aymaActive && !_hasText
-                                      ? _WaveHintText(state: widget.state)
-                                      : TextField(
-                                          controller: widget.textCtrl,
-                                          focusNode: widget.focusNode,
-                                          style: const TextStyle(
-                                              color: AymaColors.fg,
-                                              fontSize: 14,
-                                              height: 1.4),
-                                          cursorColor: AymaColors.accent,
-                                          minLines: 1,
-                                          maxLines: 4,
-                                          onSubmitted: (_) {
-                                            if (_canSend) {
-                                              widget.onSend();
-                                            }
-                                          },
-                                          decoration: InputDecoration(
-                                            isCollapsed: true,
-                                            border: InputBorder.none,
-                                            enabledBorder: InputBorder.none,
-                                            focusedBorder: InputBorder.none,
-                                            contentPadding: EdgeInsets.zero,
-                                            hintText: _voiceActive
-                                                ? 'Listening...'
-                                                : 'Speak or type to Ayma',
-                                            hintStyle: TextStyle(
-                                                color: AymaColors.fgMute,
-                                                fontSize: 14,
-                                                fontStyle: _voiceActive
-                                                    ? FontStyle.italic
-                                                    : FontStyle.normal),
-                                          ),
-                                        ),
-                                ),
-                              ],
-                            ),
-                          ),
-                        ],
-                      ),
-                    ),
-                  ),
-                ),
-              ),
-              const SizedBox(width: 10),
-              _DockActionCircle(
-                icon: _canSend
-                    ? Icons.arrow_upward_rounded
-                    : Icons.mic_none_rounded,
-                onTap: _canSend ? () => widget.onSend() : widget.onMicTap,
-                active: _canSend || _voiceActive,
-              ),
+                        ),
+                      ), // SizedBox
+                    ), // ColoredBox
+                  ), // ClipRRect
+                ), // CustomPaint
+              ), // DecoratedBox
             ],
           ),
-        );
+        )); // closes ClipRect > Padding > Column
       },
     );
   }
+}
+
+class _DraftDockStrip extends StatelessWidget {
+  final List<_DraftAttachment> drafts;
+  final ValueChanged<String> onRemoveDraft;
+
+  const _DraftDockStrip({
+    required this.drafts,
+    required this.onRemoveDraft,
+  });
+
+  @override
+  Widget build(BuildContext context) => Container(
+        margin: const EdgeInsets.only(left: 10, right: 10, bottom: 6),
+        padding: const EdgeInsets.fromLTRB(10, 8, 10, 8),
+        decoration: BoxDecoration(
+          color: const Color(0xFF17130F),
+          borderRadius: const BorderRadius.vertical(top: Radius.circular(18)),
+          border: Border.all(
+            color: AymaColors.lineSoft.withValues(alpha: 0.9),
+            width: 0.8,
+          ),
+        ),
+        child: SizedBox(
+          height: 54,
+          child: ListView.separated(
+            scrollDirection: Axis.horizontal,
+            itemCount: drafts.length,
+            separatorBuilder: (_, __) => const SizedBox(width: 8),
+            itemBuilder: (_, i) {
+              final d = drafts[i];
+              final ready = d.remoteUrl != null;
+              return Stack(
+                children: [
+                  Container(
+                    width: 54,
+                    decoration: BoxDecoration(
+                      borderRadius: BorderRadius.circular(12),
+                      color: AymaColors.bgElev,
+                      border: Border.all(
+                        color: ready
+                            ? AymaColors.accent.withValues(alpha: 0.35)
+                            : AymaColors.lineSoft,
+                        width: 0.7,
+                      ),
+                    ),
+                    child: d.kind == _DraftKind.image && d.previewBytes != null
+                        ? ClipRRect(
+                            borderRadius: BorderRadius.circular(12),
+                            child: Image.memory(d.previewBytes!,
+                                fit: BoxFit.cover),
+                          )
+                        : const Icon(Icons.videocam_rounded,
+                            color: AymaColors.accent),
+                  ),
+                  Positioned(
+                    left: 6,
+                    right: 6,
+                    bottom: 4,
+                    child: Text(
+                      ready ? 'Ready' : '...',
+                      textAlign: TextAlign.center,
+                      style: AymaFonts.mono(
+                        size: 6.5,
+                        color: ready ? AymaColors.accent : AymaColors.fgMute,
+                        letterSpacing: 0.08,
+                      ),
+                    ),
+                  ),
+                  Positioned(
+                    top: 2,
+                    right: 2,
+                    child: GestureDetector(
+                      onTap: () => onRemoveDraft(d.id),
+                      child: Container(
+                        width: 14,
+                        height: 14,
+                        decoration: const BoxDecoration(
+                          shape: BoxShape.circle,
+                          color: Colors.black54,
+                        ),
+                        child: const Icon(Icons.close,
+                            size: 9, color: Colors.white),
+                      ),
+                    ),
+                  ),
+                ],
+              );
+            },
+          ),
+        ),
+      );
 }
 
 class _DockActionCircle extends StatelessWidget {
   final IconData icon;
   final VoidCallback onTap;
   final bool active;
+  final bool live;
+  final bool send;
 
   const _DockActionCircle({
     required this.icon,
     required this.onTap,
     required this.active,
+    this.live = false,
+    this.send = false,
   });
 
   @override
-  Widget build(BuildContext context) => GestureDetector(
-        onTap: onTap,
-        child: Container(
-          width: 48,
-          height: 48,
-          decoration: BoxDecoration(
-            shape: BoxShape.circle,
-            color: const Color(0xFF17130F),
-            border: Border.all(
-              color: active
-                  ? AymaColors.accent.withValues(alpha: 0.45)
-                  : AymaColors.lineSoft.withValues(alpha: 0.9),
-              width: 0.9,
-            ),
-            boxShadow: active
-                ? [
-                    BoxShadow(
-                      color: AymaColors.accent.withValues(alpha: 0.18),
-                      blurRadius: 18,
-                    ),
-                  ]
-                : null,
+  Widget build(BuildContext context) {
+    final ringColor = send
+        ? const Color(0xFFE2B24C)
+        : live
+            ? const Color(0xFFFFC24B)
+            : active
+                ? AymaColors.accent.withValues(alpha: 0.5)
+                : AymaColors.lineSoft.withValues(alpha: 0.9);
+    final iconColor = send
+        ? const Color(0xFFFFF0C8)
+        : live
+            ? const Color(0xFF1A1208)
+            : active
+                ? AymaColors.accent
+                : AymaColors.fgDim;
+
+    final outerSize = live ? 42.0 : 36.0;
+    final innerSize = live ? 29.0 : 24.0;
+    final iconSize = live ? 18.0 : 15.0;
+
+    return GestureDetector(
+      onTap: onTap,
+      child: AnimatedContainer(
+        duration: const Duration(milliseconds: 240),
+        width: outerSize,
+        height: outerSize,
+        decoration: BoxDecoration(
+          shape: BoxShape.circle,
+          gradient: LinearGradient(
+            begin: Alignment.topLeft,
+            end: Alignment.bottomRight,
+            colors: send
+                ? const [Color(0xFF805113), Color(0xFFF0C96F)]
+                : live
+                    ? const [Color(0xFF2A1F10), Color(0xFF1A1208)]
+                    : const [Color(0xFF1E1813), Color(0xFF0E0B09)],
           ),
-          child: Icon(
-            icon,
-            size: 22,
-            color: active ? AymaColors.accent : AymaColors.fgDim,
+          border: Border.all(
+            color: ringColor,
+            width: live ? 1.4 : 0.95,
+          ),
+          boxShadow: active
+              ? [
+                  BoxShadow(
+                    color: AymaColors.accent.withValues(alpha: live ? 0.35 : 0.2),
+                    blurRadius: live ? 14 : 8,
+                    spreadRadius: live ? 1 : 0,
+                  ),
+                ]
+              : null,
+        ),
+        child: Center(
+          child: Container(
+            width: innerSize,
+            height: innerSize,
+            decoration: BoxDecoration(
+              shape: BoxShape.circle,
+              color: live
+                  ? AymaColors.accent.withValues(alpha: 0.15)
+                  : active
+                      ? AymaColors.accent.withValues(alpha: 0.08)
+                      : Colors.black.withValues(alpha: send ? 0.08 : 0.18),
+              border: Border.all(
+                color: send
+                    ? const Color(0xFFFFE3A4).withValues(alpha: 0.5)
+                    : live
+                        ? AymaColors.accent.withValues(alpha: 0.4)
+                        : AymaColors.lineSoft.withValues(alpha: 0.45),
+                width: 0.8,
+              ),
+            ),
+            child: Icon(icon, size: iconSize, color: iconColor),
           ),
         ),
-      );
+      ),
+    );
+  }
 }
 
 class _PillAttachButton extends StatelessWidget {
@@ -749,149 +867,188 @@ class _PillAttachButton extends StatelessWidget {
   Widget build(BuildContext context) => GestureDetector(
         onTap: onTap,
         child: Container(
-          width: 34,
-          height: 34,
+          width: 38,
+          height: 38,
           alignment: Alignment.center,
           decoration: BoxDecoration(
-            color: Colors.white.withValues(alpha: 0.02),
             shape: BoxShape.circle,
+            gradient: const LinearGradient(
+              begin: Alignment.topLeft,
+              end: Alignment.bottomRight,
+              colors: [Color(0xFF1A1510), Color(0xFF110D0A)],
+            ),
+            border: Border.all(
+              color: AymaColors.lineSoft.withValues(alpha: 0.92),
+              width: 0.7,
+            ),
           ),
-          child: const Icon(
-            Icons.attach_file_rounded,
-            size: 17,
-            color: AymaColors.fgMute,
+          child: Container(
+            width: 26,
+            height: 26,
+            alignment: Alignment.center,
+            decoration: BoxDecoration(
+              shape: BoxShape.circle,
+              border: Border.all(
+                color: AymaColors.accent.withValues(alpha: 0.16),
+                width: 0.7,
+              ),
+            ),
+            child: const Icon(
+              Icons.attach_file_rounded,
+              size: 18,
+              color: AymaColors.fgMute,
+            ),
           ),
         ),
       );
 }
 
-// Waveform drawn behind text field when Ayma is speaking
-class _WaveformBg extends StatefulWidget {
-  final double volume;
-  final Animation<double> glow;
-  final bool active;
-
-  const _WaveformBg({
-    required this.volume,
-    required this.glow,
-    required this.active,
-  });
-
-  @override
-  State<_WaveformBg> createState() => _WaveformBgState();
-}
-
-class _WaveformBgState extends State<_WaveformBg>
-    with SingleTickerProviderStateMixin {
-  late final AnimationController _ctrl;
-
-  @override
-  void initState() {
-    super.initState();
-    _ctrl =
-        AnimationController(vsync: this, duration: const Duration(seconds: 2))
-          ..repeat();
-  }
-
-  @override
-  void dispose() {
-    _ctrl.dispose();
-    super.dispose();
-  }
-
-  @override
-  Widget build(BuildContext context) => AnimatedBuilder(
-        animation: _ctrl,
-        builder: (_, __) => CustomPaint(
-          painter: _WavePainter(
-            phase: _ctrl.value,
-            volume: widget.volume,
-            active: widget.active,
-          ),
-          size: Size.infinite,
-        ),
-      );
-}
-
-class _WavePainter extends CustomPainter {
+class _ComposerOutlinePainter extends CustomPainter {
   final double phase;
   final double volume;
   final bool active;
+  final double glowStrength; // 0–1, drives outer glow replacing box shadow
 
-  const _WavePainter({
+  const _ComposerOutlinePainter({
     required this.phase,
     required this.volume,
     required this.active,
+    this.glowStrength = 0.0,
   });
 
+  // Wave radiates upward from y=0 (top edge of the pill).
+  // The ClipRRect handles the pill shape; this painter only draws border strokes.
+  // All geometry derives from _kShellR so it matches the ClipRRect exactly.
   @override
   void paint(Canvas canvas, Size size) {
-    const outerInset = 14.0;
-    final waveWidth = size.width * 0.56;
-    final waveStart = (size.width - waveWidth) / 2;
-    final waveEnd = waveStart + waveWidth;
-    const baselineY = 1.1;
-    final linePaint = Paint()
-      ..color = AymaColors.accent.withValues(alpha: active ? 0.42 : 0.16)
-      ..strokeWidth = 1.0
-      ..style = PaintingStyle.stroke
-      ..strokeCap = StrokeCap.round;
+    final level = volume.clamp(0.0, 1.0);
+    final baseAmp = active ? (5.0 + level * 8.0) : 0.0;
 
-    if (!active) {
-      canvas.drawLine(
-        const Offset(outerInset, baselineY),
-        Offset(size.width - outerInset, baselineY),
-        linePaint,
+    final goldShader = const LinearGradient(
+      begin: Alignment.centerLeft,
+      end: Alignment.centerRight,
+      colors: [
+        Color(0xFF7A5520),
+        Color(0xFFF1D08B),
+        Color(0xFFD2A23C),
+        Color(0xFF6D4B18),
+      ],
+      stops: [0.0, 0.36, 0.66, 1.0],
+    ).createShader(Offset.zero & size);
+
+    void drawWave(double amp, double phaseShift, double freq, double detailFreq,
+        double opacity) {
+      final path = _buildBorderPath(
+        size,
+        amplitude: amp,
+        phaseShift: phaseShift,
+        frequency: freq,
+        detailFrequency: detailFreq,
       );
-      return;
+      canvas.drawPath(
+        path,
+        Paint()
+          ..shader = goldShader
+          ..style = PaintingStyle.stroke
+          ..strokeWidth = 1.0
+          ..strokeCap = StrokeCap.round
+          ..strokeJoin = StrokeJoin.round
+          ..colorFilter =
+              ColorFilter.mode(Colors.black.withValues(alpha: 1.0 - opacity), BlendMode.dstIn),
+      );
     }
 
-    canvas.drawLine(
-      const Offset(outerInset, baselineY),
-      Offset(waveStart, baselineY),
-      linePaint,
-    );
-    canvas.drawLine(
-      Offset(waveEnd, baselineY),
-      Offset(size.width - outerInset, baselineY),
-      linePaint,
-    );
-
-    final amp = (14.0 + volume * 18.0).clamp(12.0, 28.0);
-    final specs = [
-      (freq: 1.8, amp: amp, phase: 0.0, opacity: 0.95, stroke: 1.9),
-      (freq: 2.8, amp: amp * 0.45, phase: 0.22, opacity: 0.14, stroke: 0.75),
-    ];
-
-    for (final s in specs) {
-      final paint = Paint()
-        ..color = AymaColors.accent.withValues(alpha: s.opacity)
-        ..strokeWidth = s.stroke
-        ..style = PaintingStyle.stroke
-        ..strokeCap = StrokeCap.round;
-
-      final path = Path();
-      final fullPhase = (phase + s.phase) * math.pi * 2;
-      for (double x = waveStart; x <= waveEnd; x += 2) {
-        final normalized = (x - waveStart) / (waveEnd - waveStart);
-        final t = normalized * math.pi * 2 * s.freq;
-        final centerBias = 1 - (normalized - 0.5).abs() * 2;
-        final envelope =
-            0.005 + math.pow(centerBias.clamp(0.0, 1.0), 3.2) * 1.08;
-        final y = baselineY - math.sin(t + fullPhase) * s.amp * envelope;
-        if (x == waveStart) {
-          path.moveTo(x, y);
-        } else {
-          path.lineTo(x, y);
-        }
-      }
-      canvas.drawPath(path, paint);
+    if (active) {
+      // Background waves (more subtle)
+      drawWave(baseAmp * 0.6, 0.4, 1.4, 2.8, 0.3);
+      drawWave(baseAmp * 0.8, -0.3, 2.6, 4.5, 0.5);
     }
+
+    // Primary wave
+    drawWave(baseAmp, 0.0, 1.95, 3.7, 1.0);
+  }
+
+  // Traces the full pill border with a wave across the top edge (y≈0).
+  // Corner arcs match _kShellR so the stroke sits exactly on the ClipRRect boundary.
+  Path _buildBorderPath(
+    Size size, {
+    required double amplitude,
+    required double phaseShift,
+    required double frequency,
+    required double detailFrequency,
+  }) {
+    const r = _kShellR;
+    const baselineY = _kWaveBaseY; // wave lives inside the canvas, not above it
+    final w = size.width;
+    final h = size.height;
+    final waveLeft = r;
+    final waveRight = w - r;
+    final waveWidth = waveRight - waveLeft;
+
+    final path = Path();
+    path.moveTo(waveLeft, baselineY);
+
+    const step = 2.0;
+    for (double x = waveLeft; x <= waveRight; x += step) {
+      final t = (x - waveLeft) / waveWidth;
+      path.lineTo(
+          x,
+          _waveY(t,
+              baselineY: baselineY,
+              amplitude: amplitude,
+              phaseShift: phaseShift,
+              frequency: frequency,
+              detailFrequency: detailFrequency));
+    }
+    path.lineTo(waveRight, baselineY);
+
+    // top-right corner
+    path.arcToPoint(Offset(w, baselineY + r),
+        radius: const Radius.circular(r), clockwise: true);
+    // right side
+    path.lineTo(w, h - r);
+    // bottom-right corner
+    path.arcToPoint(Offset(w - r, h),
+        radius: const Radius.circular(r), clockwise: true);
+    // bottom
+    path.lineTo(r, h);
+    // bottom-left corner
+    path.arcToPoint(Offset(0, h - r),
+        radius: const Radius.circular(r), clockwise: true);
+    // left side
+    path.lineTo(0, baselineY + r);
+    // top-left corner
+    path.arcToPoint(Offset(waveLeft, baselineY),
+        radius: const Radius.circular(r), clockwise: true);
+
+    path.close();
+    return path;
+  }
+
+  double _waveY(
+    double t, {
+    required double baselineY,
+    required double amplitude,
+    required double phaseShift,
+    required double frequency,
+    required double detailFrequency,
+  }) {
+    if (amplitude <= 0.01) return baselineY;
+    final gaussian = math.exp(-math.pow((t - 0.5) * 4.3, 2).toDouble());
+    final carrier = math.sin(
+        (t * math.pi * 2 * frequency) + ((phase + phaseShift) * math.pi * 2));
+    final detail = math.sin(
+        (t * math.pi * 2 * detailFrequency) - ((phase * 0.75) * math.pi * 2));
+    final lift = amplitude * gaussian * (carrier + detail * 0.42);
+    return baselineY - lift;
   }
 
   @override
-  bool shouldRepaint(_WavePainter old) =>
-      old.phase != phase || old.volume != volume || old.active != active;
+  bool shouldRepaint(_ComposerOutlinePainter old) =>
+      old.phase != phase ||
+      old.volume != volume ||
+      old.active != active ||
+      old.glowStrength != glowStrength;
 }
 
 // Subtle hint text shown in the field when Ayma is speaking & no user text
