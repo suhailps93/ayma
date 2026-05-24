@@ -213,6 +213,7 @@ class _OnboardingScreenState extends ConsumerState<OnboardingScreen> {
   @override
   void initState() {
     super.initState();
+    unawaited(FirestoreService.markPreboardingSeen());
     _locationCtrl.addListener(_syncLocationFromController);
   }
 
@@ -546,46 +547,49 @@ class _WelcomeStep extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return Column(
-      children: [
-        const SizedBox(height: 20),
-        const _BreathingOrb(size: 180),
-        const SizedBox(height: 32),
-        Text('FIRST MEETING',
-            style: AymaFonts.mono(size: 10, color: AymaColors.fgMute)),
-        const SizedBox(height: 14),
-        Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 32),
-          child: Text.rich(
-            TextSpan(
-              style: AymaFonts.serif(size: 34),
-              children: [
-                const TextSpan(text: "Hi. I'm "),
-                TextSpan(
-                  text: 'Ayma.',
-                  style: AymaFonts.serif(
-                      size: 34, italic: true, color: AymaColors.accent),
-                ),
-              ],
-            ),
-            textAlign: TextAlign.center,
-          ),
-        ),
-        const SizedBox(height: 20),
-        Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 36),
-          child: Text(
-            "I'm your matchmaker. I'll get to know you through conversations — the same way a good friend might — then introduce you to people I think you'd actually like.",
-            textAlign: TextAlign.center,
-            style: TextStyle(
-              color: AymaColors.fgDim,
-              fontSize: 15,
-              height: 1.6,
+    return SingleChildScrollView(
+      padding: const EdgeInsets.only(bottom: 12),
+      child: Column(
+        children: [
+          const SizedBox(height: 20),
+          const _BreathingOrb(size: 180),
+          const SizedBox(height: 32),
+          Text('FIRST MEETING',
+              style: AymaFonts.mono(size: 10, color: AymaColors.fgMute)),
+          const SizedBox(height: 14),
+          Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 32),
+            child: Text.rich(
+              TextSpan(
+                style: AymaFonts.serif(size: 34),
+                children: [
+                  const TextSpan(text: "Hi. I'm "),
+                  TextSpan(
+                    text: 'Ayma.',
+                    style: AymaFonts.serif(
+                        size: 34, italic: true, color: AymaColors.accent),
+                  ),
+                ],
+              ),
+              textAlign: TextAlign.center,
             ),
           ),
-        ),
-        const Spacer(),
-      ],
+          const SizedBox(height: 20),
+          Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 36),
+            child: Text(
+              "I'm your matchmaker. I'll get to know you through conversations — the same way a good friend might — then introduce you to people I think you'd actually like.",
+              textAlign: TextAlign.center,
+              style: TextStyle(
+                color: AymaColors.fgDim,
+                fontSize: 15,
+                height: 1.6,
+              ),
+            ),
+          ),
+          const SizedBox(height: 20),
+        ],
+      ),
     );
   }
 }

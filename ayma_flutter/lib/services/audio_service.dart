@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:math' as math;
 import 'dart:typed_data';
+import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter_sound/flutter_sound.dart';
 import 'package:logger/logger.dart' show Level;
@@ -59,7 +60,8 @@ class TranscriptLine {
 }
 
 class AymaAudioService extends ChangeNotifier {
-  static const _transcriptStorageKey = 'ayma.chat.transcript';
+  static const _legacyTranscriptStorageKey = 'ayma.chat.transcript';
+  static const _transcriptStoragePrefix = 'ayma.chat.transcript.';
 
   WebSocketChannel? _channel;
 
@@ -121,12 +123,18 @@ class AymaAudioService extends ChangeNotifier {
   DateTime _lastMeterUiUpdate = DateTime.fromMillisecondsSinceEpoch(0);
 
   bool _restoredTranscript = false;
+  String? _activeUid;
+  StreamSubscription<User?>? _authSub;
   String _sessionId = DateTime.now().millisecondsSinceEpoch.toString();
   String? _geminiApiKey; // cached from bootstrap for text-chat fallback
   String? _systemPrompt; // cached from bootstrap for text-chat fallback
   String _sessionStyleInstruction = '';
 
   AymaAudioService() {
+    _activeUid = FirebaseAuth.instance.currentUser?.uid;
+    _authSub = FirebaseAuth.instance.authStateChanges().listen((user) {
+      unawaited(_onAuthUserChanged(user?.uid));
+    });
     unawaited(_restoreTranscript());
   }
 
@@ -140,10 +148,28 @@ class AymaAudioService extends ChangeNotifier {
   Future<void> _restoreTranscript() async {
     if (_restoredTranscript) return;
     _restoredTranscript = true;
+    await _loadTranscriptForActiveUser();
+  }
 
+  String _transcriptStorageKeyFor(String uid) => '$_transcriptStoragePrefix$uid';
+
+  Future<void> _onAuthUserChanged(String? nextUid) async {
+    if (_activeUid == nextUid) return;
+    _activeUid = nextUid;
+    _transcript.clear();
+    _textHistory.clear();
+    _pendingAgentText = '';
+    _pendingUserText = '';
+    notifyListeners();
+    await _loadTranscriptForActiveUser();
+  }
+
+  Future<void> _loadTranscriptForActiveUser() async {
     try {
+      final uid = _activeUid;
+      if (uid == null || uid.isEmpty) return;
       final prefs = await SharedPreferences.getInstance();
-      final raw = prefs.getString(_transcriptStorageKey);
+      final raw = prefs.getString(_transcriptStorageKeyFor(uid));
       if (raw == null || raw.isEmpty) return;
       final decoded = jsonDecode(raw) as List<dynamic>;
       _transcript
@@ -153,7 +179,6 @@ class AymaAudioService extends ChangeNotifier {
             .map(TranscriptLine.fromMap)
             .where((line) => line.text.isNotEmpty));
 
-      // Rebuild context history for text-chat fallback
       _textHistory.clear();
       for (final line in _transcript) {
         _textHistory.add({
@@ -164,16 +189,18 @@ class AymaAudioService extends ChangeNotifier {
       if (_textHistory.length > 50) {
         _textHistory.removeRange(0, _textHistory.length - 50);
       }
-
+      await prefs.remove(_legacyTranscriptStorageKey);
       notifyListeners();
     } catch (_) {}
   }
 
   Future<void> _persistTranscript() async {
     try {
+      final uid = _activeUid;
+      if (uid == null || uid.isEmpty) return;
       final prefs = await SharedPreferences.getInstance();
       await prefs.setString(
-        _transcriptStorageKey,
+        _transcriptStorageKeyFor(uid),
         jsonEncode(_transcript.map((line) => line.toMap()).toList()),
       );
     } catch (_) {}
@@ -1225,6 +1252,7 @@ $contextLines
 
   @override
   void dispose() {
+    _authSub?.cancel();
     _reconnectTimer?.cancel();
     _userTalkingDebounce?.cancel();
     disconnect(notify: false);

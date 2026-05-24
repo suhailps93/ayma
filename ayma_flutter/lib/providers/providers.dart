@@ -124,6 +124,12 @@ final onboardingStatusProvider = FutureProvider<bool>((ref) async {
   return FirestoreService.getOnboardingStatus();
 });
 
+final preboardingSeenProvider = FutureProvider<bool>((ref) async {
+  final user = ref.watch(currentUserProvider);
+  if (user == null) return false;
+  return FirestoreService.getPreboardingSeen();
+});
+
 // ── Insights ──────────────────────────────────────────────────────────────────
 
 final insightsProvider = FutureProvider<Map<String, String>>((ref) async {

@@ -19,6 +19,7 @@ class _RouterRefreshNotifier extends ChangeNotifier {
     ref.listen(authSessionProvider, (_, __) => notifyListeners());
     ref.listen(authInitializedProvider, (_, __) => notifyListeners());
     ref.listen(onboardingStatusProvider, (_, __) => notifyListeners());
+    ref.listen(preboardingSeenProvider, (_, __) => notifyListeners());
   }
 }
 
@@ -38,9 +39,12 @@ final routerProvider = Provider<GoRouter>((ref) {
       if (path == '/auth') return '/chat';
 
       final onboarding = ref.read(onboardingStatusProvider);
-      if (onboarding.hasValue) {
+      final preboardingSeen = ref.read(preboardingSeenProvider);
+      if (onboarding.hasValue && preboardingSeen.hasValue) {
         final complete = onboarding.value ?? false;
-        if (!complete && path != '/onboarding') return '/onboarding';
+        final seen = preboardingSeen.value ?? false;
+        if (!complete && !seen && path != '/onboarding') return '/onboarding';
+        if (!complete && seen && path == '/onboarding') return '/chat';
         if (complete && path == '/onboarding') return '/chat';
       }
 

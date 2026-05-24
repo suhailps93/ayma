@@ -30,6 +30,12 @@ class _AuthScreenState extends ConsumerState<AuthScreen> {
     super.dispose();
   }
 
+  Future<void> _goToChat() async {
+    FocusManager.instance.primaryFocus?.unfocus();
+    await Future<void>.delayed(const Duration(milliseconds: 80));
+    if (mounted) context.go('/chat');
+  }
+
   Future<void> _submit() async {
     setState(() { _loading = true; _error = null; });
     try {
@@ -38,14 +44,14 @@ class _AuthScreenState extends ConsumerState<AuthScreen> {
           _emailCtrl.text.trim(), _passCtrl.text,
         );
         if (!ok) throw Exception('Login did not return a session.');
-        if (mounted) context.go('/chat');
+        await _goToChat();
       } else {
         final ok = await ref.read(authControllerProvider).signUp(
           _emailCtrl.text.trim(), _passCtrl.text,
         );
         if (mounted) {
           if (ok) {
-            context.go('/chat');
+            await _goToChat();
           } else {
             setState(() { _emailSent = true; _loading = false; });
           }

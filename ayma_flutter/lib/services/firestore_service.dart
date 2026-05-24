@@ -36,16 +36,21 @@ class FirestoreService {
     final userDoc = await _db.collection('users').doc(userId).get();
     if (!userDoc.exists) return null;
     final data = userDoc.data() ?? <String, dynamic>{};
-    final mediaSnap = await _db
-        .collection('media')
-        .where('user_id', isEqualTo: userId)
-        .orderBy('created_at', descending: true)
-        .limit(24)
-        .get();
-    final photos = mediaSnap.docs
-        .map((d) => (d.data()['photo_url'] as String?) ?? '')
-        .where((u) => u.isNotEmpty)
-        .toList();
+    List<String> photos = const [];
+    try {
+      final mediaSnap = await _db
+          .collection('media')
+          .where('user_id', isEqualTo: userId)
+          .orderBy('created_at', descending: true)
+          .limit(24)
+          .get();
+      photos = mediaSnap.docs
+          .map((d) => (d.data()['photo_url'] as String?) ?? '')
+          .where((u) => u.isNotEmpty)
+          .toList();
+    } catch (_) {
+      // Keep profile usable even if media query is missing index or denied.
+    }
     return {
       ...data,
       'id': userId,
@@ -334,6 +339,19 @@ class FirestoreService {
         .update({'onboarding_complete': true});
   }
 
+  static Future<void> markPreboardingSeen() async {
+    await _db.collection('users').doc(_uid).set({
+      'preboarding_seen': true,
+    }, SetOptions(merge: true));
+  }
+
+  static Future<bool> getPreboardingSeen() async {
+    final doc = await _db.collection('users').doc(_uid).get();
+    final data = doc.data();
+    if (data == null) return false;
+    return (data['preboarding_seen'] as bool?) ?? false;
+  }
+
   static bool inferOnboardingComplete(Map<String, dynamic> data) {
     if ((data['onboarding_complete'] as bool?) == true) return true;
 
@@ -376,17 +394,30 @@ class FirestoreService {
   static Future<Map<String, String>> getInsights() async {
     final uid = _uid;
     final docFuture = _db.collection('users').doc(uid).get();
-    final mediaFuture = _db
-        .collection('media')
-        .where('user_id', isEqualTo: uid)
-        .orderBy('created_at', descending: true)
-        .limit(20)
-        .get();
+    final mediaFuture = () async {
+      try {
+        return await _db
+            .collection('media')
+            .where('user_id', isEqualTo: uid)
+            .limit(20)
+            .get();
+      } catch (_) {
+        return null;
+      }
+    }();
 
     final results = await Future.wait([docFuture, mediaFuture]);
     final data =
         (results[0] as DocumentSnapshot).data() as Map<String, dynamic>? ?? {};
-    final mediaDocs = (results[1] as QuerySnapshot).docs;
+    final rawMediaDocs =
+        (results[1] as QuerySnapshot?)?.docs ?? const <QueryDocumentSnapshot>[];
+    final mediaDocs = List<QueryDocumentSnapshot>.from(rawMediaDocs)
+      ..sort((a, b) {
+        final ta = (a.data() as Map<String, dynamic>)['created_at'];
+        final tb = (b.data() as Map<String, dynamic>)['created_at'];
+        if (ta is Timestamp && tb is Timestamp) return tb.compareTo(ta);
+        return 0;
+      });
 
     // Build media markdown: - [date](url)\ncaption
     final mediaLines = mediaDocs.map((d) {
@@ -431,11 +462,14 @@ class FirestoreService {
     ]) ??
         '';
 
+    final publicProfile = _firstNonEmpty([data['profile_public']]) ?? '';
+
     return {
       'about_me': aboutMe,
       'preferences': preferences,
       'context': context,
       'media': mediaLines,
+      'public_profile': publicProfile,
     };
   }
 

@@ -760,12 +760,14 @@ class _ExploreProfileScreenState extends State<_ExploreProfileScreen> {
       body: FutureBuilder<Map<String, dynamic>?>(
         future: _profileFuture,
         builder: (context, snap) {
-          if (!snap.hasData) {
+          if (snap.connectionState == ConnectionState.waiting) {
             return const Center(
               child: CircularProgressIndicator(color: AymaColors.accent),
             );
           }
-          final p = snap.data ?? widget.profile;
+          final p = (snap.data != null && snap.data!.isNotEmpty)
+              ? snap.data!
+              : widget.profile;
           final userId = p['id'] as String? ?? '';
           final name = (p['display_name'] as String?)?.trim();
           final age = p['age'];

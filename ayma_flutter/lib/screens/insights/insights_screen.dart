@@ -80,6 +80,13 @@ class _InsightsView extends StatelessWidget {
       icon: Icons.photo_library_outlined,
       emptyHint: 'Upload photos and Ayma will describe them for matching.',
     ),
+    _PageDef(
+      key: 'public_profile',
+      title: 'Public Profile',
+      subtitle: 'What others see about you',
+      icon: Icons.public_outlined,
+      emptyHint: 'Talk to Ayma to build your public profile text.',
+    ),
   ];
 
   @override
