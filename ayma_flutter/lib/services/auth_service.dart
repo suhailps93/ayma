@@ -22,19 +22,27 @@ class AuthService extends ChangeNotifier {
             ? user.displayName!.trim()
             : (user.email?.split('@').first ?? 'User'));
 
-    await FirebaseFirestore.instance.collection('users').doc(user.uid).set({
+    final ref = FirebaseFirestore.instance.collection('users').doc(user.uid);
+    final snap = await ref.get();
+    final exists = snap.exists;
+    final data = snap.data() ?? const <String, dynamic>{};
+
+    await ref.set({
       'display_name': fallbackName,
-      'agent_name': 'Ayma',
-      'voice_preference': 'Charon',
-      'matching_prefs': {},
-      'onboarding_complete': false,
-      'matching_paused': false,
-      'profile_public_locked': false,
-      'community_profile': 'dating_standard',
+      'agent_name': data['agent_name'] ?? 'Ayma',
+      'voice_preference': data['voice_preference'] ?? 'Charon',
+      'matching_prefs': data['matching_prefs'] ?? {},
+      // Preserve onboarding flag once user completed it.
+      'onboarding_complete': exists
+          ? (data['onboarding_complete'] as bool? ?? false)
+          : false,
+      'matching_paused': data['matching_paused'] ?? false,
+      'profile_public_locked': data['profile_public_locked'] ?? false,
+      'community_profile': data['community_profile'] ?? 'dating_standard',
       'phone_number': user.phoneNumber,
       'email': user.email,
       'last_sign_in_at': FieldValue.serverTimestamp(),
-      'created_at': FieldValue.serverTimestamp(),
+      if (!exists) 'created_at': FieldValue.serverTimestamp(),
     }, SetOptions(merge: true));
   }
 
