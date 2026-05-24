@@ -87,6 +87,8 @@ class AymaAudioService extends ChangeNotifier {
   bool _userTalking = false;
   bool get userTalking => _userTalking;
   Timer? _userTalkingDebounce;
+  int _speechAttackFrames = 0;
+  DateTime? _lastVoiceAboveStopAt;
 
   bool _muted = false;
   bool _speakerMuted = false;
@@ -685,19 +687,60 @@ class AymaAudioService extends ChangeNotifier {
       );
       _recorder.onProgress?.listen((e) {
         final vol = ((e.decibels ?? -60) + 60) / 60;
-        _inputVolume = vol;
-
-        // Lightweight VAD: volume threshold + debounce
-        if (vol > 0.22) {
-          _userTalking = true;
-          _userTalkingDebounce?.cancel();
-          _userTalkingDebounce = Timer(const Duration(milliseconds: 500), () {
-            _userTalking = false;
-            notifyListeners();
-          });
-        }
+        _updateVoiceActivity(vol);
         _notifyMetersThrottled();
       });
+    }
+  }
+
+  void _updateVoiceActivity(double rawVolume) {
+    // Hysteresis + short attack/release reduces false positives from ambient
+    // noise while keeping the wave responsive to real speech.
+    const startThreshold = 0.34;
+    const stopThreshold = 0.20;
+    const minAttackFrames = 2;
+    const releaseMs = 320;
+
+    final now = DateTime.now();
+    final wasTalking = _userTalking;
+
+    if (_userTalking) {
+      if (rawVolume >= stopThreshold) {
+        _lastVoiceAboveStopAt = now;
+      } else {
+        final last = _lastVoiceAboveStopAt ?? now;
+        if (now.difference(last).inMilliseconds >= releaseMs) {
+          _userTalking = false;
+          _speechAttackFrames = 0;
+        }
+      }
+    } else {
+      if (rawVolume >= startThreshold) {
+        _speechAttackFrames++;
+        if (_speechAttackFrames >= minAttackFrames) {
+          _userTalking = true;
+          _lastVoiceAboveStopAt = now;
+        }
+      } else {
+        _speechAttackFrames = 0;
+      }
+    }
+
+    // Idle/listening silence should be visually stable.
+    if (_userTalking) {
+      final normalized =
+          ((rawVolume - stopThreshold) / (1 - stopThreshold)).clamp(0.0, 1.0);
+      _inputVolume = normalized.toDouble();
+    } else {
+      _inputVolume = 0;
+    }
+
+    if (wasTalking != _userTalking) {
+      _userTalkingDebounce?.cancel();
+      if (_userTalking) {
+        _userTalkingDebounce = Timer(const Duration(milliseconds: releaseMs), () {});
+      }
+      notifyListeners();
     }
   }
 
@@ -956,6 +999,12 @@ class AymaAudioService extends ChangeNotifier {
       debugPrint('[ws] state $_state -> $s');
     }
     _state = s;
+    if (s == SessionState.disconnected || s == SessionState.connecting) {
+      _userTalking = false;
+      _speechAttackFrames = 0;
+      _lastVoiceAboveStopAt = null;
+      _inputVolume = 0;
+    }
     if (s != SessionState.speaking) _outputVolume = 0;
     notifyListeners();
   }
@@ -1177,6 +1226,7 @@ $contextLines
   @override
   void dispose() {
     _reconnectTimer?.cancel();
+    _userTalkingDebounce?.cancel();
     disconnect(notify: false);
     if (!kIsWeb) {
       if (_audioInitialized) {

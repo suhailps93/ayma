@@ -10,6 +10,7 @@ class FirestoreService {
 
   static FirebaseFirestore get _db => FirebaseFirestore.instance;
   static String get _uid => FirebaseAuth.instance.currentUser!.uid;
+  static String uidForClient() => FirebaseAuth.instance.currentUser?.uid ?? '';
 
   // ── Profile ────────────────────────────────────────────────────────────────
 
@@ -137,6 +138,31 @@ class FirestoreService {
       'created_at': DateTime.now().toIso8601String(),
       'meta': {'from_user_id': _uid},
     });
+  }
+
+  static Stream<List<Map<String, dynamic>>> conversationStream(
+      String otherUserId) {
+    return _db
+        .collection('messages')
+        .orderBy('created_at', descending: true)
+        .limit(300)
+        .snapshots()
+        .map((snap) => snap.docs
+            .map((d) => d.data()..['id'] = d.id)
+            .where((m) {
+              final from = (m['from_user_id'] as String?) ?? '';
+              final to = (m['to_user_id'] as String?) ?? '';
+              final betweenMeAndOther =
+                  (from == _uid && to == otherUserId) ||
+                      (from == otherUserId && to == _uid);
+              return betweenMeAndOther;
+            })
+            .toList()
+          ..sort((a, b) {
+            final ta = (a['created_at'] as String?) ?? '';
+            final tb = (b['created_at'] as String?) ?? '';
+            return ta.compareTo(tb);
+          }));
   }
 
   static Map<String, String> deriveVoiceDefaults({
@@ -292,10 +318,13 @@ class FirestoreService {
     final doc = await _db.collection('users').doc(_uid).get();
     final data = doc.data();
     if (data == null) return false;
-    // Explicit flag OR has basic profile data (name + gender) = treated as onboarded
-    return (data['onboarding_complete'] as bool?) == true ||
-        ((data['display_name'] as String?)?.isNotEmpty == true &&
-            (data['gender'] as String?) != null);
+    final complete = inferOnboardingComplete(data);
+    if (complete && (data['onboarding_complete'] as bool?) != true) {
+      await _db.collection('users').doc(_uid).set({
+        'onboarding_complete': true,
+      }, SetOptions(merge: true));
+    }
+    return complete;
   }
 
   static Future<void> completeOnboarding() async {
@@ -303,6 +332,43 @@ class FirestoreService {
         .collection('users')
         .doc(_uid)
         .update({'onboarding_complete': true});
+  }
+
+  static bool inferOnboardingComplete(Map<String, dynamic> data) {
+    if ((data['onboarding_complete'] as bool?) == true) return true;
+
+    final displayName = (data['display_name'] as String?)?.trim() ?? '';
+    final gender = (data['gender'] as String?)?.trim() ?? '';
+    final hasAge = data['age'] is num;
+    final locationRegion = (data['location_region'] as String?)?.trim() ?? '';
+    final matchingPrefs =
+        (data['matching_prefs'] as Map<String, dynamic>?) ?? const {};
+    final hasMatchingPrefs = _hasMeaningfulMatchingPrefs(matchingPrefs);
+    final hasLegacyProfile =
+        _hasMeaningfulText(data['profile_public']) ||
+            _hasMeaningfulText(data['profile_private']) ||
+            _hasMeaningfulText(data['about_me']) ||
+            _hasMeaningfulText(data['preferences']) ||
+            _hasMeaningfulText(data['context']) ||
+            _hasMeaningfulText(data['profile_ai_observations']);
+
+    final hasCoreOnboardingData =
+        displayName.isNotEmpty && gender.isNotEmpty && hasAge;
+
+    return hasCoreOnboardingData &&
+        (locationRegion.isNotEmpty || hasMatchingPrefs || hasLegacyProfile);
+  }
+
+  static bool _hasMeaningfulText(dynamic value) {
+    final text = (value as String?)?.trim() ?? '';
+    return text.isNotEmpty;
+  }
+
+  static bool _hasMeaningfulMatchingPrefs(Map<String, dynamic> prefs) {
+    final interestedIn = (prefs['interested_in'] as String?)?.trim() ?? '';
+    final ageMin = prefs['age_min'];
+    final ageMax = prefs['age_max'];
+    return interestedIn.isNotEmpty || ageMin != null || ageMax != null;
   }
 
   // ── Insights (memories summary) ────────────────────────────────────────────

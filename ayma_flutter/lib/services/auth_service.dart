@@ -38,6 +38,7 @@ class AuthService extends ChangeNotifier {
     );
     final existingVoiceSettings =
         (data['voice_settings'] as Map<String, dynamic>?) ?? const {};
+    final onboardingComplete = FirestoreService.inferOnboardingComplete(data);
 
     await ref.set({
       'display_name': fallbackName,
@@ -55,7 +56,9 @@ class AuthService extends ChangeNotifier {
       'matching_prefs': data['matching_prefs'] ?? {},
       // Preserve onboarding flag once user completed it.
       'onboarding_complete': exists
-          ? (existingOnboarding || hasBasicOnboardingData)
+          ? (existingOnboarding ||
+              hasBasicOnboardingData ||
+              onboardingComplete)
           : false,
       'matching_paused': data['matching_paused'] ?? false,
       'profile_public_locked': data['profile_public_locked'] ?? false,

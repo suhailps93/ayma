@@ -52,6 +52,12 @@ final profileProvider = FutureProvider<UserProfile?>((ref) async {
   return FirestoreService.getProfile();
 });
 
+final publicProfileProvider =
+    FutureProvider.family<Map<String, dynamic>?, String>((ref, userId) async {
+  if (userId.isEmpty) return null;
+  return FirestoreService.getPublicProfile(userId);
+});
+
 // ── Matches ───────────────────────────────────────────────────────────────────
 
 final matchesProvider = FutureProvider<List<MatchModel>>((ref) async {
@@ -199,6 +205,10 @@ final exploreProvider =
 Future<void> updateProfile(Map<String, dynamic> fields, WidgetRef ref) async {
   await FirestoreService.updateProfile(fields);
   ref.invalidate(profileProvider);
+  final user = ref.read(currentUserProvider);
+  if (user != null) {
+    ref.invalidate(publicProfileProvider(user.id));
+  }
 }
 
 // ── Audio Service ─────────────────────────────────────────────────────────────

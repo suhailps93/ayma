@@ -7,6 +7,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../providers/providers.dart';
 import '../../services/firestore_service.dart';
 import '../../theme.dart';
+import 'direct_message_screen.dart';
 
 class ExploreScreen extends ConsumerStatefulWidget {
   const ExploreScreen({super.key});
@@ -733,43 +734,17 @@ class _ExploreProfileScreenState extends State<_ExploreProfileScreen> {
   }
 
   Future<void> _sendMessage(String userId) async {
-    final ctrl = TextEditingController();
-    final text = await showDialog<String>(
-      context: context,
-      builder: (ctx) => AlertDialog(
-        backgroundColor: AymaColors.bgElev,
-        title: const Text('Send message'),
-        content: TextField(
-          controller: ctrl,
-          maxLines: 4,
-          decoration: const InputDecoration(
-            hintText: 'Write a message...',
-          ),
+    final p = await _profileFuture;
+    final name = ((p?['display_name'] as String?) ?? 'Message').trim();
+    if (!mounted) return;
+    Navigator.of(context).push(
+      MaterialPageRoute<void>(
+        builder: (_) => DirectMessageScreen(
+          targetUserId: userId,
+          targetName: name.isEmpty ? 'Message' : name,
         ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(ctx),
-            child: const Text('Cancel'),
-          ),
-          TextButton(
-            onPressed: () => Navigator.pop(ctx, ctrl.text),
-            child: const Text('Send'),
-          ),
-        ],
       ),
     );
-    final msg = (text ?? '').trim();
-    if (msg.isEmpty) return;
-    setState(() => _busy = true);
-    try {
-      await FirestoreService.sendDirectMessage(targetUserId: userId, text: msg);
-      if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Message sent')),
-      );
-    } finally {
-      if (mounted) setState(() => _busy = false);
-    }
   }
 
   @override

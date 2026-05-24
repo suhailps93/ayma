@@ -50,6 +50,8 @@ class _ProfileScreenState extends ConsumerState<ProfileScreen> {
         if (_matchingPaused != null) 'matching_paused': _matchingPaused,
       });
       ref.invalidate(profileProvider);
+      ref.invalidate(publicProfileProvider(profile.id));
+      ref.invalidate(insightsProvider);
       if (mounted) setState(() => _editing = false);
     } catch (e) {
       if (mounted) {
@@ -60,7 +62,7 @@ class _ProfileScreenState extends ConsumerState<ProfileScreen> {
     if (mounted) setState(() => _saving = false);
   }
 
-  Future<void> _pickAndUploadPhoto() async {
+  Future<void> _pickAndUploadPhoto(UserProfile profile) async {
     if (_uploadingPhoto) return;
     final picked = await _imagePicker.pickImage(
       source: ImageSource.gallery,
@@ -73,6 +75,7 @@ class _ProfileScreenState extends ConsumerState<ProfileScreen> {
       final bytes = await picked.readAsBytes();
       final url = await BackendService.uploadMedia(bytes, picked.name);
       await FirestoreService.saveMediaRecord(photoUrl: url);
+      ref.invalidate(publicProfileProvider(profile.id));
       ref.invalidate(insightsProvider);
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
@@ -137,7 +140,9 @@ class _ProfileScreenState extends ConsumerState<ProfileScreen> {
       floatingActionButton: _editing
           ? null
           : FloatingActionButton.extended(
-              onPressed: _uploadingPhoto ? null : _pickAndUploadPhoto,
+              onPressed: _uploadingPhoto || profileAsync.valueOrNull == null
+                  ? null
+                  : () => _pickAndUploadPhoto(profileAsync.valueOrNull!),
               backgroundColor: AymaColors.accent,
               foregroundColor: Colors.black,
               icon: _uploadingPhoto
@@ -161,16 +166,47 @@ class _ReadView extends ConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
+    final publicProfileAsync = ref.watch(publicProfileProvider(profile.id));
     final insightsAsync = ref.watch(insightsProvider);
+    final publicProfile = publicProfileAsync.valueOrNull ?? const <String, dynamic>{};
     final insights = insightsAsync.valueOrNull ?? const <String, String>{};
-    String? preview;
-    for (final key in const ['about_me', 'preferences', 'context']) {
-      final text = (insights[key] ?? '').trim();
-      if (text.isNotEmpty) {
-        preview = text.split('\n').first.trim();
-        break;
-      }
-    }
+
+    final photos = ((publicProfile['photos'] as List?) ?? const [])
+        .whereType<String>()
+        .map((photo) => photo.trim())
+        .where((photo) => photo.isNotEmpty)
+        .toList();
+
+    final name = _stringOrFallback([
+      publicProfile['display_name'],
+      profile.displayName,
+      'You',
+    ]);
+    final age = _ageOrNull([
+      publicProfile['age'],
+      profile.age,
+    ]);
+    final gender = _stringOrFallback([
+      publicProfile['gender'],
+      profile.gender,
+    ]);
+    final location = _stringOrFallback([
+      publicProfile['location_region'],
+      profile.locationRegion,
+    ]);
+    final interestedIn = _stringOrFallback([
+      (publicProfile['matching_prefs'] as Map?)?['interested_in'],
+      profile.matchingPrefs['interested_in'],
+    ]);
+    final bio = _stringOrFallback([
+      publicProfile['profile_public'],
+      profile.profilePublic,
+      'No public bio yet. Talk to Ayma to build your profile.',
+    ]);
+    final aboutMe = _storyText(insights, 'about_me');
+    final preferences = _storyText(insights, 'preferences');
+    final contextText = _storyText(insights, 'context');
+    final mediaText = _storyText(insights, 'media');
 
     return ListView(
       padding: const EdgeInsets.fromLTRB(20, 16, 20, 120),
@@ -223,66 +259,45 @@ class _ReadView extends ConsumerWidget {
             ),
           ],
         ),
-        const SizedBox(height: 24),
+        const SizedBox(height: 22),
 
-        // Avatar + name
-        Center(
-          child: Column(
-            children: [
-              Container(
-                width: 80, height: 80,
-                decoration: BoxDecoration(
-                  shape: BoxShape.circle,
-                  color: AymaColors.accent.withValues(alpha: 0.12),
-                  border: Border.all(
-                    color: AymaColors.accent.withValues(alpha: 0.3), width: 1.5),
-                ),
-                child: Center(
-                  child: Text(
-                    profile.displayName.isNotEmpty
-                        ? profile.displayName[0].toUpperCase()
-                        : '?',
-                    style: TextStyle(
-                        color: AymaColors.accent, fontSize: 32, fontWeight: FontWeight.w600),
-                  ),
-                ),
-              ),
-              const SizedBox(height: 12),
-              Text(
-                profile.displayName.isNotEmpty ? profile.displayName : 'You',
-                style: AymaFonts.serif(size: 26, color: AymaColors.fg),
-              ),
-              const SizedBox(height: 4),
-              if (profile.age != null || profile.locationRegion != null)
-                Text(
-                  [
-                    if (profile.age != null) '${profile.age}',
-                    if (profile.gender != null) profile.gender!,
-                    if (profile.locationRegion != null) profile.locationRegion!,
-                  ].join(' · '),
-                  style: AymaFonts.mono(size: 10, color: AymaColors.fgMute),
-                ),
-              const SizedBox(height: 4),
-              // Agent + voice row
-              Row(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  _MiniPill(label: profile.agentName),
-                  const SizedBox(width: 6),
-                  _MiniPill(label: profile.voicePreference),
-                  if (profile.matchingPaused) ...[
-                    const SizedBox(width: 6),
-                    _MiniPill(label: 'Paused', accent: true),
-                  ],
-                ],
-              ),
-            ],
-          ),
+        _PublicHeroSection(
+          name: name,
+          age: age,
+          gender: gender,
+          location: location,
+          interestedIn: interestedIn,
+          agentName: profile.agentName,
+          voicePreference: profile.voicePreference,
+          matchingPaused: profile.matchingPaused,
+          photos: photos,
+          loadingPhotos: publicProfileAsync.isLoading && photos.isEmpty,
         ).animate(delay: 80.ms).fadeIn(duration: 400.ms),
 
-        const SizedBox(height: 28),
+        const SizedBox(height: 14),
 
-        // Public bio
+        Row(
+          children: [
+            Expanded(
+              child: _InlineAction(
+                label: 'Edit profile',
+                icon: Icons.edit_outlined,
+                onTap: onEdit,
+              ),
+            ),
+            const SizedBox(width: 10),
+            Expanded(
+              child: _InlineAction(
+                label: 'Settings',
+                icon: Icons.settings_outlined,
+                onTap: () => context.push('/settings'),
+              ),
+            ),
+          ],
+        ),
+
+        const SizedBox(height: 14),
+
         _Section(
           title: 'Public profile',
           badge: !profile.profilePublicLocked ? 'AI written' : 'Edited',
@@ -290,21 +305,68 @@ class _ReadView extends ConsumerWidget {
               ? AymaColors.accent
               : Colors.green.shade400,
           child: Text(
-            profile.profilePublic?.isNotEmpty == true
-                ? profile.profilePublic!
-                : 'No public bio yet. Talk to Ayma to build your profile.',
-            style: TextStyle(
-              color: profile.profilePublic?.isNotEmpty == true
-                  ? AymaColors.fg
-                  : AymaColors.fgMute,
-              fontSize: 14, height: 1.6,
-            ),
+            bio,
+            style: TextStyle(color: AymaColors.fg, fontSize: 14, height: 1.6),
           ),
         ).animate(delay: 160.ms).fadeIn(duration: 400.ms).slideY(begin: 0.05, end: 0),
 
         const SizedBox(height: 14),
 
-        // Private notes
+        _Section(
+          title: 'Your story',
+          subtitle: 'Updated after every conversation with Ayma.',
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              _StorySnippet(
+                label: 'About you',
+                text: aboutMe,
+              ),
+              const SizedBox(height: 10),
+              _StorySnippet(
+                label: "What you're looking for",
+                text: preferences,
+              ),
+              const SizedBox(height: 10),
+              _StorySnippet(
+                label: 'Right now',
+                text: contextText,
+              ),
+              if (mediaText.isNotEmpty) ...[
+                const SizedBox(height: 10),
+                _StorySnippet(
+                  label: 'Photos',
+                  text: mediaText,
+                ),
+              ],
+              const SizedBox(height: 12),
+              GestureDetector(
+                onTap: () => context.go('/insights'),
+                child: Row(
+                  children: [
+                    Text(
+                      'Open full story',
+                      style: TextStyle(
+                        color: AymaColors.accent,
+                        fontSize: 13,
+                        fontWeight: FontWeight.w500,
+                      ),
+                    ),
+                    const SizedBox(width: 6),
+                    Icon(
+                      Icons.arrow_forward_ios_rounded,
+                      size: 12,
+                      color: AymaColors.accent.withValues(alpha: 0.7),
+                    ),
+                  ],
+                ),
+              ),
+            ],
+          ),
+        ).animate(delay: 220.ms).fadeIn(duration: 400.ms).slideY(begin: 0.05, end: 0),
+
+        const SizedBox(height: 14),
+
         _Section(
           title: 'Private notes',
           subtitle: 'Only visible to you — Ayma uses this to understand you better.',
@@ -319,19 +381,15 @@ class _ReadView extends ConsumerWidget {
               fontSize: 14, height: 1.6,
             ),
           ),
-        ).animate(delay: 220.ms).fadeIn(duration: 400.ms).slideY(begin: 0.05, end: 0),
+        ).animate(delay: 280.ms).fadeIn(duration: 400.ms).slideY(begin: 0.05, end: 0),
 
         if (profile.matchingPrefs.isNotEmpty) ...[
           const SizedBox(height: 14),
           _Section(
             title: 'Matching preferences',
             child: _PrefsView(prefs: profile.matchingPrefs),
-          ).animate(delay: 280.ms).fadeIn(duration: 400.ms).slideY(begin: 0.05, end: 0),
+          ).animate(delay: 340.ms).fadeIn(duration: 400.ms).slideY(begin: 0.05, end: 0),
         ],
-
-        const SizedBox(height: 14),
-        _YourStoryCard(preview: preview)
-            .animate(delay: 340.ms).fadeIn(duration: 400.ms).slideY(begin: 0.05, end: 0),
       ],
     );
   }
@@ -508,6 +566,301 @@ class _PrefsView extends StatelessWidget {
   }
 }
 
+class _PublicHeroSection extends StatelessWidget {
+  final String name;
+  final int? age;
+  final String? gender;
+  final String? location;
+  final String? interestedIn;
+  final String agentName;
+  final String voicePreference;
+  final bool matchingPaused;
+  final List<String> photos;
+  final bool loadingPhotos;
+
+  const _PublicHeroSection({
+    required this.name,
+    required this.age,
+    required this.gender,
+    required this.location,
+    required this.interestedIn,
+    required this.agentName,
+    required this.voicePreference,
+    required this.matchingPaused,
+    required this.photos,
+    required this.loadingPhotos,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final hasPhotos = photos.isNotEmpty;
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        AnimatedContainer(
+          duration: const Duration(milliseconds: 220),
+          height: 224,
+          decoration: BoxDecoration(
+            color: AymaColors.bgElev,
+            borderRadius: BorderRadius.circular(22),
+            border: Border.all(color: AymaColors.lineSoft, width: 0.5),
+          ),
+          clipBehavior: Clip.hardEdge,
+          child: hasPhotos
+              ? ListView.separated(
+                  padding: const EdgeInsets.all(12),
+                  scrollDirection: Axis.horizontal,
+                  itemCount: photos.length,
+                  separatorBuilder: (_, __) => const SizedBox(width: 10),
+                  itemBuilder: (_, index) => ClipRRect(
+                    borderRadius: BorderRadius.circular(18),
+                    child: AspectRatio(
+                      aspectRatio: 0.82,
+                      child: Image.network(
+                        photos[index],
+                        fit: BoxFit.cover,
+                        errorBuilder: (_, __, ___) => _PhotoFallback(name: name),
+                      ),
+                    ),
+                  ),
+                )
+              : _PhotoFallback(
+                  name: name,
+                  loading: loadingPhotos,
+                ),
+        ),
+        const SizedBox(height: 14),
+        Container(
+          padding: const EdgeInsets.all(16),
+          decoration: BoxDecoration(
+            color: AymaColors.bgElev,
+            borderRadius: BorderRadius.circular(20),
+            border: Border.all(color: AymaColors.lineSoft, width: 0.5),
+          ),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(
+                name,
+                style: AymaFonts.serif(size: 30, color: AymaColors.fg),
+              ),
+              const SizedBox(height: 8),
+              Text(
+                [
+                  if (age != null) '$age',
+                  if (gender != null && gender!.isNotEmpty) gender!,
+                  if (interestedIn != null && interestedIn!.isNotEmpty)
+                    'Interested in $interestedIn',
+                  if (location != null && location!.isNotEmpty) location!,
+                ].join(' · '),
+                style: const TextStyle(color: AymaColors.fgMute, fontSize: 14, height: 1.4),
+              ),
+              const SizedBox(height: 12),
+              Wrap(
+                spacing: 8,
+                runSpacing: 8,
+                children: [
+                  _MiniPill(label: agentName),
+                  _MiniPill(label: voicePreference),
+                  if (matchingPaused) _MiniPill(label: 'Paused', accent: true),
+                ],
+              ),
+            ],
+          ),
+        ),
+      ],
+    );
+  }
+}
+
+class _PhotoFallback extends StatelessWidget {
+  final String name;
+  final bool loading;
+
+  const _PhotoFallback({
+    required this.name,
+    this.loading = false,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      decoration: BoxDecoration(
+        gradient: LinearGradient(
+          colors: [
+            AymaColors.accent.withValues(alpha: 0.18),
+            AymaColors.bgCard,
+          ],
+          begin: Alignment.topLeft,
+          end: Alignment.bottomRight,
+        ),
+      ),
+      child: Center(
+        child: loading
+            ? const SizedBox(
+                width: 22,
+                height: 22,
+                child: CircularProgressIndicator(
+                  strokeWidth: 2,
+                  color: AymaColors.accent,
+                ),
+              )
+            : Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Container(
+                    width: 76,
+                    height: 76,
+                    decoration: BoxDecoration(
+                      shape: BoxShape.circle,
+                      color: AymaColors.accent.withValues(alpha: 0.14),
+                      border: Border.all(
+                        color: AymaColors.accent.withValues(alpha: 0.25),
+                        width: 1.2,
+                      ),
+                    ),
+                    alignment: Alignment.center,
+                    child: Text(
+                      name.isNotEmpty ? name[0].toUpperCase() : '?',
+                      style: TextStyle(
+                        color: AymaColors.accent,
+                        fontSize: 32,
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                  ),
+                  const SizedBox(height: 14),
+                  Text(
+                    'No photos yet',
+                    style: AymaFonts.serif(size: 20, color: AymaColors.fg),
+                  ),
+                  const SizedBox(height: 4),
+                  Text(
+                    'Add photos to build your public profile.',
+                    style: TextStyle(
+                      color: AymaColors.fgMute,
+                      fontSize: 12,
+                    ),
+                  ),
+                ],
+              ),
+      ),
+    );
+  }
+}
+
+class _InlineAction extends StatelessWidget {
+  final String label;
+  final IconData icon;
+  final VoidCallback onTap;
+
+  const _InlineAction({
+    required this.label,
+    required this.icon,
+    required this.onTap,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return GestureDetector(
+      onTap: onTap,
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 12),
+        decoration: BoxDecoration(
+          color: AymaColors.bgElev,
+          borderRadius: BorderRadius.circular(14),
+          border: Border.all(color: AymaColors.lineSoft, width: 0.5),
+        ),
+        child: Row(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            Icon(icon, size: 15, color: AymaColors.fgDim),
+            const SizedBox(width: 8),
+            Flexible(
+              child: Text(
+                label,
+                overflow: TextOverflow.ellipsis,
+                style: TextStyle(
+                  color: AymaColors.fgDim,
+                  fontSize: 13,
+                  fontWeight: FontWeight.w500,
+                ),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _StorySnippet extends StatelessWidget {
+  final String label;
+  final String text;
+
+  const _StorySnippet({
+    required this.label,
+    required this.text,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final hasText = text.trim().isNotEmpty;
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.all(14),
+      decoration: BoxDecoration(
+        color: AymaColors.bgCard,
+        borderRadius: BorderRadius.circular(14),
+        border: Border.all(color: AymaColors.lineSoft, width: 0.5),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            label.toUpperCase(),
+            style: AymaFonts.mono(size: 9, color: AymaColors.fgMute),
+          ),
+          const SizedBox(height: 6),
+          Text(
+            hasText ? text : 'Ayma is still learning this from your conversations.',
+            style: TextStyle(
+              color: hasText ? AymaColors.fg : AymaColors.fgMute,
+              fontSize: 13,
+              height: 1.5,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+String _stringOrFallback(Iterable<dynamic> values) {
+  for (final value in values) {
+    if (value == null) continue;
+    final text = value.toString().trim();
+    if (text.isNotEmpty) return text;
+  }
+  return '';
+}
+
+int? _ageOrNull(Iterable<dynamic> values) {
+  for (final value in values) {
+    if (value is int) return value;
+    if (value is num) return value.toInt();
+  }
+  return null;
+}
+
+String _storyText(Map<String, String> insights, String key) {
+  final raw = (insights[key] ?? '').trim();
+  if (raw.isEmpty) return '';
+  final firstLine = raw.split('\n').first.trim();
+  return firstLine.isEmpty ? raw : firstLine;
+}
+
 // ── Shared widgets ────────────────────────────────────────────────────────────
 
 class _FieldLabel extends StatelessWidget {
@@ -627,66 +980,4 @@ class _Chip extends StatelessWidget {
     ),
     child: Text(label, style: TextStyle(color: AymaColors.fgDim, fontSize: 12)),
   );
-}
-
-// ── Your Story card ────────────────────────────────────────────────────────────
-
-class _YourStoryCard extends StatelessWidget {
-  final String? preview;
-  const _YourStoryCard({this.preview});
-
-  @override
-  Widget build(BuildContext context) {
-    return GestureDetector(
-      onTap: () => context.go('/insights'),
-      child: Container(
-        padding: const EdgeInsets.all(16),
-        decoration: BoxDecoration(
-          color: AymaColors.bgElev,
-          borderRadius: BorderRadius.circular(18),
-          border: Border.all(color: AymaColors.accent.withValues(alpha: 0.25)),
-        ),
-        child: Row(
-          children: [
-            Container(
-              width: 40, height: 40,
-              decoration: BoxDecoration(
-                color: AymaColors.accent.withValues(alpha: 0.1),
-                borderRadius: BorderRadius.circular(10),
-                border: Border.all(
-                    color: AymaColors.accent.withValues(alpha: 0.3), width: 0.5),
-              ),
-              child: const Icon(Icons.auto_stories_rounded,
-                  size: 18, color: AymaColors.accent),
-            ),
-            const SizedBox(width: 14),
-            Expanded(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text(
-                    'YOUR STORY',
-                    style: AymaFonts.mono(size: 9, color: AymaColors.accent),
-                  ),
-                  const SizedBox(height: 4),
-                  Text(
-                    preview ?? 'What Ayma has learned about you',
-                    style: TextStyle(
-                      color: preview != null ? AymaColors.fgDim : AymaColors.fgMute,
-                      fontSize: 12, height: 1.4,
-                    ),
-                    maxLines: 2,
-                    overflow: TextOverflow.ellipsis,
-                  ),
-                ],
-              ),
-            ),
-            const SizedBox(width: 8),
-            Icon(Icons.arrow_forward_ios_rounded,
-                size: 12, color: AymaColors.accent.withValues(alpha: 0.5)),
-          ],
-        ),
-      ),
-    );
-  }
 }
