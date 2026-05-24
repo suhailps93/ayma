@@ -1,5 +1,6 @@
 // ignore_for_file: avoid_web_libraries_in_flutter, undefined_class, undefined_function, deprecated_member_use
 import 'dart:html' as html;
+import 'dart:js_util' as js_util;
 import 'dart:typed_data';
 
 /// Real Web Audio API implementation for Flutter Web.
@@ -7,10 +8,10 @@ import 'dart:typed_data';
 /// PCM16 playback via scheduled AudioBufferSourceNodes.
 
 class WebMicCapture {
-  html.AudioContext? _ctx;
+  dynamic _ctx;
   html.MediaStream? _stream;
-  html.ScriptProcessorNode? _processor;
-  html.MediaStreamAudioSourceNode? _source;
+  dynamic _processor;
+  dynamic _source;
   bool _active = false;
 
   Future<void> start(void Function(Uint8List pcm16) onData) async {
@@ -28,37 +29,70 @@ class WebMicCapture {
     });
 
     // Create context at 16 kHz; some browsers may resample but that's fine.
-    _ctx = html.AudioContext({'sampleRate': 16000});
-    await _ctx!.resume();
+    final audioContextCtor = js_util.getProperty(html.window, 'AudioContext') ??
+        js_util.getProperty(html.window, 'webkitAudioContext');
+    if (audioContextCtor == null) return;
+    _ctx = js_util.callConstructor(audioContextCtor, [js_util.jsify({'sampleRate': 16000})]);
+    await js_util.promiseToFuture(js_util.callMethod(_ctx, 'resume', const []));
 
-    _source    = _ctx!.createMediaStreamSource(_stream!);
-    _processor = _ctx!.createScriptProcessor(4096, 1, 1);
+    _source = js_util.callMethod(_ctx, 'createMediaStreamSource', [_stream]);
+    _processor = js_util.callMethod(_ctx, 'createScriptProcessor', [4096, 1, 1]);
 
-    _processor!.onAudioProcess.listen((html.AudioProcessingEvent event) {
-      if (!_active) return;
-      // getChannelData returns a Float32List view
-      final input  = event.inputBuffer.getChannelData(0);
-      final bytes  = Uint8List(input.length * 2);
-      final view   = ByteData.sublistView(bytes);
-      for (int i = 0; i < input.length; i++) {
-        final s = (input[i].clamp(-1.0, 1.0) * 32767).round();
-        view.setInt16(i * 2, s, Endian.little);
-      }
-      onData(bytes);
-    });
-
-    _source!.connectNode(_processor!);
+    final onAudioProcess = js_util.getProperty(_processor, 'onaudioprocess');
+    if (onAudioProcess != null) {
+      js_util.setProperty(_processor, 'onaudioprocess', js_util.allowInterop((event) {
+        if (!_active) return;
+        final inputBuffer = js_util.getProperty(event, 'inputBuffer');
+        final input = js_util.callMethod(inputBuffer, 'getChannelData', [0]) as Float32List;
+        final bytes = Uint8List(input.length * 2);
+        final view = ByteData.sublistView(bytes);
+        for (int i = 0; i < input.length; i++) {
+          final s = (input[i].clamp(-1.0, 1.0) * 32767).round();
+          view.setInt16(i * 2, s, Endian.little);
+        }
+        onData(bytes);
+      }));
+    } else {
+      js_util.callMethod(
+        js_util.getProperty(_processor, 'addEventListener'),
+        'call',
+        [
+          _processor,
+          'audioprocess',
+          js_util.allowInterop((event) {
+            if (!_active) return;
+            final inputBuffer = js_util.getProperty(event, 'inputBuffer');
+            final input =
+                js_util.callMethod(inputBuffer, 'getChannelData', [0]) as Float32List;
+            final bytes = Uint8List(input.length * 2);
+            final view = ByteData.sublistView(bytes);
+            for (int i = 0; i < input.length; i++) {
+              final s = (input[i].clamp(-1.0, 1.0) * 32767).round();
+              view.setInt16(i * 2, s, Endian.little);
+            }
+            onData(bytes);
+          }),
+        ],
+      );
+    }
+    js_util.callMethod(_source, 'connect', [_processor]);
     // Must connect to destination for ScriptProcessorNode to fire (browser quirk)
-    _processor!.connectNode(_ctx!.destination!);
+    js_util.callMethod(_processor, 'connect', [js_util.getProperty(_ctx, 'destination')]);
     _active = true;
   }
 
   void stop() {
     _active = false;
-    _processor?.disconnect();
-    _source?.disconnect();
+    if (_processor != null) {
+      js_util.callMethod(_processor, 'disconnect', const []);
+    }
+    if (_source != null) {
+      js_util.callMethod(_source, 'disconnect', const []);
+    }
     _stream?.getTracks().forEach((t) => t.stop());
-    _ctx?.close();
+    if (_ctx != null) {
+      js_util.callMethod(_ctx, 'close', const []);
+    }
     _ctx       = null;
     _stream    = null;
     _processor = null;
@@ -67,36 +101,47 @@ class WebMicCapture {
 }
 
 class WebPcmPlayer {
-  html.AudioContext? _ctx;
+  dynamic _ctx;
   double _nextTime = 0;
 
   void play(Uint8List pcm16) {
     // Create context lazily — must happen after a user gesture (autoplay policy)
-    _ctx ??= html.AudioContext({'sampleRate': 24000});
+    if (_ctx == null) {
+      final audioContextCtor = js_util.getProperty(html.window, 'AudioContext') ??
+          js_util.getProperty(html.window, 'webkitAudioContext');
+      if (audioContextCtor == null) return;
+      _ctx = js_util.callConstructor(
+        audioContextCtor,
+        [js_util.jsify({'sampleRate': 24000})],
+      );
+    }
     final ctx = _ctx!;
-    ctx.resume(); // resume in case it was suspended
+    js_util.callMethod(ctx, 'resume', const []); // resume in case it was suspended
 
     final sampleCount  = pcm16.length ~/ 2;
-    final audioBuffer  = ctx.createBuffer(1, sampleCount, 24000);
-    final channelData  = audioBuffer.getChannelData(0); // Float32List
+    final audioBuffer = js_util.callMethod(ctx, 'createBuffer', [1, sampleCount, 24000]);
+    final channelData = js_util.callMethod(audioBuffer, 'getChannelData', [0]) as Float32List;
     final view         = ByteData.sublistView(pcm16);
 
     for (int i = 0; i < sampleCount; i++) {
       channelData[i] = view.getInt16(i * 2, Endian.little) / 32768.0;
     }
 
-    final sourceNode = ctx.createBufferSource();
-    sourceNode.buffer = audioBuffer;
-    sourceNode.connectNode(ctx.destination!);
+    final sourceNode = js_util.callMethod(ctx, 'createBufferSource', const []);
+    js_util.setProperty(sourceNode, 'buffer', audioBuffer);
+    js_util.callMethod(sourceNode, 'connect', [js_util.getProperty(ctx, 'destination')]);
 
-    final now = ctx.currentTime ?? 0.0;
+    final now = (js_util.getProperty(ctx, 'currentTime') as num?)?.toDouble() ?? 0.0;
     if (_nextTime < now) _nextTime = now;
-    sourceNode.start(_nextTime);
-    _nextTime += audioBuffer.duration ?? 0.0;
+    js_util.callMethod(sourceNode, 'start', [_nextTime]);
+    final duration = (js_util.getProperty(audioBuffer, 'duration') as num?)?.toDouble() ?? 0.0;
+    _nextTime += duration;
   }
 
   void stop() {
-    _ctx?.close();
+    if (_ctx != null) {
+      js_util.callMethod(_ctx, 'close', const []);
+    }
     _ctx      = null;
     _nextTime = 0;
   }

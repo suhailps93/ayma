@@ -1,198 +1,107 @@
 # Data Layer
 
-> **Status:** All tables ✅ | Auth trigger ✅ | Safe view ✅ | RLS ✅
+> **Status:** Live on Firebase/Firestore. Supabase/PostgreSQL fully removed.
 >
 > [← Back to Architecture](ARCHITECTURE.md)
 
 ---
 
-## Table Relationships
+## Firestore Collections
 
-```mermaid
-erDiagram
-    auth_users {
-        uuid id PK
-        text email
-    }
+All data lives in Firestore (project: `ayma-ai`, region: `us-central1`).
 
-    user_profiles {
-        uuid id PK
-        text display_name
-        text profile_public
-        text profile_private
-        text profile_ai_observations
-        halfvec profile_embedding "3072 dims"
-        boolean profile_public_locked
-        text agent_name
-        text voice_preference
-        jsonb matching_prefs
-        int age
-        text gender
-        text religion
-        text location_region
-    }
+```
+users/{uid}
+  display_name          string
+  profile_public        string   — bio shown to other users
+  profile_private       string   — personal notes, only user can read
+  profile_ai_observations string  — AI-written summary, shown in Insights
+  agent_name            string   — custom name for the AI companion
+  voice_preference      string   — Gemini Live voice (Charon, Puck, etc.)
+  matching_prefs        map      — { age_min, age_max, gender, ... }
+  age                   int
+  gender                string
+  location_region       string
+  onboarding_complete   bool
+  matching_paused       bool
 
-    messages {
-        uuid id PK
-        uuid user_id FK
-        text role
-        text content
-        halfvec embedding "3072 dims"
-        text session_id
-        timestamptz created_at
-    }
+users/{uid}/memories/{id}
+  text        string   — free-text fact, extracted by /post-turn
+  session_id  string
+  created_at  timestamp
 
-    matches {
-        uuid id PK
-        uuid user_a FK
-        uuid user_b FK
-        float score
-        array commonalities
-        array differences
-        text rationale
-        text summary_a
-        text summary_b
-        jsonb convo_transcript
-        text status
-    }
+users/{uid}/traits/{id}
+  category    string   — hobby | value | goal | personality | lifestyle | relationship | emotion | opinion | experience
+  fact        string   — single concise sentence, extracted live by save_trait function call
+  session_id  string
+  created_at  timestamp
 
-    profile_suggestions {
-        uuid id PK
-        uuid user_id FK
-        text tier
-        text draft
-        text status
-    }
+users/{uid}/skills/{id}
+  name        string
+  content     string
+  enabled     bool
 
-    profile_exclusions {
-        uuid id PK
-        uuid user_id FK
-        text topic
-        text tier
-    }
+matches/{id}
+  user_a      uid
+  user_b      uid
+  score       int      — 0–100, from LLM scoring
+  rationale   string
+  status      string   — pending | accepted | rejected | vibe_checked
+  created_at  timestamp
+  updated_at  timestamp
 
-    user_skills {
-        uuid id PK
-        uuid user_id FK
-        text name
-        text skill_type
-        text content
-        boolean enabled
-    }
+notifications/{id}
+  user_id     uid
+  type        string
+  title       string
+  body        string
+  meta        map
+  read        bool
+  created_at  timestamp
 
-    user_tokens {
-        uuid id PK
-        uuid user_id FK
-        text provider
-        text encrypted_key
-        text label
-    }
-
-    rate_limits {
-        uuid user_id PK
-        int chat_turns
-        int match_stage2_runs
-        int agent_convos
-        int voice_minutes
-        timestamptz reset_at
-    }
-
-    llm_usage_log {
-        uuid id PK
-        uuid user_id FK
-        text task
-        text model
-        int input_tokens
-        int output_tokens
-    }
-
-    auth_users ||--|| user_profiles : "trigger on signup"
-    auth_users ||--o{ messages : ""
-    auth_users ||--o{ profile_suggestions : ""
-    auth_users ||--o{ profile_exclusions : ""
-    auth_users ||--o{ user_skills : ""
-    auth_users ||--o{ user_tokens : ""
-    auth_users ||--|| rate_limits : ""
-    auth_users ||--o{ llm_usage_log : ""
-    auth_users ||--o{ matches : "user_a or user_b"
+media/{id}
+  user_id     uid
+  photo_url   string   — Firebase Storage download URL
+  caption     string
+  created_at  timestamp
 ```
 
 ---
 
-## user_profile_safe View
+## Who Reads/Writes What
 
-The client **never** reads from `user_profiles` directly. It reads from this view,
-which structurally excludes `profile_ai_observations`.
-
-```sql
-CREATE VIEW user_profile_safe AS
-  SELECT
-    id, display_name, created_at, updated_at,
-    profile_public, profile_private,
-    -- profile_ai_observations intentionally excluded
-    profile_public_locked, agent_name, voice_preference,
-    matching_prefs, age, gender, religion, location_region
-  FROM user_profiles;
-```
+| Data | Flutter client | Cloud Run |
+|------|---------------|-----------|
+| `users/{uid}` (own) | read + write | read |
+| `users/{uid}` (others) | read if `onboarding_complete == true` | — |
+| `users/{uid}/memories` | read only | write only |
+| `users/{uid}/traits` | read + write | — |
+| `users/{uid}/skills` | read + write | read |
+| `matches` | read (participant only) | write (planned) |
+| `notifications` | read + mark-read | write |
+| `media` | read + write own | — |
+| Firebase Storage | write own, read any | — |
 
 ---
 
-## Who reads/writes what
+## Security Rules
 
-| Column | Client can read | Client can write | Backend writes |
-|--------|----------------|-----------------|----------------|
-| `profile_public` | ✅ (via view) | ✅ (if locked=true) | ✅ (if locked=false) |
-| `profile_private` | ✅ (via view) | ❌ | ✅ always |
-| `profile_ai_observations` | ❌ never | ❌ | ✅ always |
-| `profile_embedding` | ❌ | ❌ | ✅ after profile update |
-| `profile_public_locked` | ✅ | ✅ | ✅ |
+Enforced in `firestore.rules` (deployed to `ayma-ai`). Key rules:
 
----
-
-## Vector Storage
-
-Both `profile_embedding` and `messages.embedding` use `halfvec(3072)`:
-- **Model:** Gemini Embedding 2 (`gemini-embedding-2-preview`)
-- **Dims:** 3072
-- **Type:** `halfvec` (16-bit float) — half storage vs `vector`, supports hnsw index above 2000 dims
-- **Index:** `hnsw` with `halfvec_cosine_ops`
-- **Distance metric:** cosine similarity (`<=>` operator)
+- Own profile: full read/write
+- Other profiles: read only if `onboarding_complete == true`
+- `memories`: client read-only (Cloud Run writes)
+- `traits`: client read/write own
+- `matches`: read only if `user_a` or `user_b` == auth uid; no client writes
+- `notifications`: read own; only `read` field can be updated by client
+- `media`: read any authenticated user; write own only
 
 ---
 
-## RLS Policy Summary
+## Firebase Storage
 
-| Table | Authenticated user can |
-|-------|----------------------|
-| `user_profiles` | Read/update own row only |
-| `messages` | Read/insert own rows only |
-| `matches` | Read rows where they are user_a or user_b |
-| `profile_suggestions` | Full CRUD on own rows |
-| `profile_exclusions` | Full CRUD on own rows |
-| `user_skills` | Full CRUD on own rows |
-| `user_tokens` | Read metadata + insert + delete own rows (no update) |
-| `rate_limits` | Read own row only (counter updates: service role only) |
-| `llm_usage_log` | No access (service role only) |
+Bucket: `ayma-ai.firebasestorage.app`
 
----
+Photos uploaded directly from Flutter → Storage (no backend relay). After upload, Flutter calls `FirestoreService.saveMediaRecord()` to write the download URL to the `media` collection.
 
-## Auth Trigger
-
-When a user signs up, Supabase fires `on_auth_user_created`, which runs
-`public.handle_new_user()` and inserts a row into `user_profiles` automatically.
-
-```sql
--- Critical: SET search_path = public
--- Without this, the trigger can't find user_profiles (search_path defaults to auth)
-CREATE OR REPLACE FUNCTION public.handle_new_user()
-RETURNS TRIGGER
-LANGUAGE plpgsql
-SECURITY DEFINER SET search_path = public
-AS $$
-BEGIN
-  INSERT INTO public.user_profiles (id, display_name)
-  VALUES (NEW.id, COALESCE(NEW.raw_user_meta_data->>'full_name', ''));
-  RETURN NEW;
-END;
-$$;
-```
+Path pattern: `uploads/{uid}/{filename}`

@@ -1,1 +1,0 @@
-Local wiki fallback works.

@@ -1,140 +1,83 @@
+// Thin client for the Cloud Run bootstrap function.
+// All data (profiles, matches, notifications) goes via Firestore directly.
+// Only bootstrap and post-turn memory extraction go through here.
+
 import 'dart:convert';
 import 'dart:typed_data';
 
+import 'package:firebase_auth/firebase_auth.dart';
+import 'package:firebase_storage/firebase_storage.dart';
 import 'package:http/http.dart' as http;
 
 import '../env.dart';
-import '../models/auth_session.dart';
-import 'auth_storage.dart';
 
 class BackendService {
   BackendService._();
 
-  static Uri _uri(String path, [Map<String, dynamic>? query]) => Uri.parse(
-        '${Env.httpBaseUrl}$path',
-      ).replace(
-        queryParameters:
-            query?.map((key, value) => MapEntry(key, value.toString())),
-      );
+  static Future<String?> _idToken() async =>
+      FirebaseAuth.instance.currentUser?.getIdToken();
 
-  static Map<String, String> _headers({bool requiresAuth = true}) {
-    final token = requiresAuth ? AuthStorage.accessToken : null;
-    return {
-      'Content-Type': 'application/json',
-      if (token != null) 'Authorization': 'Bearer $token',
-    };
-  }
-
-  static Future<dynamic> get(
-    String path, [
-    Map<String, dynamic>? query,
-    bool requiresAuth = true,
-  ]) async {
-    return _request(
-      () => http.get(_uri(path, query), headers: _headers(requiresAuth: requiresAuth)),
-      requiresAuth: requiresAuth,
-    );
-  }
-
-  static Future<dynamic> getWithToken(String path, String token) async {
-    return _request(
-      () => http.get(_uri(path), headers: {
-        'Content-Type': 'application/json',
-        'Authorization': 'Bearer $token',
-      }),
-      requiresAuth: false,
-    );
-  }
-
-  static Future<dynamic> post(
-    String path,
-    Map<String, dynamic> body, {
-    bool requiresAuth = true,
-  }) async {
-    return _request(
-      () => http.post(
-        _uri(path),
-        headers: _headers(requiresAuth: requiresAuth),
-        body: jsonEncode(body),
-      ),
-      requiresAuth: requiresAuth,
-    );
-  }
-
-  static Future<dynamic> uploadFileBytes(
-    String path,
-    Uint8List bytes, {
-    required String filename,
-    String fieldName = 'file',
-    bool requiresAuth = true,
-  }) async {
-    Future<http.Response> run() async {
-      final request = http.MultipartRequest('POST', _uri(path))
-        ..headers.addAll(_headers(requiresAuth: requiresAuth))
-        ..files.add(
-          http.MultipartFile.fromBytes(
-            fieldName,
-            bytes,
-            filename: filename,
-          ),
-        );
-      final streamed = await request.send();
-      return http.Response.fromStream(streamed);
-    }
-
-    return _request(run, requiresAuth: requiresAuth);
-  }
-
-  static Future<dynamic> _request(
-    Future<http.Response> Function() run, {
-    required bool requiresAuth,
-  }) async {
-    var response = await run();
-    if (response.statusCode == 401 && requiresAuth) {
-      final refreshed = await refreshAuthToken();
-      if (refreshed) {
-        response = await run();
-      }
-    }
-    return _decode(response);
-  }
-
-  static Future<bool> refreshAuthToken() async {
-    final refreshToken = AuthStorage.refreshToken;
-    if (refreshToken == null || refreshToken.isEmpty) {
-      await AuthStorage.save(null);
-      return false;
-    }
+  static Future<Map<String, dynamic>> bootstrap() async {
+    final token = await _idToken();
+    if (token == null) throw Exception('Not authenticated');
 
     final response = await http.post(
-      _uri('/api/auth/refresh'),
-      headers: _headers(requiresAuth: false),
-      body: jsonEncode({'refresh_token': refreshToken}),
+      Uri.parse('${Env.bootstrapUrl}/bootstrap'),
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': 'Bearer $token',
+      },
     );
 
-    if (response.statusCode < 200 || response.statusCode >= 300) {
-      await AuthStorage.save(null);
-      return false;
+    if (response.statusCode != 200) {
+      throw Exception('Bootstrap failed: ${response.body}');
     }
-
-    final json = jsonDecode(response.body) as Map<String, dynamic>;
-    final sessionMap = json['session'] as Map<String, dynamic>?;
-    if (sessionMap == null) {
-      await AuthStorage.save(null);
-      return false;
-    }
-
-    await AuthStorage.save(AuthSession.fromMap(sessionMap));
-    return true;
+    return jsonDecode(response.body) as Map<String, dynamic>;
   }
 
-  static dynamic _decode(http.Response response) {
-    if (response.statusCode < 200 || response.statusCode >= 300) {
-      throw Exception(response.body.isNotEmpty
-          ? response.body
-          : 'Request failed: ${response.statusCode}');
-    }
-    if (response.body.isEmpty) return null;
-    return jsonDecode(response.body);
+  static Future<void> postTurn({
+    required String sessionId,
+    required List<Map<String, String>> messages,
+  }) async {
+    final token = await _idToken();
+    if (token == null) return;
+
+    await http
+        .post(
+          Uri.parse('${Env.bootstrapUrl}/post-turn'),
+          headers: {
+            'Content-Type': 'application/json',
+            'Authorization': 'Bearer $token',
+          },
+          body: jsonEncode({'session_id': sessionId, 'messages': messages}),
+        )
+        .timeout(const Duration(seconds: 15));
+  }
+
+  static Future<String> uploadMedia(Uint8List bytes, String filename) async {
+    final uid = FirebaseAuth.instance.currentUser?.uid;
+    if (uid == null) throw Exception('Not authenticated');
+
+    final ref = FirebaseStorage.instance
+        .ref()
+        .child('media/$uid/${DateTime.now().millisecondsSinceEpoch}_$filename');
+
+    final task = await ref.putData(
+      bytes,
+      SettableMetadata(contentType: _mimeType(filename)),
+    );
+    return await task.ref.getDownloadURL();
+  }
+
+  static String _mimeType(String filename) {
+    final ext = filename.split('.').last.toLowerCase();
+    return switch (ext) {
+      'jpg' || 'jpeg' => 'image/jpeg',
+      'png' => 'image/png',
+      'webp' => 'image/webp',
+      'mp4' => 'video/mp4',
+      'mov' => 'video/quicktime',
+      _ => 'application/octet-stream',
+    };
   }
 }

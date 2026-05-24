@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "235381544962",
+    "project_id": "ayma-ai",
+    "storage_bucket": "ayma-ai.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:235381544962:android:99993490ed0aee69c4ef1b",
+        "android_client_info": {
+          "package_name": "com.ayma.ayma_flutter"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyCDmJ-yygctaNvDmeq2euaJnoQVn_Ltyjk"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}

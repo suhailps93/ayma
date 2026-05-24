@@ -1,40 +1,127 @@
 # Ayma System Architecture
 
 ## Overview
-Ayma is a "Karpathy-style" LLM OS designed for personal matchmaking. It manages user memory through a hierarchical markdown knowledge base (The Wiki) and a persistent, database-backed information-gathering checklist.
 
-## Core Components
+Ayma is a serverless AI matchmaking platform. A Flutter mobile app talks directly to Gemini Live for real-time voice conversation. A minimal Cloud Run function handles auth-gated bootstrap and memory synthesis. All persistence lives in Firebase (Firestore + Storage).
 
-### 1. The Agent Engine (ADK + LangGraph)
-- **Chat Agent:** A LangGraph state machine that manages multi-turn text conversations, detects profile exclusions, and handles deferred questioning.
-- **Voice Agent:** A high-performance Gemini Live (ADK) bridge for low-latency, emotionally expressive voice interaction.
-- **Unified Persona:** Both agents share the `matchmaker.md` system prompt, focusing on genuine curiosity and depth.
+---
 
-### 2. Memory Hierarchy (The LLM OS)
-- **Volatile RAM:** The current conversation turn.
-- **L1 Cache (`context.md`):** Short-term context (recent life events, emotional state).
-- **Swap Space (`about_me.md`, `preferences.md`):** Long-term persona and search desires.
-- **Gold Record (`matching_profile.md`):** High-signal, structured specs for the matching engine.
-- **Atomic Facts (Mem0):** Vector-indexed tiny details (e.g., "allergic to cats").
-- **Persistent Checklist (`questions_pending`):** A Supabase JSONB column storing questions the agent intends to ask in future turns.
+## Component Map
 
-### 3. Asynchronous Synthesis
-After every turn, the system runs a fire-and-forget synthesis pipeline:
-- **Wiki Update:** 4 parallel LLM calls to "upsert" knowledge into the Markdown wiki files.
-- **Mem0 Update:** Extraction of atomic facts from the conversation.
-- **Checklist Update:** Syncing deferred questions to the database.
+```
+Flutter App
+  ├── Firebase Auth  (sign-in / ID token)
+  ├── Firestore SDK  (profile, matches, notifications, media, traits)
+  ├── Firebase Storage SDK  (photo uploads — direct, no backend)
+  └── Gemini Live WebSocket  (voice AI — direct, no backend relay)
+        └── FunctionDeclaration: save_trait  →  Firestore /users/{uid}/traits/
 
-### 4. Matching Engine
-- **Stage 1 (SQL):** Hard-filter by demographics (age, gender, location) in Supabase.
-- **Stage 2 (LLM):** Scrutinize the top-K candidates by comparing their `matching_profile.md` files. This allows for nuanced compatibility scoring based on conflict style, social energy, and core values.
+Cloud Run  (ayma-bootstrap)
+  ├── POST /bootstrap  →  verify Firebase token → build system prompt → return WS URL + key
+  ├── POST /post-turn  →  Gemini text fact extraction → Firestore /users/{uid}/memories/
+  └── POST /run-matching  →  [PLANNED] heuristic filter → PII-stripped LLM scoring → write matches
+```
 
-## Data Mapping
-- **Structured (PostgreSQL):** Profile basics, auth, checklist, and feedback.
-- **Semi-Structured (GCS/Local):** The LLM Wiki (Markdown Knowledge Base).
-- **Unstructured (Mem0):** Vector-based atomic memories.
-- **Binary (GCS/Local):** User-uploaded media (photos/videos).
+---
 
-## Deployment
-- **Backend:** Python/FastAPI running as a `systemd` user service.
-- **Exposure:** Cloudflare Tunnel provides stable HTTPS URLs for mobile clients.
-- **Clients:** Flutter mobile app and web frontend.
+## Data Flow: Voice Session
+
+1. Flutter calls `POST /bootstrap` with Firebase ID token.
+2. Cloud Run verifies token, fetches profile + memories + skills from Firestore, builds system prompt, returns Gemini Live WS URL + API key + setup payload.
+3. Flutter opens WebSocket directly to `wss://generativelanguage.googleapis.com/ws/...?key=API_KEY`.
+4. Sends `{"setup": {..., "tools": [{"functionDeclarations": [save_trait]}]}}`.
+5. Audio streams bidirectionally: Flutter mic → Gemini Live → Flutter speakers.
+6. When Gemini learns a user trait mid-conversation, it calls `save_trait(category, fact)`.
+7. Flutter handles the tool call → writes to Firestore `users/{uid}/traits/{id}` immediately.
+8. On `turnComplete`, Flutter calls `POST /post-turn` for supplementary text-based memory extraction.
+
+---
+
+## Data Flow: Text Session (fallback)
+
+1. Flutter sends text via `sendText()`.
+2. `audio_service.dart` calls Gemini REST (`gemini-2.5-flash`) with full conversation history.
+3. Response appended to transcript; `POST /post-turn` called for memory extraction.
+
+---
+
+## Firestore Collections
+
+```
+users/{uid}
+  display_name, profile_public, profile_private, profile_ai_observations
+  agent_name, voice_preference, matching_prefs (map)
+  age, gender, location_region
+  onboarding_complete, matching_paused
+
+users/{uid}/memories/{id}        ← text blobs from /post-turn (supplementary)
+  text, session_id, created_at
+
+users/{uid}/traits/{id}          ← structured facts from save_trait function calls (primary)
+  category, fact, session_id, created_at
+
+users/{uid}/skills/{id}
+  name, content, enabled
+
+matches/{id}
+  user_a, user_b, score, rationale, status, created_at, updated_at
+
+notifications/{id}
+  user_id, type, title, body, meta, read, created_at
+
+media/{id}
+  user_id, photo_url, caption, created_at
+```
+
+---
+
+## Models
+
+| Model | Used For |
+|---|---|
+| `gemini-3.1-flash-live-preview` | Real-time voice conversation (Gemini Live WebSocket) |
+| `gemini-2.5-flash` | Text fallback chat + post-turn memory extraction |
+| `gemini-2.5-flash` (planned) | Matching compatibility scoring |
+
+---
+
+## Deployed Infrastructure
+
+| Resource | Value |
+|---|---|
+| Firebase project | `ayma-ai` |
+| Cloud Run URL | `https://ayma-bootstrap-235381544962.us-central1.run.app` |
+| Cloud Run SA | `vertex-express@ayma-ai.iam.gserviceaccount.com` |
+| Firestore | `us-central1` (default DB) |
+| Storage bucket | `ayma-ai.firebasestorage.app` |
+
+---
+
+## Privacy Notes
+
+- The `/bootstrap` system prompt includes real name, age, gender, location for the conversational AI companion — this is intentional.
+- **Any future matching LLM call must strip PII** (name, exact location, employer) before sending profiles to the scoring model. See planned `/run-matching` endpoint.
+- API key is returned to authenticated clients — acceptable for internal app. Replace with Vertex AI short-lived tokens before public release.
+
+---
+
+## Roadmap
+
+### Phase 1 — Conversation & Memory (current focus)
+- [x] Gemini Live WebSocket direct from Flutter
+- [x] `/bootstrap` endpoint — system prompt + creds
+- [x] `/post-turn` endpoint — text fact extraction → memories
+- [ ] `save_trait` FunctionDeclaration in Gemini Live setup
+- [ ] Flutter tool call handler → write to `users/{uid}/traits/`
+- [ ] System prompt instructs model to use `save_trait` silently
+- [ ] Firestore `traits` subcollection rule
+- [ ] Surface traits in Insights screen
+
+### Phase 2 — Matching Engine (next)
+- [ ] `/run-matching` endpoint — heuristic Firestore filter → PII-strip → LLM score → write matches
+- [ ] Trigger matching periodically or on demand from Flutter
+- [ ] Match detail screen with score + reasoning
+
+### Phase 3 — Vibe Check
+- [ ] `/vibe-check` endpoint — agent-to-agent simulation loop (4-5 turns) → synergy score
+- [ ] Wire vibe check into matching pipeline as a second-stage filter

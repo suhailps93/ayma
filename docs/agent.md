@@ -1,43 +1,207 @@
-# Ayma Agent System
+# Ayma — Agent Orchestration Guide
 
-## Overview
-Ayma uses a unified agent architecture for both text and voice, powered by a LangGraph state machine. It is designed to be proactive, inquisitive, and context-aware.
+> **Every coding agent must read this document first.** It is the single source of truth for what the project is, what is built, what is in progress, and what the rules are. Do not infer architecture from code alone — consult this doc first, then verify against code.
 
-## The Agent Graph (LangGraph)
+---
 
-Every interaction follows this flow:
+## What This Project Is
 
-1. **Retrieve:**
-   - Fetches atomic facts from **Mem0**.
-   - Reads the **LLM Wiki** (`about_me`, `matching_profile`, `preferences`, `context`).
-   - Retrieves the persistent **Question Checklist** and **Pending Questions** from Supabase.
+Ayma is a serverless AI matchmaking app. Users have voice conversations with an AI companion (Gemini Live). The AI learns about them in real time and eventually matches them with compatible people.
 
-2. **Personality:**
-   - Assembles the final system prompt.
-   - **Priority:** Persona > Question Checklist > Pending Questions > Wiki Context > Mem0 Facts.
-   - Injects the `matchmaker.md` persona and any active skills.
+**Stack:** Flutter (mobile) · Firebase (Auth, Firestore, Storage) · Gemini Live API (voice AI) · Cloud Run (minimal FastAPI) · Gemini text API (fact extraction + future matching)
 
-3. **Respond:**
-   - **Exclusion Check:** Detects if the user wants to hide information.
-   - **LLM Generation:** Calls Gemini (Flash) to generate the response.
-   - **Deferred Question Detection:** Identifies if the agent *should* have asked a question but held back to maintain flow.
+---
 
-4. **Memorize (Async):**
-   - **Wiki Update:** Triggers parallel updates to all markdown wiki pages.
-   - **Mem0 Sync:** Records new atomic facts.
-   - **Checklist Sync:** Persists any new deferred questions to the database.
+## What Is Deployed and Working
 
-## Unified Persona
-Both the Chat and Voice agents share the same core persona from `ayma/app/skills/system/matchmaker.md`.
-- **Tone:** Warm, empathetic, and genuinely curious.
-- **Objective:** Deep understanding of the user for high-quality matchmaking.
-- **Rules:** Prioritize depth over surface-level facts; follow the user's lead while keeping the checklist in mind.
+| Component | Status | Location |
+|---|---|---|
+| Firebase Auth (email/password) | ✅ Live | Firebase console: `ayma-ai` |
+| Firestore | ✅ Live | `us-central1` |
+| Firebase Storage | ✅ Live | `ayma-ai.firebasestorage.app` |
+| Cloud Run `/bootstrap` | ✅ Live | `https://ayma-bootstrap-235381544962.us-central1.run.app` |
+| Cloud Run `/post-turn` | ✅ Live | same URL |
+| Gemini Live voice session | ✅ Working | `gemini-3.1-flash-live-preview` |
+| Text fallback chat | ✅ Working | `gemini-2.5-flash` REST |
+| Flutter Android app | ✅ Running on Pixel 10 Pro Fold | |
+| Onboarding flow | ✅ Working | |
+| Profile screen + photo upload | ✅ Working | |
+| Insights screen | ✅ Working | reads `profile_public`, `profile_private`, `profile_ai_observations`, `media` |
+| Explore screen | ✅ Working | Firestore filter: age range + gender + text search |
+| Matches screen | ✅ Working (reads only) | no backend creates matches yet |
+| Notifications screen | ✅ Working (reads only) | |
 
-## Voice Specifics (Gemini Live)
-In voice mode (`mode="voice"`), the agent appends a `VOICE_MODIFIER` to the prompt:
-- Responses are limited to 1-3 sentences.
-- Natural speech patterns (no markdown or lists).
-- Emotional variety and mirroring of user energy.
+---
 
-## Persistent Checklist
-Unlike standard bots that "forget" what they wanted to ask, Ayma uses the `questions_pending` column in Supabase. This turns a "mental note" into a durable task that persists across sessions and platforms. If Ayma thinks of a question in Chat, she might ask it later in a Voice call.
+## Key Files — Know These Before You Touch Anything
+
+```
+ayma/
+├── docs/
+│   ├── agent.md              ← THIS FILE — read first, keep updated
+│   ├── ARCHITECTURE.md       ← detailed system design + roadmap
+│   └── matching.md           ← matching algorithm design notes
+├── functions/bootstrap/
+│   └── main.py               ← Cloud Run: /bootstrap, /post-turn, (planned) /run-matching
+├── ayma_flutter/lib/
+│   ├── services/
+│   │   ├── audio_service.dart    ← Gemini Live WebSocket + mic/speaker + tool call handler
+│   │   ├── firestore_service.dart ← all Firestore reads/writes
+│   │   ├── backend_service.dart  ← Cloud Run HTTP calls + Firebase Storage uploads
+│   │   └── auth_service.dart     ← Firebase Auth
+│   ├── providers/providers.dart  ← Riverpod providers (profile, matches, notifications, insights)
+│   ├── screens/
+│   │   ├── chat/chat_screen.dart
+│   │   ├── profile/profile_screen.dart
+│   │   ├── explore/explore_screen.dart
+│   │   └── matches/matches_screen.dart
+│   ├── firebase_options.dart     ← generated by flutterfire configure, DO NOT EDIT manually
+│   └── env.dart                  ← Cloud Run base URL
+├── firestore.rules               ← security rules — deploy with: firebase deploy --only firestore:rules
+└── storage.rules                 ← storage rules
+```
+
+---
+
+## Active Work (Phase 1 — Conversation & Memory)
+
+**Primary goal: make talking and data extraction work great.**
+
+### Done (Phase 1 — memory system)
+- [x] LLM wiki: 4 fields (`wiki_about_me`, `wiki_context`, `wiki_preferences`, `wiki_matching`) on `users/{uid}`
+- [x] `/post-turn` runs 4 parallel Gemini upserts after every turn
+- [x] `/bootstrap` injects wiki fields into system prompt (replaces 40-bullet memory dump)
+- [x] Raw conversation stored to `memories` subcollection as audit log
+- [x] Traits system removed (was redundant with wiki)
+- [x] Cloud Run redeployed (revision 00005), Firestore rules redeployed
+
+### Done (Phase 1 foundations)
+- [x] Gemini Live WebSocket — direct client connection, no backend relay
+- [x] `/bootstrap` builds system prompt from Firestore profile + memories + skills
+- [x] `/post-turn` extracts facts from turn text → `users/{uid}/memories/`
+- [x] Firestore rules deployed
+- [x] Media upload → Storage → Firestore record → Insights screen
+
+---
+
+## Planned (Phase 2 — Matching Engine)
+
+Do NOT start on these until Phase 1 is confirmed working.
+
+- [ ] `POST /run-matching` on Cloud Run: heuristic Firestore filter → PII-strip → Gemini scoring → write `matches/` docs
+- [ ] Match detail screen
+- [ ] Trigger matching from Flutter (manual or scheduled)
+
+## Planned (Phase 3 — Vibe Check)
+
+- [ ] `POST /vibe-check`: agent-to-agent simulation (4-5 turns) → synergy score
+- [ ] Wire into matching pipeline as second-stage filter
+
+---
+
+## Stale Code Rule — Always Enforce
+
+**Before and after every task, scan for stale code and update it.** This project has gone through major architecture migrations (Supabase → Firebase, LangGraph → Gemini Live, FastAPI monolith → Cloud Run minimal). Stale references will still exist.
+
+Check for and fix:
+- Any import or reference to: `supabase`, `langchain`, `langgraph`, `adk`, `mem0`, `pgvector`, `React`, or the old `/app/` backend directory
+- Comments or docstrings describing old Supabase/Mem0/LangGraph behavior
+- Hardcoded `http://localhost:8080` URLs (should use `Env.bootstrapUrl`)
+- `gemini-2.0-flash-live-001` model name (use `gemini-3.1-flash-live-preview`)
+- `gemini-2.0-flash` text model (use `gemini-2.5-flash`)
+- Any `.md` doc file that still describes the old architecture (check `docs/ARCHITECTURE.md`, `docs/agent.md`, `docs/memory.md`, `docs/matching.md`, `docs/data.md`)
+
+After fixing stale code: run `flutter analyze` (must be 0 issues), update the checkbox in the "In Progress" section of this file, and note what was stale in your response.
+
+---
+
+## Architecture Rules — Do Not Violate
+
+1. **Gemini Live is a direct client WebSocket.** Never route audio through Cloud Run. The backend only provides credentials via `/bootstrap`.
+
+2. **Cloud Run is stateless and minimal.** No sessions, no streaming, no WebSocket proxy. Two endpoints only (until matching is added).
+
+3. **All Firestore writes from Flutter go through `FirestoreService`.** Do not scatter `FirebaseFirestore.instance` calls across screens.
+
+4. **PII must be stripped before any future matching LLM call.** Name, exact location, employer stay out of the scoring prompt. See `strip_pii()` in ARCHITECTURE.md.
+
+5. **`firebase_options.dart` is generated — never edit manually.** Run `flutterfire configure` to regenerate.
+
+6. **`flutter analyze` must stay at 0 errors, 0 warnings** before any PR.
+
+---
+
+## Deploy Commands
+
+```bash
+# Redeploy Cloud Run after main.py changes
+cd ayma/functions/bootstrap
+gcloud builds submit --tag gcr.io/ayma-ai/ayma-bootstrap .
+gcloud run deploy ayma-bootstrap \
+  --image gcr.io/ayma-ai/ayma-bootstrap \
+  --region us-central1 \
+  --service-account vertex-express@ayma-ai.iam.gserviceaccount.com \
+  --set-env-vars GOOGLE_API_KEY=<key>,LIVE_MODEL=gemini-3.1-flash-live-preview,TEXT_MODEL=gemini-2.5-flash \
+  --allow-unauthenticated
+
+# Deploy Firestore rules
+firebase deploy --only firestore:rules
+
+# Deploy Storage rules
+firebase deploy --only storage
+
+# Run app on connected device
+cd ayma/ayma_flutter
+flutter run
+```
+
+---
+
+## Firestore Schema (current)
+
+```
+users/{uid}
+  display_name, profile_public, profile_private, profile_ai_observations
+  agent_name, voice_preference, matching_prefs (map)
+  age, gender, location_region
+  onboarding_complete, matching_paused
+
+users/{uid}/memories/{id}        ← text blobs, written by /post-turn (Cloud Run only)
+  text, session_id, created_at
+
+users/{uid}/traits/{id}          ← structured facts, written by Flutter on save_trait tool call
+  category, fact, session_id, created_at
+
+users/{uid}/skills/{id}
+  name, content, enabled
+
+matches/{id}
+  user_a, user_b, score, rationale, status, created_at, updated_at
+
+notifications/{id}
+  user_id, type, title, body, meta, read, created_at
+
+media/{id}
+  user_id, photo_url, caption, created_at
+```
+
+---
+
+## Environment Variables (Cloud Run)
+
+| Var | Value |
+|---|---|
+| `GOOGLE_API_KEY` | Gemini API key (restricted to `generativelanguage.googleapis.com`) |
+| `LIVE_MODEL` | `gemini-3.1-flash-live-preview` |
+| `TEXT_MODEL` | `gemini-2.5-flash` |
+| `FIREBASE_PROJECT_ID` | `ayma-ai` (set in code, not env var) |
+
+---
+
+## Known Constraints
+
+- `gemini-2.0-flash-live-001` is NOT available for this API key — always use `gemini-3.1-flash-live-preview`
+- Firebase Auth and Firebase Storage must be enabled via Firebase console (not via API)
+- Cloud Run SA `vertex-express@ayma-ai.iam.gserviceaccount.com` has `roles/datastore.user` — needed for Firestore access
+- Composite Firestore indexes exist for `matches` (user_a + created_at, user_b + created_at) and `memories` (created_at)
+- ADB wireless device: Pixel 10 Pro Fold at `10.0.0.203` on local WiFi

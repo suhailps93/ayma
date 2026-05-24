@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:io';
 import 'dart:math' as math;
 import 'dart:typed_data';
 
@@ -7,9 +8,9 @@ import 'package:flutter_animate/flutter_animate.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:image_picker/image_picker.dart';
 
-import '../../env.dart';
 import '../../providers/providers.dart';
 import '../../services/audio_service.dart';
+import '../../services/firestore_service.dart';
 import '../../services/backend_service.dart';
 import '../../theme.dart';
 
@@ -90,7 +91,7 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
     if (_audioService.state != SessionState.disconnected) return;
     if (ref.read(currentUserProvider) == null) return;
     try {
-      await _audioService.connect(Env.wsUrl);
+      await _audioService.connect();
       _startTimer();
     } catch (_) {}
   }
@@ -107,18 +108,46 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
 
   Future<void> _sendText() async {
     final text = _textCtrl.text.trim();
-    if (_drafts.isNotEmpty && _drafts.every((d) => d.remoteUrl == null)) {
+    if (_drafts.isEmpty && text.isEmpty) return;
+
+    // If there are pending uploads, wait a bit instead of showing a snackbar.
+    if (_drafts.isNotEmpty &&
+        _drafts.any((d) => d.remoteUrl == null && d.status != 'Upload failed')) {
+      int retries = 0;
+      while (_drafts.any(
+              (d) => d.remoteUrl == null && d.status != 'Upload failed') &&
+          retries < 40) {
+        await Future<void>.delayed(const Duration(milliseconds: 500));
+        retries++;
+      }
+    }
+
+    final failed = _drafts.where((d) => d.status == 'Upload failed').toList();
+    if (failed.isNotEmpty) {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('Attachment is still preparing...')),
+          const SnackBar(
+              content: Text('Some attachments failed to upload. '
+                  'Please remove them or try again.')),
         );
       }
       return;
     }
+
+    if (_drafts.any((d) => d.remoteUrl == null)) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+              content: Text('Attachment upload timed out. Please try again.')),
+        );
+      }
+      return;
+    }
+
     final ready = _drafts.where((d) => d.remoteUrl != null).toList();
     if (text.isEmpty && ready.isEmpty) return;
 
-    final message = text.isEmpty ? 'Please analyze what I just shared.' : text;
+    final message = text;
     final attachments = [
       for (final d in ready)
         {
@@ -127,12 +156,13 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
           'filename': d.filename
         },
     ];
+
+    // Clear UI state BEFORE the async call (or immediately after clearing text)
     _textCtrl.clear();
+    final idsToRemove = ready.map((d) => d.id).toSet();
+    setState(() => _drafts.removeWhere((d) => idsToRemove.contains(d.id)));
 
     await _audioService.sendText(message, attachments: attachments);
-    if (mounted && ready.isNotEmpty) {
-      setState(() => _drafts.removeWhere((d) => d.remoteUrl != null));
-    }
   }
 
   void _scrollToBottom() {
@@ -186,21 +216,17 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
 
   Future<void> _uploadDraft(_DraftAttachment draft, Uint8List bytes) async {
     try {
-      final res = await BackendService.uploadFileBytes(
-        '/api/media/upload',
-        bytes,
-        filename: draft.filename,
-      ) as Map<String, dynamic>;
-      final url = res['photo_url'] as String?;
-      final status = (res['media_type'] as String?) == 'video'
-          ? 'Video attached'
-          : 'Photo attached';
+      final url = await BackendService.uploadMedia(bytes, draft.filename);
+      if (draft.kind == _DraftKind.image) {
+        await FirestoreService.saveMediaRecord(photoUrl: url);
+        ref.invalidate(insightsProvider);
+      }
+      final status = draft.kind == _DraftKind.video ? 'Video attached' : 'Photo attached';
       final i = _drafts.indexWhere((d) => d.id == draft.id);
       if (i != -1) {
         setState(() =>
             _drafts[i] = _drafts[i].copyWith(status: status, remoteUrl: url));
       }
-      if (draft.kind == _DraftKind.image) ref.invalidate(insightsProvider);
     } catch (e) {
       final i = _drafts.indexWhere((d) => d.id == draft.id);
       if (i != -1) {
@@ -404,10 +430,13 @@ class _TranscriptEntry extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final isAyma = !line.isUser;
+    final hasAttachments =
+        line.attachments != null && line.attachments!.isNotEmpty;
+
     return Padding(
       padding: const EdgeInsets.only(bottom: 24),
       child: Opacity(
-        opacity: isLatest ? 1.0 : 0.72, // was 0.5 — history stayed readable
+        opacity: isLatest ? 1.0 : 0.72,
         child: Column(
           crossAxisAlignment:
               isAyma ? CrossAxisAlignment.start : CrossAxisAlignment.end,
@@ -421,18 +450,25 @@ class _TranscriptEntry extends StatelessWidget {
               ),
             ),
             const SizedBox(height: 5),
+            if (hasAttachments) ...[
+              for (final att in line.attachments!)
+                Padding(
+                  padding: const EdgeInsets.only(bottom: 8),
+                  child: _MediaBubble(attachment: att),
+                ),
+            ],
             if (isAyma)
               Text(
                 line.text,
                 style: AymaFonts.serif(
                     size: 20, italic: true, color: AymaColors.fg),
               )
-            else
+            else if (line.text.isNotEmpty)
               Container(
                 padding:
                     const EdgeInsets.symmetric(horizontal: 14, vertical: 9),
                 decoration: BoxDecoration(
-                  color: const Color(0xFF1C1710),
+                  color: AymaColors.bgCard,
                   borderRadius: BorderRadius.circular(16),
                   border: Border.all(
                     color: AymaColors.lineSoft.withValues(alpha: 0.6),
@@ -445,6 +481,66 @@ class _TranscriptEntry extends StatelessWidget {
                   style: AymaFonts.elegantSans(size: 15, color: AymaColors.fg)
                       .copyWith(height: 1.5),
                 ),
+              ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _MediaBubble extends StatelessWidget {
+  final Map<String, dynamic> attachment;
+  const _MediaBubble({required this.attachment});
+
+  @override
+  Widget build(BuildContext context) {
+    var url = attachment['url'] as String?;
+    final kind = attachment['kind'] as String?;
+    if (url == null) return const SizedBox.shrink();
+
+    Widget content;
+    if (url.startsWith('http')) {
+      content = Image.network(
+        url,
+        fit: BoxFit.cover,
+        errorBuilder: (_, __, ___) => Container(
+          color: AymaColors.bgElev,
+          child: const Center(
+              child: Icon(Icons.broken_image_rounded, color: AymaColors.fgDim)),
+        ),
+      );
+    } else if (url.startsWith('gs://')) {
+      // For now show placeholder for GCS since direct loading needs auth
+      content = Container(
+        color: AymaColors.bgElev,
+        child: const Center(
+          child: Icon(Icons.cloud_done_rounded, color: AymaColors.fgDim),
+        ),
+      );
+    } else {
+      // Local path
+      final file = File(url);
+      if (file.existsSync()) {
+        content = Image.file(file, fit: BoxFit.cover);
+      } else {
+        content = Container(color: AymaColors.bgElev);
+      }
+    }
+
+    return ClipRRect(
+      borderRadius: BorderRadius.circular(12),
+      child: Container(
+        width: 200,
+        height: 150,
+        color: AymaColors.bgCard,
+        child: Stack(
+          children: [
+            Positioned.fill(child: content),
+            if (kind == 'video')
+              const Center(
+                child: Icon(Icons.play_circle_fill_rounded,
+                    color: Colors.white70, size: 42),
               ),
           ],
         ),
@@ -498,8 +594,6 @@ const double _kShellH = 72.0;
 const double _kShellR = 24.0; // reduced so corner arcs are geometrically valid
 const double _kWaveBaseY =
     18.0; // wave oscillates around this y inside the pill
-const double _kRowH = 36.0;
-const double _kRowTop = 24.0; // 6px below wave baseline
 const double _kHPad = 14.0;
 
 class _InputBarState extends State<_InputBar>
@@ -530,7 +624,9 @@ class _InputBarState extends State<_InputBar>
       widget.state == SessionState.thinking ||
       widget.state == SessionState.ready;
   bool get _hasText => widget.textCtrl.text.trim().isNotEmpty;
-  bool get _canSend => _hasText || widget.hasAttachment;
+  bool get _canSend =>
+      _hasText ||
+      (widget.hasAttachment && widget.drafts.every((d) => d.remoteUrl != null));
 
   double get _volume => widget.state == SessionState.speaking
       ? widget.outputVolume
@@ -579,12 +675,14 @@ class _InputBarState extends State<_InputBar>
                     phase: _glow.value,
                     volume: _volume,
                     active: _aymaActive,
+                    isAiTalking: widget.state == SessionState.speaking,
+                    isUserTalking: widget.userTalking,
                     glowStrength: g,
                   ),
                   child: ClipRRect(
                     borderRadius: BorderRadius.circular(_kShellR),
                     child: ColoredBox(
-                      color: const Color(0xFF15120F),
+                      color: AymaColors.bg,
                       child: SizedBox(
                         height: _kShellH,
                         child: Padding(
@@ -856,12 +954,16 @@ class _ComposerOutlinePainter extends CustomPainter {
   final double phase;
   final double volume;
   final bool active;
+  final bool isAiTalking;
+  final bool isUserTalking;
   final double glowStrength; // 0–1, drives outer glow replacing box shadow
 
   const _ComposerOutlinePainter({
     required this.phase,
     required this.volume,
     required this.active,
+    required this.isAiTalking,
+    required this.isUserTalking,
     this.glowStrength = 0.0,
   });
 
@@ -871,14 +973,11 @@ class _ComposerOutlinePainter extends CustomPainter {
   @override
   void paint(Canvas canvas, Size size) {
     final level = volume.clamp(0.0, 1.0);
-    // Only show waves if active (speaking/listening) AND there's actual volume
-    final bool isTalking = active && level > 0.005;
+    // AI talks on top, User talks on bottom
+    final bool aiTalking = isAiTalking && level > 0.005;
+    final bool userTalking = isUserTalking && level > 0.005;
 
-    // Base amplitude increases with volume
-    final baseAmp = isTalking ? (4.0 + level * 10.0) : 0.0;
-    // Frequency increases with volume to make waves look more "energetic"
     final freqMod = 1.0 + level * 0.45;
-    // Speed increases with volume
     final speedMod = 1.0 + level * 0.6;
 
     final goldShader = const LinearGradient(
@@ -893,41 +992,51 @@ class _ComposerOutlinePainter extends CustomPainter {
       stops: [0.0, 0.36, 0.66, 1.0],
     ).createShader(Offset.zero & size);
 
-    void drawWave(double amp, double phaseShift, double freq, double detailFreq,
-        [double opacity = 1.0]) {
-      final path = _buildBorderPath(
-        size,
-        amplitude: amp,
-        // Phase flows forward, sped up by speedMod
-        phaseShift: (phase * speedMod) + phaseShift,
-        frequency: freq * freqMod,
-        detailFrequency: detailFreq * freqMod,
-      );
-      final paint = Paint()
-        ..shader = goldShader
-        ..style = PaintingStyle.stroke
-        ..strokeWidth = 1.0
-        ..strokeCap = StrokeCap.round
-        ..strokeJoin = StrokeJoin.round;
+    void drawEdgeWaves(bool talking, bool atBottom) {
+      final amp = talking ? (6.0 + level * 14.0) : 0.0;
 
-      if (opacity < 1.0) {
-        paint.colorFilter = ColorFilter.mode(
-          Colors.white.withValues(alpha: opacity),
-          BlendMode.modulate,
+      void drawWave(double a, double phaseShift, double freq, double detailFreq,
+          [double opacity = 1.0]) {
+        final path = _buildBorderPath(
+          size,
+          amplitude: a,
+          phaseShift: (phase * speedMod) + phaseShift,
+          frequency: freq * freqMod,
+          detailFrequency: detailFreq * freqMod,
+          atBottom: atBottom,
         );
+        final paint = Paint()
+          ..shader = goldShader
+          ..style = PaintingStyle.stroke
+          ..strokeWidth = 1.0
+          ..strokeCap = StrokeCap.round
+          ..strokeJoin = StrokeJoin.round;
+
+        if (opacity < 1.0) {
+          paint.colorFilter = ColorFilter.mode(
+            Colors.white.withValues(alpha: opacity),
+            BlendMode.modulate,
+          );
+        }
+        canvas.drawPath(path, paint);
       }
 
-      canvas.drawPath(path, paint);
+      if (talking) {
+        drawWave(amp * 0.55, 0.35, 1.3, 2.6, 0.28);
+        drawWave(amp * 0.75, -0.25, 2.4, 4.2, 0.45);
+      }
+      drawWave(amp, 0.0, 1.85, 3.4, 1.0);
     }
 
-    if (isTalking) {
-      // Background waves (more subtle, slower phase shifts)
-      drawWave(baseAmp * 0.55, 0.35, 1.3, 2.6, 0.28);
-      drawWave(baseAmp * 0.75, -0.25, 2.4, 4.2, 0.45);
+    // If both talk, they might overlap or draw over each other, but this follows the logic:
+    // User talk animations happen on bottom border, AI on top.
+    if (userTalking) {
+      drawEdgeWaves(true, true);
     }
-
-    // Primary wave (becomes the static pill border when amp is 0)
-    drawWave(baseAmp, 0.0, 1.85, 3.4, 1.0);
+    if (aiTalking || (!userTalking)) {
+      // Draw top edge waves if AI is talking, OR if nothing is happening (static border)
+      drawEdgeWaves(aiTalking, false);
+    }
   }
 
   // Traces the full pill border with a wave across the top edge (y≈0).
@@ -938,9 +1047,10 @@ class _ComposerOutlinePainter extends CustomPainter {
     required double phaseShift,
     required double frequency,
     required double detailFrequency,
+    bool atBottom = false,
   }) {
     const r = _kShellR;
-    const baselineY = _kWaveBaseY; // wave lives inside the canvas, not above it
+    const topBaselineY = _kWaveBaseY;
     final w = size.width;
     final h = size.height;
     final waveLeft = r;
@@ -948,39 +1058,60 @@ class _ComposerOutlinePainter extends CustomPainter {
     final waveWidth = waveRight - waveLeft;
 
     final path = Path();
-    path.moveTo(waveLeft, baselineY);
 
-    const step = 2.0;
-    for (double x = waveLeft; x <= waveRight; x += step) {
-      final t = (x - waveLeft) / waveWidth;
-      path.lineTo(
-          x,
-          _waveY(t,
-              baselineY: baselineY,
-              amplitude: amplitude,
-              phaseShift: phaseShift,
-              frequency: frequency,
-              detailFrequency: detailFrequency));
+    // Top edge
+    path.moveTo(waveLeft, topBaselineY);
+    if (!atBottom) {
+      const step = 2.0;
+      for (double x = waveLeft; x <= waveRight; x += step) {
+        final t = (x - waveLeft) / waveWidth;
+        path.lineTo(
+            x,
+            _waveY(t,
+                baselineY: topBaselineY,
+                amplitude: amplitude,
+                phaseShift: phaseShift,
+                frequency: frequency,
+                detailFrequency: detailFrequency,
+                isTop: true));
+      }
     }
-    path.lineTo(waveRight, baselineY);
+    path.lineTo(waveRight, topBaselineY);
 
     // top-right corner
-    path.arcToPoint(Offset(w, baselineY + r),
+    path.arcToPoint(Offset(w, topBaselineY + r),
         radius: const Radius.circular(r), clockwise: true);
     // right side
     path.lineTo(w, h - r);
     // bottom-right corner
     path.arcToPoint(Offset(w - r, h),
         radius: const Radius.circular(r), clockwise: true);
-    // bottom
-    path.lineTo(r, h);
+
+    // Bottom edge
+    if (atBottom) {
+      const step = 2.0;
+      for (double x = waveRight; x >= waveLeft; x -= step) {
+        final t = (waveRight - x) / waveWidth;
+        path.lineTo(
+            x,
+            _waveY(t,
+                baselineY: h,
+                amplitude: amplitude,
+                phaseShift: phaseShift,
+                frequency: frequency,
+                detailFrequency: detailFrequency,
+                isTop: false));
+      }
+    }
+    path.lineTo(waveLeft, h);
+
     // bottom-left corner
     path.arcToPoint(Offset(0, h - r),
         radius: const Radius.circular(r), clockwise: true);
     // left side
-    path.lineTo(0, baselineY + r);
+    path.lineTo(0, topBaselineY + r);
     // top-left corner
-    path.arcToPoint(Offset(waveLeft, baselineY),
+    path.arcToPoint(Offset(waveLeft, topBaselineY),
         radius: const Radius.circular(r), clockwise: true);
 
     path.close();
@@ -994,6 +1125,7 @@ class _ComposerOutlinePainter extends CustomPainter {
     required double phaseShift,
     required double frequency,
     required double detailFrequency,
+    required bool isTop,
   }) {
     if (amplitude <= 0.01) return baselineY;
     final gaussian = math.exp(-math.pow((t - 0.5) * 4.3, 2).toDouble());
@@ -1001,7 +1133,8 @@ class _ComposerOutlinePainter extends CustomPainter {
         (t * math.pi * 2 * frequency) + ((phase + phaseShift) * math.pi * 2));
     final detail = math.sin(
         (t * math.pi * 2 * detailFrequency) - ((phase * 0.75) * math.pi * 2));
-    final lift = amplitude * gaussian * (carrier + detail * 0.42);
+    // isTop wave moves UP (negative y), isBottom wave moves DOWN (positive y)
+    final lift = (isTop ? 1 : -1) * amplitude * gaussian * (carrier + detail * 0.42);
     return baselineY - lift;
   }
 
@@ -1010,6 +1143,8 @@ class _ComposerOutlinePainter extends CustomPainter {
       old.phase != phase ||
       old.volume != volume ||
       old.active != active ||
+      old.isAiTalking != isAiTalking ||
+      old.isUserTalking != isUserTalking ||
       old.glowStrength != glowStrength;
 }
 

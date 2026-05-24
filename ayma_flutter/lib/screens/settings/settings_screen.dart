@@ -4,7 +4,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
 import '../../providers/providers.dart';
-import '../../services/backend_service.dart';
+import 'package:firebase_auth/firebase_auth.dart';
 import '../../theme.dart';
 
 class SettingsScreen extends ConsumerStatefulWidget {
@@ -33,7 +33,7 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
 
   Future<void> _deleteAccount() async {
     try {
-      await BackendService.post('/api/account/delete', {});
+      await FirebaseAuth.instance.currentUser?.delete();
       await ref.read(authControllerProvider).signOut();
       if (mounted) context.go('/auth');
     } catch (e) {
@@ -229,10 +229,16 @@ class _ExclusionsSheetState extends ConsumerState<_ExclusionsSheet> {
 
   Future<void> _save() async {
     final text = _ctrl.text.trim();
-    if (text.isEmpty) { Navigator.pop(context); return; }
     setState(() => _saving = true);
     try {
-      await updateProfile({'exclusions': text}, ref);
+      final profile = ref.read(profileProvider).valueOrNull;
+      final currentPrefs = Map<String, dynamic>.from(profile?.matchingPrefs ?? const {});
+      if (text.isEmpty) {
+        currentPrefs.remove('exclusions');
+      } else {
+        currentPrefs['exclusions'] = text;
+      }
+      await updateProfile({'matching_prefs': currentPrefs}, ref);
       if (mounted) Navigator.pop(context);
     } catch (e) {
       if (mounted) {

@@ -14,7 +14,6 @@ import 'screens/profile/profile_screen.dart';
 import 'screens/settings/settings_screen.dart';
 import 'screens/shell/shell_screen.dart';
 
-// Notifier that triggers go_router re-evaluation when auth or onboarding state changes.
 class _RouterRefreshNotifier extends ChangeNotifier {
   _RouterRefreshNotifier(Ref ref) {
     ref.listen(authSessionProvider, (_, __) => notifyListeners());
@@ -31,14 +30,13 @@ final routerProvider = Provider<GoRouter>((ref) {
     refreshListenable: notifier,
     redirect: (context, state) {
       final initialized = ref.read(authInitializedProvider);
-      final session = ref.read(authSessionProvider);
+      final user = ref.read(authSessionProvider);
       final path = state.matchedLocation;
 
       if (!initialized) return null;
-      if (session == null) return path == '/auth' ? null : '/auth';
+      if (user == null) return path == '/auth' ? null : '/auth';
       if (path == '/auth') return '/chat';
 
-      // Only redirect once onboarding status has loaded — avoid flickering.
       final onboarding = ref.read(onboardingStatusProvider);
       if (onboarding.hasValue) {
         final complete = onboarding.value ?? false;
@@ -49,8 +47,8 @@ final routerProvider = Provider<GoRouter>((ref) {
       return null;
     },
     routes: [
-      GoRoute(path: '/auth',        builder: (_, __) => const AuthScreen()),
-      GoRoute(path: '/onboarding',  builder: (_, __) => const OnboardingScreen()),
+      GoRoute(path: '/auth',       builder: (_, __) => const AuthScreen()),
+      GoRoute(path: '/onboarding', builder: (_, __) => const OnboardingScreen()),
       ShellRoute(
         builder: (context, state, child) => ShellScreen(child: child),
         routes: [

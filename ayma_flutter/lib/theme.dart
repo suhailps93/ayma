@@ -111,7 +111,7 @@ class AymaFonts {
   static TextStyle elegantSans({
     double size = 14,
     Color color = AymaColors.fg,
-    FontWeight weight = FontWeight.w400,
+    FontWeight weight = FontWeight.w300,
     double? letterSpacing,
   }) =>
       GoogleFonts.instrumentSans(

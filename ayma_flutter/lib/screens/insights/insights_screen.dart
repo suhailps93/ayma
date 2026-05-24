@@ -3,7 +3,6 @@ import 'package:flutter_animate/flutter_animate.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../providers/providers.dart';
-import '../../services/backend_service.dart';
 import '../../theme.dart';
 
 // ── Insights screen ────────────────────────────────────────────────────────────
@@ -23,11 +22,6 @@ class _InsightsScreenState extends ConsumerState<InsightsScreen> {
   Future<void> _refresh() async {
     if (_refreshing) return;
     setState(() => _refreshing = true);
-    try {
-      await BackendService.post('/api/insights/refresh', {});
-    } catch (_) {
-      // Endpoint may not exist; fall through to invalidate anyway
-    }
     ref.invalidate(insightsProvider);
     if (mounted) setState(() => _refreshing = false);
   }

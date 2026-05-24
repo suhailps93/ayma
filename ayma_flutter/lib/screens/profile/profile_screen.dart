@@ -7,6 +7,7 @@ import 'package:image_picker/image_picker.dart';
 import '../../models/profile.dart';
 import '../../providers/providers.dart';
 import '../../services/backend_service.dart';
+import '../../services/firestore_service.dart';
 import '../../theme.dart';
 import '../../widgets/ayma_button.dart';
 import '../../widgets/ayma_text_field.dart';
@@ -41,7 +42,7 @@ class _ProfileScreenState extends ConsumerState<ProfileScreen> {
   Future<void> _save(UserProfile profile) async {
     setState(() => _saving = true);
     try {
-      await BackendService.post('/api/profile', {
+      await FirestoreService.updateProfile({
         'profile_public':   _bioCtrl.text.trim(),
         'profile_private':  _notesCtrl.text.trim(),
         'agent_name':       _agentNameCtrl.text.trim(),
@@ -70,11 +71,8 @@ class _ProfileScreenState extends ConsumerState<ProfileScreen> {
     setState(() => _uploadingPhoto = true);
     try {
       final bytes = await picked.readAsBytes();
-      await BackendService.uploadFileBytes(
-        '/api/media/upload',
-        bytes,
-        filename: picked.name,
-      );
+      final url = await BackendService.uploadMedia(bytes, picked.name);
+      await FirestoreService.saveMediaRecord(photoUrl: url);
       ref.invalidate(insightsProvider);
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(

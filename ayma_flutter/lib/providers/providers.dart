@@ -1,13 +1,15 @@
+import 'dart:async';
+
+import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../models/auth_session.dart';
 import '../models/match_model.dart';
 import '../models/notification_model.dart';
-import 'dart:async';
 import '../models/profile.dart';
 import '../services/audio_service.dart';
 import '../services/auth_service.dart';
-import '../services/backend_service.dart';
+import '../services/firestore_service.dart';
 
 // ── Auth ──────────────────────────────────────────────────────────────────────
 
@@ -17,16 +19,29 @@ final authControllerProvider = ChangeNotifierProvider<AuthService>((ref) {
   return service;
 });
 
-final authSessionProvider = Provider<AuthSession?>((ref) {
-  return ref.watch(authControllerProvider).session;
+// Emits the Firebase User (null when signed out). Used by router.
+final firebaseUserProvider = StreamProvider<User?>((ref) {
+  return FirebaseAuth.instance.authStateChanges();
 });
 
-final authInitializedProvider = Provider<bool>((ref) {
-  return ref.watch(authControllerProvider).initialized;
-});
-
+// Convenience — maps Firebase User → AuthUser for the rest of the app.
 final currentUserProvider = Provider<AuthUser?>((ref) {
-  return ref.watch(authControllerProvider).currentUser;
+  final asyncUser = ref.watch(firebaseUserProvider);
+  return asyncUser.when(
+    data: (u) => u == null ? null : AuthUser(id: u.uid, email: u.email),
+    loading: () => null,
+    error: (_, __) => null,
+  );
+});
+
+// True once Firebase has resolved the initial auth state.
+final authInitializedProvider = Provider<bool>((ref) {
+  return !ref.watch(firebaseUserProvider).isLoading;
+});
+
+// Keep authSessionProvider as an alias so router.dart compiles unchanged.
+final authSessionProvider = Provider<AuthUser?>((ref) {
+  return ref.watch(currentUserProvider);
 });
 
 // ── Profile ───────────────────────────────────────────────────────────────────
@@ -34,8 +49,7 @@ final currentUserProvider = Provider<AuthUser?>((ref) {
 final profileProvider = FutureProvider<UserProfile?>((ref) async {
   final user = ref.watch(currentUserProvider);
   if (user == null) return null;
-  final res = await BackendService.get('/api/profile') as Map<String, dynamic>;
-  return UserProfile.fromMap(res);
+  return FirestoreService.getProfile();
 });
 
 // ── Matches ───────────────────────────────────────────────────────────────────
@@ -43,24 +57,19 @@ final profileProvider = FutureProvider<UserProfile?>((ref) async {
 final matchesProvider = FutureProvider<List<MatchModel>>((ref) async {
   final user = ref.watch(currentUserProvider);
   if (user == null) return [];
-  final res = await BackendService.get('/api/matches') as List<dynamic>;
-  return res
-      .map((m) => MatchModel.fromMap(m as Map<String, dynamic>, user.id))
-      .toList();
+  return FirestoreService.getMatches();
 });
 
 // ── Notifications ─────────────────────────────────────────────────────────────
 
 final notificationsProvider =
-    StateNotifierProvider<NotificationsNotifier, List<NotificationModel>>(
-  (ref) {
-    final notifier = NotificationsNotifier(ref);
-    ref.listen(currentUserProvider, (_, __) {
-      unawaited(notifier.reload());
-    });
-    return notifier;
-  },
-);
+    StateNotifierProvider<NotificationsNotifier, List<NotificationModel>>((ref) {
+  final notifier = NotificationsNotifier(ref);
+  ref.listen(currentUserProvider, (_, user) {
+    if (user != null) unawaited(notifier.reload());
+  });
+  return notifier;
+});
 
 class NotificationsNotifier extends StateNotifier<List<NotificationModel>> {
   NotificationsNotifier(this._ref) : super(const []) {
@@ -68,6 +77,7 @@ class NotificationsNotifier extends StateNotifier<List<NotificationModel>> {
   }
 
   final Ref _ref;
+  StreamSubscription? _sub;
 
   Future<void> reload() async {
     final user = _ref.read(currentUserProvider);
@@ -75,30 +85,29 @@ class NotificationsNotifier extends StateNotifier<List<NotificationModel>> {
       state = const [];
       return;
     }
-    final res = await BackendService.get('/api/notifications') as List<dynamic>;
-    state = res
-        .map((m) => NotificationModel.fromMap(m as Map<String, dynamic>))
-        .toList();
+    _sub?.cancel();
+    _sub = FirestoreService.notificationsStream().listen((list) => state = list);
   }
 
-  void add(NotificationModel n) {
-    state = [n, ...state];
-  }
+  void add(NotificationModel n) => state = [n, ...state];
 
   Future<void> markRead(String id) async {
-    state = [
-      for (final n in state)
-        if (n.id == id) n.copyWith(read: true) else n,
-    ];
-    await BackendService.post('/api/notifications/$id/read', const {});
+    state = [for (final n in state) if (n.id == id) n.copyWith(read: true) else n];
+    await FirestoreService.markNotificationRead(id);
   }
 
   Future<void> markAllRead() async {
     state = state.map((n) => n.copyWith(read: true)).toList();
-    await BackendService.post('/api/notifications/read-all', const {});
+    await FirestoreService.markAllNotificationsRead();
   }
 
   int get unreadCount => state.where((n) => !n.read).length;
+
+  @override
+  void dispose() {
+    _sub?.cancel();
+    super.dispose();
+  }
 }
 
 // ── Onboarding ────────────────────────────────────────────────────────────────
@@ -106,38 +115,33 @@ class NotificationsNotifier extends StateNotifier<List<NotificationModel>> {
 final onboardingStatusProvider = FutureProvider<bool>((ref) async {
   final user = ref.watch(currentUserProvider);
   if (user == null) return false;
-  final res =
-      await BackendService.get('/api/onboarding-status') as Map<String, dynamic>;
-  return (res['onboarding_complete'] as bool?) ?? false;
+  return FirestoreService.getOnboardingStatus();
 });
 
-// ── Insights (Your Story / wiki pages) ───────────────────────────────────────
+// ── Insights ──────────────────────────────────────────────────────────────────
 
 final insightsProvider = FutureProvider<Map<String, String>>((ref) async {
   final user = ref.watch(currentUserProvider);
   if (user == null) return {};
-  final res = await BackendService.get('/api/insights') as Map<String, dynamic>;
-  return res.map((k, v) => MapEntry(k, (v as String?) ?? ''));
+  return FirestoreService.getInsights();
 });
 
 // ── Match actions ─────────────────────────────────────────────────────────────
 
-/// Accepts a match by id; invalidates [matchesProvider] on success.
 Future<void> acceptMatch(String matchId, WidgetRef ref) async {
-  await BackendService.post('/api/matches/$matchId/accept', {});
+  await FirestoreService.updateMatchStatus(matchId, 'accepted');
   ref.invalidate(matchesProvider);
 }
 
-/// Rejects a match by id; invalidates [matchesProvider] on success.
 Future<void> rejectMatch(String matchId, WidgetRef ref) async {
-  await BackendService.post('/api/matches/$matchId/reject', {});
+  await FirestoreService.updateMatchStatus(matchId, 'rejected');
   ref.invalidate(matchesProvider);
 }
 
 // ── Explore ───────────────────────────────────────────────────────────────────
 
 class ExploreFilters {
-  final String tab;       // 'people' | 'prompts'
+  final String tab;
   final String? gender;
   final int ageMin;
   final int ageMax;
@@ -162,12 +166,12 @@ class ExploreFilters {
     String? query,
   }) =>
       ExploreFilters(
-        tab:      tab      ?? this.tab,
-        gender:   gender == _sentinel ? this.gender : gender as String?,
-        ageMin:   ageMin   ?? this.ageMin,
-        ageMax:   ageMax   ?? this.ageMax,
+        tab: tab ?? this.tab,
+        gender: gender == _sentinel ? this.gender : gender as String?,
+        ageMin: ageMin ?? this.ageMin,
+        ageMax: ageMax ?? this.ageMax,
         radiusKm: radiusKm ?? this.radiusKm,
-        query:    query    ?? this.query,
+        query: query ?? this.query,
       );
 }
 
@@ -181,28 +185,19 @@ final exploreProvider =
   final user = ref.watch(currentUserProvider);
   if (user == null) return {'people': [], 'prompts': []};
   final filters = ref.watch(exploreFiltersProvider);
-  final params = <String, dynamic>{
-    'tab':       filters.tab,
-    'age_min':   filters.ageMin,
-    'age_max':   filters.ageMax,
-    'radius_km': filters.radiusKm,
-    if (filters.gender != null) 'gender': filters.gender,
-    if (filters.query.isNotEmpty) 'query': filters.query,
-  };
-  try {
-    final res = await BackendService.get('/api/explore', params) as Map<String, dynamic>;
-    return res;
-  } catch (_) {
-    // Endpoint may not exist yet — return empty gracefully
-    return {'people': [], 'prompts': []};
-  }
+  final people = await FirestoreService.explore(
+    gender: filters.gender,
+    ageMin: filters.ageMin,
+    ageMax: filters.ageMax,
+    query: filters.query,
+  );
+  return {'people': people, 'prompts': []};
 });
 
-// ── Profile update actions ─────────────────────────────────────────────────────
+// ── Profile update ────────────────────────────────────────────────────────────
 
-/// Posts a partial profile update and invalidates [profileProvider].
 Future<void> updateProfile(Map<String, dynamic> fields, WidgetRef ref) async {
-  await BackendService.post('/api/profile', fields);
+  await FirestoreService.updateProfile(fields);
   ref.invalidate(profileProvider);
 }
 

@@ -3,7 +3,10 @@ import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
 import 'package:geolocator/geolocator.dart';
 
-import '../../services/backend_service.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
+
+import '../../providers/providers.dart';
+import '../../services/firestore_service.dart';
 import '../../theme.dart';
 import '../../widgets/ayma_button.dart';
 
@@ -119,14 +122,14 @@ class _BreathingOrbState extends State<_BreathingOrb>
 
 // ── Main screen ───────────────────────────────────────────────────────────────
 
-class OnboardingScreen extends StatefulWidget {
+class OnboardingScreen extends ConsumerStatefulWidget {
   const OnboardingScreen({super.key});
 
   @override
-  State<OnboardingScreen> createState() => _OnboardingScreenState();
+  ConsumerState<OnboardingScreen> createState() => _OnboardingScreenState();
 }
 
-class _OnboardingScreenState extends State<OnboardingScreen> {
+class _OnboardingScreenState extends ConsumerState<OnboardingScreen> {
   // 0=welcome, 1=about you, 2=preferences
   int _step = 0;
   bool _saving = false;
@@ -170,11 +173,8 @@ class _OnboardingScreenState extends State<OnboardingScreen> {
     setState(() => _locationLoading = true);
     try {
       final pos = await Geolocator.getCurrentPosition();
-      final result = await BackendService.get('/api/location/reverse', {
-        'lat': pos.latitude,
-        'lon': pos.longitude,
-      }) as Map<String, dynamic>;
-      final location = (result['location'] as String?) ?? '';
+      // Use a simple reverse geocode string from lat/lon
+      final location = '${pos.latitude.toStringAsFixed(2)}, ${pos.longitude.toStringAsFixed(2)}';
       setState(() {
         _locationText = location;
         _locationCtrl.text = location;
@@ -184,30 +184,16 @@ class _OnboardingScreenState extends State<OnboardingScreen> {
   }
 
   void _onLocationChanged(String val) {
-    _debounce?.cancel();
-    if (val.length < 3) {
-      setState(() => _suggestions = []);
-      return;
-    }
-    _debounce = Timer(const Duration(milliseconds: 400), () async {
-      try {
-        final response = await BackendService.get(
-            '/api/location/search', {'q': val}) as List<dynamic>;
-        final results = response
-            .map((item) =>
-                (item as Map<String, dynamic>)['short_name'] as String)
-            .where((item) => item.isNotEmpty)
-            .toSet()
-            .toList();
-        if (mounted) setState(() => _suggestions = results);
-      } catch (_) {}
+    setState(() {
+      _locationText = val;
+      _suggestions = [];
     });
   }
 
   Future<void> _save() async {
     setState(() => _saving = true);
     try {
-      await BackendService.post('/api/onboarding', {
+      await FirestoreService.updateProfile({
         'display_name': _nameCtrl.text.trim(),
         'age': _age,
         'gender': _gender,
@@ -217,7 +203,9 @@ class _OnboardingScreenState extends State<OnboardingScreen> {
           'age_max': _maxAge,
         },
         'location_region': _locationText,
+        'onboarding_complete': true,
       });
+      ref.invalidate(onboardingStatusProvider);
       if (mounted) context.go('/chat');
     } catch (e) {
       if (mounted) {
