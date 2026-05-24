@@ -2,8 +2,9 @@
 Ayma Bootstrap — minimal Cloud Run function.
 
 Endpoints:
-  POST /bootstrap   — verify Firebase ID token, build system prompt, return Gemini Live creds
-  POST /post-turn   — upsert LLM wiki + mark questions answered
+  POST /bootstrap      — verify Firebase ID token, build system prompt, return Gemini Live creds
+  POST /post-turn      — upsert LLM wiki + mark questions answered
+  POST /run-matching   — heuristic filter → PII-stripped Gemini scoring → write matches
 """
 
 import asyncio
@@ -463,3 +464,174 @@ async def post_turn(body: PostTurnRequest, uid: str = Depends(verify_token)):
 @app.get("/health")
 async def health():
     return {"status": "ok"}
+
+
+# ── Matching ──────────────────────────────────────────────────────────────────
+
+_PII_FIELDS = frozenset({
+    "display_name", "location_region", "employer", "email", "phone",
+    "location_text", "location_lat", "location_lng",
+})
+
+_PROFILE_SKIP = frozenset({
+    "id", "onboarding_complete", "matching_paused", "created_at", "updated_at",
+    "voice_preference", "voice_accent", "voice_settings", "voice_preferences_updated_at",
+    "agent_name",
+})
+
+
+def strip_pii(profile: dict) -> dict:
+    """Remove personally identifying fields before sending a profile to the scoring LLM."""
+    return {k: v for k, v in profile.items() if k not in _PII_FIELDS}
+
+
+def _fmt_profile(profile: dict) -> str:
+    skip = _PII_FIELDS | _PROFILE_SKIP
+    lines = []
+    for k, v in profile.items():
+        if k in skip or not v:
+            continue
+        if isinstance(v, dict):
+            lines.append(f"{k}: {json.dumps(v)}")
+        else:
+            lines.append(f"{k}: {v}")
+    return "\n".join(lines) or "(no profile data)"
+
+
+MATCHING_SCORING_PROMPT = """You are evaluating compatibility between two people for a matchmaking app.
+
+Person A:
+{profile_a}
+
+Person B:
+{profile_b}
+
+Assess compatibility based on shared values, lifestyle, relationship goals, personality fit, and complementary qualities.
+
+Return ONLY a JSON object with these exact fields:
+{{
+  "score": <float 0.0-1.0, where 1.0 is exceptional compatibility>,
+  "rationale": "<2-3 sentences explaining overall compatibility>",
+  "summary_a": "<1 sentence from Person A's perspective: why Person B is a good match for them>",
+  "summary_b": "<1 sentence from Person B's perspective: why Person A is a good match for them>"
+}}"""
+
+
+def _interested_in(prefs: dict, target_gender: str) -> bool:
+    pref = (prefs.get("interested_in") or "").lower().strip()
+    if not pref or pref == "everyone":
+        return True
+    g = target_gender.lower().strip()
+    if pref in ("men", "man", "male"):
+        return g in ("men", "man", "male")
+    if pref in ("women", "woman", "female"):
+        return g in ("women", "woman", "female")
+    return True
+
+
+def _is_heuristic_match(me: dict, other: dict) -> bool:
+    """Return True if me and other pass the basic compatibility heuristics."""
+    my_prefs = me.get("matching_prefs") or {}
+    other_prefs = other.get("matching_prefs") or {}
+    my_gender = (me.get("gender") or "").lower()
+    other_gender = (other.get("gender") or "").lower()
+
+    if not _interested_in(my_prefs, other_gender):
+        return False
+    if not _interested_in(other_prefs, my_gender):
+        return False
+
+    my_age = me.get("age")
+    other_age = other.get("age")
+    if my_age is not None and other_age is not None:
+        a_min = my_prefs.get("age_min")
+        a_max = my_prefs.get("age_max")
+        b_min = other_prefs.get("age_min")
+        b_max = other_prefs.get("age_max")
+        if a_min is not None and a_max is not None and not (a_min <= other_age <= a_max):
+            return False
+        if b_min is not None and b_max is not None and not (b_min <= my_age <= b_max):
+            return False
+
+    return True
+
+
+async def _score_pair(
+    model: genai.GenerativeModel, me: dict, other: dict
+) -> dict | None:
+    """Call Gemini to score a candidate pair. Returns scoring dict or None on failure."""
+    prompt = MATCHING_SCORING_PROMPT.format(
+        profile_a=_fmt_profile(strip_pii(me)),
+        profile_b=_fmt_profile(strip_pii(other)),
+    )
+    try:
+        resp = await model.generate_content_async(
+            prompt,
+            generation_config={"response_mime_type": "application/json"},
+        )
+        result = json.loads(resp.text)
+        if not isinstance(result.get("score"), (int, float)):
+            return None
+        return result
+    except Exception:
+        return None
+
+
+@app.post("/run-matching")
+async def run_matching(uid: str = Depends(verify_token)):
+    user_ref = db.collection("users").document(uid)
+    me = (user_ref.get().to_dict()) or {}
+    if not me:
+        raise HTTPException(status_code=404, detail="Profile not found")
+
+    # Fetch onboarded users (limit to keep latency reasonable)
+    candidates_snap = (
+        db.collection("users")
+        .where("onboarding_complete", "==", True)
+        .limit(80)
+        .stream()
+    )
+    candidates = [
+        {**d.to_dict(), "id": d.id}
+        for d in candidates_snap
+        if d.id != uid
+    ]
+
+    filtered = [c for c in candidates if _is_heuristic_match(me, c)]
+
+    # Fetch already-matched user IDs so we skip duplicates
+    matched_ids: set[str] = set()
+    for d in db.collection("matches").where("user_a", "==", uid).stream():
+        matched_ids.add(d.to_dict().get("user_b", ""))
+    for d in db.collection("matches").where("user_b", "==", uid).stream():
+        matched_ids.add(d.to_dict().get("user_a", ""))
+
+    to_score = [c for c in filtered if c["id"] not in matched_ids][:10]
+
+    model = genai.GenerativeModel(TEXT_MODEL)
+    now = datetime.now(timezone.utc)
+
+    scorings = await asyncio.gather(*[_score_pair(model, me, c) for c in to_score])
+
+    matches_ref = db.collection("matches")
+    created = 0
+    for candidate, scoring in zip(to_score, scorings):
+        if scoring is None:
+            continue
+        score = float(scoring.get("score", 0.0))
+        if score < 0.4:
+            continue
+        matches_ref.add({
+            "user_a": uid,
+            "user_b": candidate["id"],
+            "score": round(score, 3),
+            "rationale": scoring.get("rationale", ""),
+            "summary_a": scoring.get("summary_a", ""),
+            "summary_b": scoring.get("summary_b", ""),
+            "status": "pending",
+            "created_at": now.isoformat(),
+            "updated_at": now.isoformat(),
+        })
+        created += 1
+
+    return {"matches_created": created, "candidates_evaluated": len(to_score)}
