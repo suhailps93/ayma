@@ -1,5 +1,3 @@
-import 'package:flutter_skill/flutter_skill.dart';
-import 'package:flutter/foundation.dart'; // For kDebugMode
 import 'package:firebase_core/firebase_core.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
