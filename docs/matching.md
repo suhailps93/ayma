@@ -1,6 +1,6 @@
 # Matching System
 
-> **Status:** Phase 2 — not yet implemented. Firestore schema and read side are ready.
+> **Status:** Phase 2 + Phase 3 implemented. `/run-matching` and `/vibe-check` are live in `functions/bootstrap/main.py`.
 >
 > [← Back to Architecture](ARCHITECTURE.md)
 
@@ -85,9 +85,10 @@ updated_at : timestamp
 
 ## Roadmap
 
-- [ ] Implement `POST /run-matching` in `main.py` (Stage 1 + 2)
+- [x] Implement `POST /run-matching` in `main.py` (Stage 1 + 2)
+- [x] Implement `POST /vibe-check` in `main.py` (Stage 3)
+- [x] Wire vibe check into `/run-matching` as second-stage filter (top 5 candidates)
 - [ ] Flutter: "Find matches" button calls `/run-matching`
-- [ ] Match detail screen: show score + reasoning
-- [ ] Implement `POST /vibe-check` in `main.py` (Stage 3)
+- [ ] Match detail screen: show score + reasoning + synergy
 - [ ] Flutter: consent modal → call `/vibe-check` → show synergy result
 - [ ] Auto-trigger matching after 5+ new traits written in a session

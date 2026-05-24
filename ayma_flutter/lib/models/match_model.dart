@@ -8,6 +8,8 @@ class MatchModel {
   final String status;
   final String? summaryA;
   final String? summaryB;
+  final int? synergyScore;
+  final String? synergySummary;
   final DateTime createdAt;
 
   const MatchModel({
@@ -20,21 +22,25 @@ class MatchModel {
     required this.status,
     this.summaryA,
     this.summaryB,
+    this.synergyScore,
+    this.synergySummary,
     required this.createdAt,
   });
 
   factory MatchModel.fromMap(Map<String, dynamic> m, String currentUserId) {
     return MatchModel(
-      id:            m['id'] as String,
-      userA:         m['user_a'] as String,
-      userB:         m['user_b'] as String,
-      currentUserId: currentUserId,
-      score:         ((m['score'] ?? 0) as num).toDouble(),
-      rationale:     m['rationale'] as String?,
-      status:        (m['status'] as String?) ?? 'pending',
-      summaryA:      m['summary_a'] as String?,
-      summaryB:      m['summary_b'] as String?,
-      createdAt:     DateTime.parse(m['created_at'] as String),
+      id:             m['id'] as String,
+      userA:          m['user_a'] as String,
+      userB:          m['user_b'] as String,
+      currentUserId:  currentUserId,
+      score:          ((m['score'] ?? 0) as num).toDouble(),
+      rationale:      m['rationale'] as String?,
+      status:         (m['status'] as String?) ?? 'pending',
+      summaryA:       m['summary_a'] as String?,
+      summaryB:       m['summary_b'] as String?,
+      synergyScore:   m['synergy_score'] as int?,
+      synergySummary: m['synergy_summary'] as String?,
+      createdAt:      DateTime.parse(m['created_at'] as String),
     );
   }
 

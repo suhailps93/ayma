@@ -42,7 +42,7 @@ ayma/
 │   ├── ARCHITECTURE.md       ← detailed system design + roadmap
 │   └── matching.md           ← matching algorithm design notes
 ├── functions/bootstrap/
-│   └── main.py               ← Cloud Run: /bootstrap, /post-turn, (planned) /run-matching
+│   └── main.py               ← Cloud Run: /bootstrap, /post-turn, /run-matching, /vibe-check
 ├── ayma_flutter/lib/
 │   ├── services/
 │   │   ├── audio_service.dart    ← Gemini Live WebSocket + mic/speaker + tool call handler
@@ -90,10 +90,12 @@ ayma/
 - [x] Match detail screen — shows both users (name, age, location, snippet), score, and rationale
 - [x] Trigger matching from Flutter — "Find matches" button in Matches screen header + empty state CTA
 
-## Planned (Phase 3 — Vibe Check)
+## Phase 3 — Vibe Check
 
-- [ ] `POST /vibe-check`: agent-to-agent simulation (4-5 turns) → synergy score
-- [ ] Wire into matching pipeline as second-stage filter
+- [x] `POST /vibe-check`: agent-to-agent simulation (5-turn) → synergy score + summary
+- [x] Wire into matching pipeline as second-stage filter (top 5 candidates run vibe check before write)
+- [x] `BackendService.vibeCheck(matchId)` in Flutter for user-triggered vibe checks
+- [x] `MatchModel` extended with `synergyScore` and `synergySummary` fields
 
 ---
 

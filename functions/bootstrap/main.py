@@ -4,7 +4,8 @@ Ayma Bootstrap — minimal Cloud Run function.
 Endpoints:
   POST /bootstrap      — verify Firebase ID token, build system prompt, return Gemini Live creds
   POST /post-turn      — upsert LLM wiki + mark questions answered
-  POST /run-matching   — heuristic filter → PII-stripped Gemini scoring → write matches
+  POST /run-matching   — heuristic filter → LLM scoring → vibe check → write matches
+  POST /vibe-check     — agent-to-agent simulation → synergy score (user-triggered)
 """
 
 import asyncio
@@ -420,7 +421,6 @@ async def post_turn(body: PostTurnRequest, uid: str = Depends(verify_token)):
     pending = {d.id: d.to_dict() for d in questions_snap}
 
     if pending:
-        updated_wiki = {f: t for _, (f, t) in zip(range(4), wiki_results)}
         question_list = "\n".join(
             f"- {v['key']}: {v['text']}" for v in pending.values()
         )
@@ -456,14 +456,6 @@ async def post_turn(body: PostTurnRequest, uid: str = Depends(verify_token)):
     })
 
     return {"updated": True}
-
-
-# ── Health ────────────────────────────────────────────────────────────────────
-
-
-@app.get("/health")
-async def health():
-    return {"status": "ok"}
 
 
 # ── Matching ──────────────────────────────────────────────────────────────────
@@ -515,6 +507,38 @@ Return ONLY a JSON object with these exact fields:
   "summary_a": "<1 sentence from Person A's perspective: why Person B is a good match for them>",
   "summary_b": "<1 sentence from Person B's perspective: why Person A is a good match for them>"
 }}"""
+
+VIBE_SIM_PROMPT = """You are simulating a first-date conversation between two people to assess their chemistry.
+
+Person A profile:
+{profile_a}
+
+Person B profile:
+{profile_b}
+
+Generate exactly 5 dialogue turns (Person A starts, they alternate). Each response should be 1-3 sentences. Be authentic to each person's personality, values, and communication style. Make the conversation feel real and spontaneous.
+
+Format your response exactly like this (no other text):
+A: [Person A's opening message]
+B: [Person B's reply]
+A: [Person A's response]
+B: [Person B's reply]
+A: [Person A's closing message]"""
+
+VIBE_SCORE_PROMPT = """Rate the chemistry and compatibility between Person A and Person B based on their profiles and conversation.
+
+Person A profile:
+{profile_a}
+
+Person B profile:
+{profile_b}
+
+Their simulated first-date conversation:
+{conversation}
+
+Consider: natural rapport, shared interests, complementary values, conversational energy, emotional connection.
+
+Return JSON only: {{"synergyScore": <integer 0-100>, "synergySummary": "<one concise sentence describing their chemistry>"}}"""
 
 
 def _interested_in(prefs: dict, target_gender: str) -> bool:
@@ -577,6 +601,49 @@ async def _score_pair(
         return None
 
 
+async def _run_vibe_check(uid_a: str, uid_b: str, model: genai.GenerativeModel) -> dict:
+    """Simulate a 5-turn first-date conversation and return synergy score + summary."""
+    profile_a_raw = (db.collection("users").document(uid_a).get().to_dict()) or {}
+    profile_b_raw = (db.collection("users").document(uid_b).get().to_dict()) or {}
+
+    fmt_a = _fmt_profile(strip_pii(profile_a_raw))
+    fmt_b = _fmt_profile(strip_pii(profile_b_raw))
+
+    # Step 1: simulate the conversation in a single LLM call
+    sim_prompt = VIBE_SIM_PROMPT.format(profile_a=fmt_a, profile_b=fmt_b)
+    try:
+        sim_resp = await model.generate_content_async(sim_prompt)
+        conversation = sim_resp.text.strip()
+    except Exception:
+        conversation = "(simulation unavailable)"
+
+    # Step 2: score the conversation
+    score_prompt = VIBE_SCORE_PROMPT.format(
+        profile_a=fmt_a,
+        profile_b=fmt_b,
+        conversation=conversation,
+    )
+    try:
+        score_resp = await model.generate_content_async(
+            score_prompt,
+            generation_config={"response_mime_type": "application/json"},
+        )
+        result = json.loads(score_resp.text)
+        synergy_score = int(result.get("synergyScore", 50))
+        synergy_summary = str(result.get("synergySummary", ""))
+    except Exception:
+        synergy_score = 50
+        synergy_summary = ""
+
+    return {
+        "synergy_score": max(0, min(100, synergy_score)),
+        "synergy_summary": synergy_summary,
+    }
+
+
+# ── /run-matching ──────────────────────────────────────────────────────────────
+
+
 @app.post("/run-matching")
 async def run_matching(uid: str = Depends(verify_token)):
     user_ref = db.collection("users").document(uid)
@@ -584,7 +651,7 @@ async def run_matching(uid: str = Depends(verify_token)):
     if not me:
         raise HTTPException(status_code=404, detail="Profile not found")
 
-    # Fetch onboarded users (limit to keep latency reasonable)
+    # Stage 1 — heuristic Firestore filter
     candidates_snap = (
         db.collection("users")
         .where("onboarding_complete", "==", True)
@@ -599,7 +666,7 @@ async def run_matching(uid: str = Depends(verify_token)):
 
     filtered = [c for c in candidates if _is_heuristic_match(me, c)]
 
-    # Fetch already-matched user IDs so we skip duplicates
+    # Skip already-matched users
     matched_ids: set[str] = set()
     for d in db.collection("matches").where("user_a", "==", uid).stream():
         matched_ids.add(d.to_dict().get("user_b", ""))
@@ -611,27 +678,108 @@ async def run_matching(uid: str = Depends(verify_token)):
     model = genai.GenerativeModel(TEXT_MODEL)
     now = datetime.now(timezone.utc)
 
+    # Stage 2 — parallel LLM compatibility scoring
     scorings = await asyncio.gather(*[_score_pair(model, me, c) for c in to_score])
+
+    # Sort by score to identify top candidates for vibe check
+    scored_pairs = [
+        (candidate, scoring)
+        for candidate, scoring in zip(to_score, scorings)
+        if scoring is not None and float(scoring.get("score", 0.0)) >= 0.4
+    ]
+    scored_pairs.sort(key=lambda x: float(x[1].get("score", 0.0)), reverse=True)
 
     matches_ref = db.collection("matches")
     created = 0
-    for candidate, scoring in zip(to_score, scorings):
-        if scoring is None:
-            continue
-        score = float(scoring.get("score", 0.0))
-        if score < 0.4:
-            continue
-        matches_ref.add({
-            "user_a": uid,
-            "user_b": candidate["id"],
-            "score": round(score, 3),
-            "rationale": scoring.get("rationale", ""),
-            "summary_a": scoring.get("summary_a", ""),
-            "summary_b": scoring.get("summary_b", ""),
-            "status": "pending",
-            "created_at": now.isoformat(),
-            "updated_at": now.isoformat(),
-        })
+
+    # Stage 3 — vibe check for top 5 before writing
+    vibe_threshold = 0.65
+    vibe_candidates = [p for p in scored_pairs if float(p[1].get("score", 0.0)) >= vibe_threshold][:5]
+    vibe_uids = {c["id"] for c, _ in vibe_candidates}
+
+    for candidate, scoring in scored_pairs:
+        score = round(float(scoring.get("score", 0.0)), 3)
+        cuid = candidate["id"]
+
+        if cuid in vibe_uids:
+            vibe = await _run_vibe_check(uid, cuid, model)
+            synergy_score = vibe["synergy_score"]
+            synergy_summary = vibe["synergy_summary"]
+            # Blend: 70% compat + 30% synergy
+            final_score = round(score * 0.7 + (synergy_score / 100) * 0.3, 3)
+            matches_ref.add({
+                "user_a": uid,
+                "user_b": cuid,
+                "score": final_score,
+                "rationale": scoring.get("rationale", ""),
+                "summary_a": scoring.get("summary_a", ""),
+                "summary_b": scoring.get("summary_b", ""),
+                "synergy_score": synergy_score,
+                "synergy_summary": synergy_summary,
+                "status": "vibe_checked",
+                "created_at": now.isoformat(),
+                "updated_at": now.isoformat(),
+            })
+        else:
+            matches_ref.add({
+                "user_a": uid,
+                "user_b": cuid,
+                "score": score,
+                "rationale": scoring.get("rationale", ""),
+                "summary_a": scoring.get("summary_a", ""),
+                "summary_b": scoring.get("summary_b", ""),
+                "synergy_score": None,
+                "synergy_summary": None,
+                "status": "pending",
+                "created_at": now.isoformat(),
+                "updated_at": now.isoformat(),
+            })
         created += 1
 
     return {"matches_created": created, "candidates_evaluated": len(to_score)}
+
+
+# ── /vibe-check ────────────────────────────────────────────────────────────────
+
+
+class VibeCheckRequest(BaseModel):
+    match_id: str
+
+
+@app.post("/vibe-check")
+async def vibe_check(body: VibeCheckRequest, uid: str = Depends(verify_token)):
+    match_ref = db.collection("matches").document(body.match_id)
+    match_doc = match_ref.get()
+    if not match_doc.exists:
+        raise HTTPException(status_code=404, detail="Match not found")
+
+    match = match_doc.to_dict() or {}
+    uid_a = match.get("user_a")
+    uid_b = match.get("user_b")
+
+    if uid not in (uid_a, uid_b):
+        raise HTTPException(status_code=403, detail="Not your match")
+
+    model = genai.GenerativeModel(TEXT_MODEL)
+    result = await _run_vibe_check(uid_a, uid_b, model)
+
+    now = datetime.now(timezone.utc).isoformat()
+    match_ref.update({
+        "synergy_score": result["synergy_score"],
+        "synergy_summary": result["synergy_summary"],
+        "status": "vibe_checked",
+        "updated_at": now,
+    })
+
+    return {
+        "synergy_score": result["synergy_score"],
+        "synergy_summary": result["synergy_summary"],
+    }
+
+
+# ── Health ────────────────────────────────────────────────────────────────────
+
+
+@app.get("/health")
+async def health():
+    return {"status": "ok"}

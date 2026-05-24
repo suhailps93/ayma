@@ -66,10 +66,31 @@ class BackendService {
             'Authorization': 'Bearer $token',
           },
         )
-        .timeout(const Duration(seconds: 90));
+        .timeout(const Duration(seconds: 120));
 
     if (response.statusCode != 200) {
       throw Exception('Matching failed: ${response.body}');
+    }
+    return jsonDecode(response.body) as Map<String, dynamic>;
+  }
+
+  static Future<Map<String, dynamic>> vibeCheck(String matchId) async {
+    final token = await _idToken();
+    if (token == null) throw Exception('Not authenticated');
+
+    final response = await http
+        .post(
+          Uri.parse('${Env.bootstrapUrl}/vibe-check'),
+          headers: {
+            'Content-Type': 'application/json',
+            'Authorization': 'Bearer $token',
+          },
+          body: jsonEncode({'match_id': matchId}),
+        )
+        .timeout(const Duration(seconds: 60));
+
+    if (response.statusCode != 200) {
+      throw Exception('vibe-check failed: ${response.body}');
     }
     return jsonDecode(response.body) as Map<String, dynamic>;
   }
