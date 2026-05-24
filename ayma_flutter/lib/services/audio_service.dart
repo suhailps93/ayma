@@ -441,12 +441,13 @@ class AymaAudioService extends ChangeNotifier {
       final interrupted = (serverContent['interrupted'] as bool?) ?? false;
       if (interrupted) {
         debugPrint('[ws] interrupted — stopping playback for barge-in');
+        // Preserve partial AI response already spoken before barge-in.
+        _flushPendingAgentText();
         if (kIsWeb) {
           _webPlayer.stop();
         } else {
           _stopStreamPlayer();
         }
-        _pendingAgentText = ''; // Clear pending text as it was interrupted
         _setState(SessionState.listening);
         return;
       }
