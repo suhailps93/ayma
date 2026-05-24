@@ -27,6 +27,11 @@ class AuthService extends ChangeNotifier {
     final exists = snap.exists;
     final data = snap.data() ?? const <String, dynamic>{};
 
+    final existingOnboarding = data['onboarding_complete'] as bool? ?? false;
+    final hasBasicOnboardingData =
+        ((data['display_name'] as String?)?.trim().isNotEmpty ?? false) &&
+            ((data['gender'] as String?)?.trim().isNotEmpty ?? false);
+
     await ref.set({
       'display_name': fallbackName,
       'agent_name': data['agent_name'] ?? 'Ayma',
@@ -34,7 +39,7 @@ class AuthService extends ChangeNotifier {
       'matching_prefs': data['matching_prefs'] ?? {},
       // Preserve onboarding flag once user completed it.
       'onboarding_complete': exists
-          ? (data['onboarding_complete'] as bool? ?? false)
+          ? (existingOnboarding || hasBasicOnboardingData)
           : false,
       'matching_paused': data['matching_paused'] ?? false,
       'profile_public_locked': data['profile_public_locked'] ?? false,
