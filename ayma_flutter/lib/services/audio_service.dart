@@ -856,7 +856,7 @@ class AymaAudioService extends ChangeNotifier {
       await _bootstrapTextChatIfNeeded();
       // Always send the exact history entry text so attachment context is preserved.
       final requestText = historyText;
-      final reply = await _geminiTextChat(requestText);
+      final reply = await _geminiTextChat(requestText, attachments: attachments);
       if (reply.isNotEmpty) {
         _addTranscript(reply, isUser: false);
         return true;
@@ -966,10 +966,16 @@ class AymaAudioService extends ChangeNotifier {
     notifyListeners();
   }
 
-  Future<String> _geminiTextChat(String message) async {
+  Future<String> _geminiTextChat(
+    String message, {
+    List<Map<String, String>> attachments = const [],
+  }) async {
     await _bootstrapTextChatIfNeeded();
     final key = _geminiApiKey;
     if (key == null || key.isEmpty) return '';
+
+    final userParts =
+        await _buildUserParts(message: message, attachments: attachments);
 
     final contents = [
       for (final h
@@ -982,9 +988,7 @@ class AymaAudioService extends ChangeNotifier {
         },
       {
         'role': 'user',
-        'parts': [
-          {'text': message}
-        ]
+        'parts': userParts,
       },
     ];
 
@@ -1019,6 +1023,58 @@ class AymaAudioService extends ChangeNotifier {
       'I could not generate a reply right now. Please check your connection and try again.',
       isUser: false,
     );
+  }
+
+  Future<List<Map<String, dynamic>>> _buildUserParts({
+    required String message,
+    List<Map<String, String>> attachments = const [],
+  }) async {
+    final parts = <Map<String, dynamic>>[
+      {'text': message},
+    ];
+    if (attachments.isEmpty) return parts;
+
+    var imageCount = 0;
+    for (final att in attachments) {
+      final kind = (att['kind'] ?? '').toLowerCase();
+      final url = att['url'] ?? '';
+      if (kind != 'image' || url.isEmpty || imageCount >= 3) continue;
+      if (!url.startsWith('http')) continue;
+      try {
+        final res =
+            await http.get(Uri.parse(url)).timeout(const Duration(seconds: 12));
+        if (res.statusCode != 200 || res.bodyBytes.isEmpty) continue;
+        final mimeType = _detectImageMimeType(att, res.headers) ?? 'image/jpeg';
+        // Keep payload bounded for mobile reliability.
+        if (res.bodyBytes.length > 4 * 1024 * 1024) continue;
+        parts.add({
+          'inlineData': {
+            'mimeType': mimeType,
+            'data': base64Encode(res.bodyBytes),
+          }
+        });
+        imageCount++;
+      } catch (_) {
+        // Fall back to text-only attachment summary already in message.
+      }
+    }
+    return parts;
+  }
+
+  String? _detectImageMimeType(
+    Map<String, String> attachment,
+    Map<String, String> headers,
+  ) {
+    final headerType = headers['content-type'];
+    if (headerType != null && headerType.startsWith('image/')) {
+      return headerType.split(';').first.trim();
+    }
+    final name = (attachment['filename'] ?? '').toLowerCase();
+    if (name.endsWith('.png')) return 'image/png';
+    if (name.endsWith('.webp')) return 'image/webp';
+    if (name.endsWith('.gif')) return 'image/gif';
+    if (name.endsWith('.jpg') || name.endsWith('.jpeg')) return 'image/jpeg';
+    return null;
   }
 
   @override
