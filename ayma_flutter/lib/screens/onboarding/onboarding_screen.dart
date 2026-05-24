@@ -205,6 +205,9 @@ class _OnboardingScreenState extends ConsumerState<OnboardingScreen> {
         'location_region': _locationText,
         'onboarding_complete': true,
       });
+      await FirestoreService.initializeQuestions(
+        alreadyAnswered: {'name', 'age', 'gender', 'interested_in', 'location'},
+      );
       ref.invalidate(onboardingStatusProvider);
       if (mounted) context.go('/chat');
     } catch (e) {

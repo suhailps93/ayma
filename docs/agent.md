@@ -131,6 +131,62 @@ After fixing stale code: run `flutter analyze` (must be 0 issues), update the ch
 
 ---
 
+## Running the App on Device (Wireless ADB)
+
+The test device is a **Pixel 10 Pro Fold** on the same WiFi as this laptop (`10.0.0.203`).
+
+### First time or after reboot / pairing expiry
+
+1. On the phone: **Settings → Developer options → Wireless debugging → Pair device with pairing code**
+2. The phone shows an IP:port and a 6-digit code. Share them immediately — the code expires in ~60 seconds.
+3. Run:
+   ```bash
+   adb pair <ip:port> <6-digit-code>
+   # e.g. adb pair 10.0.0.203:33951 060802
+   # Expected: "Successfully paired to 10.0.0.203:XXXXX [guid=adb-...]"
+   # Note: "protocol fault... Success" is also a success — proceed anyway
+   ```
+4. Get the connect port from mDNS (different from the pairing port):
+   ```bash
+   adb mdns services
+   # Look for: adb-XXXX  _adb-tls-connect._tcp  10.0.0.203:YYYYY
+   ```
+5. Connect:
+   ```bash
+   adb connect 10.0.0.203:<connect-port>
+   adb devices  # should show "10.0.0.203:YYYYY  device"
+   ```
+
+### If device shows as `offline`
+
+```bash
+adb kill-server && adb start-server
+adb mdns services   # get fresh connect port
+adb connect 10.0.0.203:<port>
+```
+If still offline, the TLS cert has expired — go back to step 1 (full re-pair).
+
+### Run the app
+
+```bash
+cd ayma/ayma_flutter
+flutter run -d 10.0.0.203:<connect-port>
+# or if already connected and it's the only device:
+flutter run
+```
+
+### Key things to watch in logs
+
+```
+[ws] opening Gemini Live ...     ← bootstrap succeeded
+[ws] setupComplete               ← Gemini Live connected
+[ws] state ... -> SessionState.ready  ← voice session active
+[audio] start recorder           ← mic streaming to Gemini
+[post-turn] ...                  ← wiki update triggered after turn
+```
+
+---
+
 ## Deploy Commands
 
 ```bash

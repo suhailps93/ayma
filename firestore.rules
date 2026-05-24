@@ -15,6 +15,9 @@ service cloud.firestore {
 match /skills/{skillId} {
         allow read, write: if request.auth != null && request.auth.uid == uid;
       }
+      match /questions/{questionId} {
+        allow read, write: if request.auth != null && request.auth.uid == uid;
+      }
     }
     
     // Matches: participants can read, no client writes

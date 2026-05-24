@@ -13,6 +13,7 @@ import 'package:web_socket_channel/io.dart';
 import 'package:http/http.dart' as http;
 
 import 'backend_service.dart';
+import 'firestore_service.dart';
 import 'web_audio_stub.dart' if (dart.library.html) 'web_audio_impl.dart';
 
 // ignore_for_file: deprecated_member_use
@@ -539,13 +540,32 @@ class AymaAudioService extends ChangeNotifier {
     for (final call in functionCalls) {
       final name = call['name'] as String? ?? '';
       final id = call['id'] as String? ?? '';
-      final output = name == 'get_current_time'
-          ? DateTime.now().toIso8601String()
-          : 'Tool $name is not available.';
+      final args = call['args'] as Map<String, dynamic>? ?? {};
+      String output;
+      if (name == 'add_followup_question') {
+        output = await _execAddFollowup(args);
+      } else if (name == 'get_current_time') {
+        output = DateTime.now().toIso8601String();
+      } else {
+        output = 'Tool $name is not available.';
+      }
       responses.add({'id': id, 'name': name, 'response': {'output': output}});
     }
     if (_channel == null || _state == SessionState.disconnected) return;
     _channel!.sink.add(jsonEncode({'toolResponse': {'functionResponses': responses}}));
+  }
+
+  Future<String> _execAddFollowup(Map<String, dynamic> args) async {
+    final question = (args['question'] as String? ?? '').trim();
+    if (question.isEmpty) return 'skipped: empty question';
+    try {
+      await FirestoreService.addFollowupQuestion(question, sessionId: _sessionId);
+      debugPrint('[followup] queued: $question');
+      return 'noted';
+    } catch (e) {
+      debugPrint('[followup] error: $e');
+      return 'error: $e';
+    }
   }
 
   void _setPendingAgentText(String text) {
@@ -800,6 +820,7 @@ class AymaAudioService extends ChangeNotifier {
       if (reply.isNotEmpty) {
         _addTranscript(reply, isUser: false);
       }
+      unawaited(_commitTurnToBackend());
     } catch (e) {
       debugPrint('[text-chat] error: $e');
     } finally {

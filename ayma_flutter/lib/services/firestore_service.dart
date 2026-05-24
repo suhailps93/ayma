@@ -98,7 +98,12 @@ class FirestoreService {
 
   static Future<bool> getOnboardingStatus() async {
     final doc = await _db.collection('users').doc(_uid).get();
-    return (doc.data()?['onboarding_complete'] as bool?) ?? false;
+    final data = doc.data();
+    if (data == null) return false;
+    // Explicit flag OR has basic profile data (name + gender) = treated as onboarded
+    return (data['onboarding_complete'] as bool?) == true ||
+        ((data['display_name'] as String?)?.isNotEmpty == true &&
+         (data['gender'] as String?) != null);
   }
 
   static Future<void> completeOnboarding() async {
@@ -141,6 +146,90 @@ class FirestoreService {
       'context': (data['profile_ai_observations'] as String?) ?? '',
       'media': mediaLines,
     };
+  }
+
+  // ── Questions ─────────────────────────────────────────────────────────────
+
+  static const List<Map<String, dynamic>> _standardQuestions = [
+    // Required — must collect early
+    {'key': 'name',              'text': "What's their name",                                               'category': 'required',      'order': 1},
+    {'key': 'age',               'text': 'How old they are',                                                'category': 'required',      'order': 2},
+    {'key': 'gender',            'text': 'Their gender',                                                    'category': 'required',      'order': 3},
+    {'key': 'interested_in',     'text': "Who they're interested in (men, women, everyone)",                'category': 'required',      'order': 4},
+    {'key': 'location',          'text': "Roughly where they're based",                                     'category': 'required',      'order': 5},
+    {'key': 'relationship_goal', 'text': 'What kind of relationship they want (casual, serious, marriage)', 'category': 'required',      'order': 6},
+    // Deeper — weave in naturally
+    {'key': 'career',            'text': 'What they do for work or study',                                  'category': 'deeper',        'order': 1},
+    {'key': 'lifestyle',         'text': 'How they spend their time — social life, hobbies, routines',      'category': 'deeper',        'order': 2},
+    {'key': 'values',            'text': 'What matters most to them in life',                               'category': 'deeper',        'order': 3},
+    {'key': 'family_views',      'text': 'How they feel about family and kids',                             'category': 'deeper',        'order': 4},
+    {'key': 'deal_breakers',     'text': 'What they absolutely cannot compromise on in a partner',          'category': 'deeper',        'order': 5},
+    {'key': 'past_relationships','text': 'What their relationship history is like (ask gently)',            'category': 'deeper',        'order': 6},
+    {'key': 'love_language',     'text': 'How they show and receive affection',                             'category': 'deeper',        'order': 7},
+    {'key': 'fun_quirks',        'text': 'Something surprising or unique about them',                       'category': 'deeper',        'order': 8},
+    {'key': 'ideal_date',        'text': 'What their perfect date or evening looks like',                   'category': 'deeper',        'order': 9},
+    {'key': 'green_flags',       'text': 'What immediately draws them to someone',                          'category': 'deeper',        'order': 10},
+    {'key': 'conflict_style',    'text': 'How they handle disagreements',                                   'category': 'deeper',        'order': 11},
+    {'key': 'social_energy',     'text': "Whether they're an introvert, extrovert, or in between",         'category': 'deeper',        'order': 12},
+    {'key': 'humor_style',       'text': 'What kind of humor they enjoy',                                   'category': 'deeper',        'order': 13},
+    {'key': 'life_ambition',     'text': 'Their big-picture goals for the next few years',                  'category': 'deeper',        'order': 14},
+    // Matching prefs
+    {'key': 'match_age_range',    'text': 'What age range they are open to',                               'category': 'matching_prefs','order': 1},
+    {'key': 'match_location',     'text': 'Whether location matters to them in a match',                   'category': 'matching_prefs','order': 2},
+    {'key': 'match_dealbreakers', 'text': "Anything that's a hard no in a potential match",               'category': 'matching_prefs','order': 3},
+  ];
+
+  // Call once after onboarding. alreadyAnswered keys are marked answered immediately.
+  static Future<void> initializeQuestions({Set<String> alreadyAnswered = const {}}) async {
+    final ref = _db.collection('users').doc(_uid).collection('questions');
+    final existing = await ref.limit(1).get();
+    if (existing.docs.isNotEmpty) return; // already seeded
+
+    final batch = _db.batch();
+    for (final q in _standardQuestions) {
+      final key = q['key'] as String;
+      final answered = alreadyAnswered.contains(key);
+      batch.set(ref.doc(), {
+        ...q,
+        'answered': answered,
+        'is_followup': false,
+        'created_at': FieldValue.serverTimestamp(),
+        if (answered) 'answered_at': FieldValue.serverTimestamp(),
+      });
+    }
+    await batch.commit();
+  }
+
+  static Future<void> addFollowupQuestion(String question, {String sessionId = ''}) async {
+    await _db.collection('users').doc(_uid).collection('questions').add({
+      'key': 'followup_${DateTime.now().millisecondsSinceEpoch}',
+      'text': question,
+      'category': 'followup',
+      'order': 99,
+      'answered': false,
+      'is_followup': true,
+      'session_id': sessionId,
+      'created_at': FieldValue.serverTimestamp(),
+    });
+  }
+
+  static Future<List<Map<String, dynamic>>> getPendingQuestions() async {
+    final snap = await _db
+        .collection('users')
+        .doc(_uid)
+        .collection('questions')
+        .where('answered', isEqualTo: false)
+        .get();
+    final docs = snap.docs.map((d) => d.data()..['id'] = d.id).toList();
+    // Sort: required first, then deeper, then matching_prefs, then followup
+    const order = {'required': 0, 'deeper': 1, 'matching_prefs': 2, 'followup': 3};
+    docs.sort((a, b) {
+      final catA = order[a['category']] ?? 4;
+      final catB = order[b['category']] ?? 4;
+      if (catA != catB) return catA.compareTo(catB);
+      return ((a['order'] as int?) ?? 0).compareTo((b['order'] as int?) ?? 0);
+    });
+    return docs;
   }
 
   // ── Media ──────────────────────────────────────────────────────────────────

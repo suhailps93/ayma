@@ -5,6 +5,7 @@ import 'dart:typed_data';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_animate/flutter_animate.dart';
+import 'package:flutter_markdown/flutter_markdown.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:image_picker/image_picker.dart';
 
@@ -458,10 +459,18 @@ class _TranscriptEntry extends StatelessWidget {
                 ),
             ],
             if (isAyma)
-              Text(
-                line.text,
-                style: AymaFonts.serif(
-                    size: 20, italic: true, color: AymaColors.fg),
+              MarkdownBody(
+                data: line.text,
+                styleSheet: MarkdownStyleSheet(
+                  p: AymaFonts.serif(size: 20, italic: true, color: AymaColors.fg),
+                  strong: AymaFonts.serif(size: 20, italic: false, color: AymaColors.fg)
+                      .copyWith(fontWeight: FontWeight.w700),
+                  em: AymaFonts.serif(size: 20, italic: true, color: AymaColors.fg),
+                  listBullet: AymaFonts.serif(size: 20, italic: true, color: AymaColors.fg),
+                  blockSpacing: 8,
+                  listIndent: 16,
+                ),
+                softLineBreak: true,
               )
             else if (line.text.isNotEmpty)
               Container(
