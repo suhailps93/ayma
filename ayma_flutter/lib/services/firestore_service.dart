@@ -20,14 +20,15 @@ class FirestoreService {
     return UserProfile.fromMap(data);
   }
 
-  static Stream<UserProfile?> profileStream() => _db
-      .collection('users')
-      .doc(_uid)
-      .snapshots()
-      .map((doc) => doc.exists ? UserProfile.fromMap(doc.data()!..['id'] = _uid) : null);
+  static Stream<UserProfile?> profileStream() =>
+      _db.collection('users').doc(_uid).snapshots().map((doc) =>
+          doc.exists ? UserProfile.fromMap(doc.data()!..['id'] = _uid) : null);
 
   static Future<void> updateProfile(Map<String, dynamic> fields) async {
-    await _db.collection('users').doc(_uid).set(fields, SetOptions(merge: true));
+    await _db
+        .collection('users')
+        .doc(_uid)
+        .set(fields, SetOptions(merge: true));
   }
 
   // ── Matches ────────────────────────────────────────────────────────────────
@@ -45,7 +46,9 @@ class FirestoreService {
         .orderBy('created_at', descending: true)
         .get();
     final docs = {...queryA.docs, ...queryB.docs};
-    return docs.map((d) => MatchModel.fromMap(d.data()..['id'] = d.id, uid)).toList();
+    return docs
+        .map((d) => MatchModel.fromMap(d.data()..['id'] = d.id, uid))
+        .toList();
   }
 
   static Future<void> updateMatchStatus(String matchId, String status) async {
@@ -103,11 +106,14 @@ class FirestoreService {
     // Explicit flag OR has basic profile data (name + gender) = treated as onboarded
     return (data['onboarding_complete'] as bool?) == true ||
         ((data['display_name'] as String?)?.isNotEmpty == true &&
-         (data['gender'] as String?) != null);
+            (data['gender'] as String?) != null);
   }
 
   static Future<void> completeOnboarding() async {
-    await _db.collection('users').doc(_uid).update({'onboarding_complete': true});
+    await _db
+        .collection('users')
+        .doc(_uid)
+        .update({'onboarding_complete': true});
   }
 
   // ── Insights (memories summary) ────────────────────────────────────────────
@@ -123,7 +129,8 @@ class FirestoreService {
         .get();
 
     final results = await Future.wait([docFuture, mediaFuture]);
-    final data = (results[0] as DocumentSnapshot).data() as Map<String, dynamic>? ?? {};
+    final data =
+        (results[0] as DocumentSnapshot).data() as Map<String, dynamic>? ?? {};
     final mediaDocs = (results[1] as QuerySnapshot).docs;
 
     // Build media markdown: - [date](url)\ncaption
@@ -135,7 +142,8 @@ class FirestoreService {
       String date = '';
       if (ts is Timestamp) {
         final dt = ts.toDate();
-        date = '${dt.year}-${dt.month.toString().padLeft(2, '0')}-${dt.day.toString().padLeft(2, '0')}';
+        date =
+            '${dt.year}-${dt.month.toString().padLeft(2, '0')}-${dt.day.toString().padLeft(2, '0')}';
       }
       return '- [$date]($url)\n$caption';
     }).join('\n\n');
@@ -152,35 +160,151 @@ class FirestoreService {
 
   static const List<Map<String, dynamic>> _standardQuestions = [
     // Required — must collect early
-    {'key': 'name',              'text': "What's their name",                                               'category': 'required',      'order': 1},
-    {'key': 'age',               'text': 'How old they are',                                                'category': 'required',      'order': 2},
-    {'key': 'gender',            'text': 'Their gender',                                                    'category': 'required',      'order': 3},
-    {'key': 'interested_in',     'text': "Who they're interested in (men, women, everyone)",                'category': 'required',      'order': 4},
-    {'key': 'location',          'text': "Roughly where they're based",                                     'category': 'required',      'order': 5},
-    {'key': 'relationship_goal', 'text': 'What kind of relationship they want (casual, serious, marriage)', 'category': 'required',      'order': 6},
+    {
+      'key': 'name',
+      'text': "What's their name",
+      'category': 'required',
+      'order': 1
+    },
+    {
+      'key': 'age',
+      'text': 'How old they are',
+      'category': 'required',
+      'order': 2
+    },
+    {
+      'key': 'gender',
+      'text': 'Their gender',
+      'category': 'required',
+      'order': 3
+    },
+    {
+      'key': 'interested_in',
+      'text': "Who they're interested in (men, women, everyone)",
+      'category': 'required',
+      'order': 4
+    },
+    {
+      'key': 'location',
+      'text': "Roughly where they're based",
+      'category': 'required',
+      'order': 5
+    },
+    {
+      'key': 'relationship_goal',
+      'text': 'What kind of relationship they want (casual, serious, marriage)',
+      'category': 'required',
+      'order': 6
+    },
     // Deeper — weave in naturally
-    {'key': 'career',            'text': 'What they do for work or study',                                  'category': 'deeper',        'order': 1},
-    {'key': 'lifestyle',         'text': 'How they spend their time — social life, hobbies, routines',      'category': 'deeper',        'order': 2},
-    {'key': 'values',            'text': 'What matters most to them in life',                               'category': 'deeper',        'order': 3},
-    {'key': 'family_views',      'text': 'How they feel about family and kids',                             'category': 'deeper',        'order': 4},
-    {'key': 'deal_breakers',     'text': 'What they absolutely cannot compromise on in a partner',          'category': 'deeper',        'order': 5},
-    {'key': 'past_relationships','text': 'What their relationship history is like (ask gently)',            'category': 'deeper',        'order': 6},
-    {'key': 'love_language',     'text': 'How they show and receive affection',                             'category': 'deeper',        'order': 7},
-    {'key': 'fun_quirks',        'text': 'Something surprising or unique about them',                       'category': 'deeper',        'order': 8},
-    {'key': 'ideal_date',        'text': 'What their perfect date or evening looks like',                   'category': 'deeper',        'order': 9},
-    {'key': 'green_flags',       'text': 'What immediately draws them to someone',                          'category': 'deeper',        'order': 10},
-    {'key': 'conflict_style',    'text': 'How they handle disagreements',                                   'category': 'deeper',        'order': 11},
-    {'key': 'social_energy',     'text': "Whether they're an introvert, extrovert, or in between",         'category': 'deeper',        'order': 12},
-    {'key': 'humor_style',       'text': 'What kind of humor they enjoy',                                   'category': 'deeper',        'order': 13},
-    {'key': 'life_ambition',     'text': 'Their big-picture goals for the next few years',                  'category': 'deeper',        'order': 14},
+    {
+      'key': 'career',
+      'text': 'What they do for work or study',
+      'category': 'deeper',
+      'order': 1
+    },
+    {
+      'key': 'lifestyle',
+      'text': 'How they spend their time — social life, hobbies, routines',
+      'category': 'deeper',
+      'order': 2
+    },
+    {
+      'key': 'values',
+      'text': 'What matters most to them in life',
+      'category': 'deeper',
+      'order': 3
+    },
+    {
+      'key': 'family_views',
+      'text': 'How they feel about family and kids',
+      'category': 'deeper',
+      'order': 4
+    },
+    {
+      'key': 'deal_breakers',
+      'text': 'What they absolutely cannot compromise on in a partner',
+      'category': 'deeper',
+      'order': 5
+    },
+    {
+      'key': 'past_relationships',
+      'text': 'What their relationship history is like (ask gently)',
+      'category': 'deeper',
+      'order': 6
+    },
+    {
+      'key': 'love_language',
+      'text': 'How they show and receive affection',
+      'category': 'deeper',
+      'order': 7
+    },
+    {
+      'key': 'fun_quirks',
+      'text': 'Something surprising or unique about them',
+      'category': 'deeper',
+      'order': 8
+    },
+    {
+      'key': 'ideal_date',
+      'text': 'What their perfect date or evening looks like',
+      'category': 'deeper',
+      'order': 9
+    },
+    {
+      'key': 'green_flags',
+      'text': 'What immediately draws them to someone',
+      'category': 'deeper',
+      'order': 10
+    },
+    {
+      'key': 'conflict_style',
+      'text': 'How they handle disagreements',
+      'category': 'deeper',
+      'order': 11
+    },
+    {
+      'key': 'social_energy',
+      'text': "Whether they're an introvert, extrovert, or in between",
+      'category': 'deeper',
+      'order': 12
+    },
+    {
+      'key': 'humor_style',
+      'text': 'What kind of humor they enjoy',
+      'category': 'deeper',
+      'order': 13
+    },
+    {
+      'key': 'life_ambition',
+      'text': 'Their big-picture goals for the next few years',
+      'category': 'deeper',
+      'order': 14
+    },
     // Matching prefs
-    {'key': 'match_age_range',    'text': 'What age range they are open to',                               'category': 'matching_prefs','order': 1},
-    {'key': 'match_location',     'text': 'Whether location matters to them in a match',                   'category': 'matching_prefs','order': 2},
-    {'key': 'match_dealbreakers', 'text': "Anything that's a hard no in a potential match",               'category': 'matching_prefs','order': 3},
+    {
+      'key': 'match_age_range',
+      'text': 'What age range they are open to',
+      'category': 'matching_prefs',
+      'order': 1
+    },
+    {
+      'key': 'match_location',
+      'text': 'Whether location matters to them in a match',
+      'category': 'matching_prefs',
+      'order': 2
+    },
+    {
+      'key': 'match_dealbreakers',
+      'text': "Anything that's a hard no in a potential match",
+      'category': 'matching_prefs',
+      'order': 3
+    },
   ];
 
   // Call once after onboarding. alreadyAnswered keys are marked answered immediately.
-  static Future<void> initializeQuestions({Set<String> alreadyAnswered = const {}}) async {
+  static Future<void> initializeQuestions(
+      {Set<String> alreadyAnswered = const {}}) async {
     final ref = _db.collection('users').doc(_uid).collection('questions');
     final existing = await ref.limit(1).get();
     if (existing.docs.isNotEmpty) return; // already seeded
@@ -200,7 +324,8 @@ class FirestoreService {
     await batch.commit();
   }
 
-  static Future<void> addFollowupQuestion(String question, {String sessionId = ''}) async {
+  static Future<void> addFollowupQuestion(String question,
+      {String sessionId = ''}) async {
     await _db.collection('users').doc(_uid).collection('questions').add({
       'key': 'followup_${DateTime.now().millisecondsSinceEpoch}',
       'text': question,
@@ -222,7 +347,12 @@ class FirestoreService {
         .get();
     final docs = snap.docs.map((d) => d.data()..['id'] = d.id).toList();
     // Sort: required first, then deeper, then matching_prefs, then followup
-    const order = {'required': 0, 'deeper': 1, 'matching_prefs': 2, 'followup': 3};
+    const order = {
+      'required': 0,
+      'deeper': 1,
+      'matching_prefs': 2,
+      'followup': 3
+    };
     docs.sort((a, b) {
       final catA = order[a['category']] ?? 4;
       final catB = order[b['category']] ?? 4;
@@ -254,24 +384,60 @@ class FirestoreService {
     int ageMax = 60,
     String query = '',
   }) async {
-    var q = _db.collection('users').where('onboarding_complete', isEqualTo: true);
-    if (gender != null && gender.isNotEmpty) {
-      q = q.where('gender', isEqualTo: gender);
-    }
-    q = q.where('age', isGreaterThanOrEqualTo: ageMin)
-         .where('age', isLessThanOrEqualTo: ageMax);
-    final snap = await q.limit(50).get();
+    // Keep query shape simple to reduce composite-index requirements.
+    final snap = await _db
+        .collection('users')
+        .where('onboarding_complete', isEqualTo: true)
+        .limit(150)
+        .get();
     final uid = _uid;
     final lowerQuery = query.toLowerCase();
+    final normalizedGenderFilter = _normalizeGender(gender ?? '');
+    final genderVariants = _genderVariants(normalizedGenderFilter);
     return snap.docs
         .where((d) => d.id != uid)
         .map((d) => d.data()..['id'] = d.id)
         .where((d) {
-          if (lowerQuery.isEmpty) return true;
-          final name = ((d['display_name'] as String?) ?? '').toLowerCase();
-          final bio = ((d['profile_public'] as String?) ?? '').toLowerCase();
-          return name.contains(lowerQuery) || bio.contains(lowerQuery);
-        })
-        .toList();
+      final age = d['age'];
+      final ageValue = age is num ? age.toInt() : null;
+      if (ageValue == null || ageValue < ageMin || ageValue > ageMax) {
+        return false;
+      }
+
+      if (genderVariants.isNotEmpty) {
+        final normalizedDocGender =
+            _normalizeGender((d['gender'] as String?) ?? '');
+        if (!genderVariants.contains(normalizedDocGender)) {
+          return false;
+        }
+      }
+
+      if (lowerQuery.isEmpty) return true;
+      final name = ((d['display_name'] as String?) ?? '').toLowerCase();
+      final bio = ((d['profile_public'] as String?) ?? '').toLowerCase();
+      return name.contains(lowerQuery) || bio.contains(lowerQuery);
+    }).toList();
+  }
+
+  static String _normalizeGender(String raw) {
+    final v = raw.trim().toLowerCase();
+    if (v == 'woman' || v == 'women' || v == 'female' || v == 'f') {
+      return 'woman';
+    }
+    if (v == 'man' || v == 'men' || v == 'male' || v == 'm') {
+      return 'man';
+    }
+    return v;
+  }
+
+  static Set<String> _genderVariants(String normalized) {
+    if (normalized.isEmpty) return const {};
+    if (normalized == 'woman') {
+      return const {'woman', 'women'};
+    }
+    if (normalized == 'man') {
+      return const {'man', 'men'};
+    }
+    return {normalized};
   }
 }

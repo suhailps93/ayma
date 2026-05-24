@@ -64,13 +64,14 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
 
   Timer? _sessionTimer;
   Duration _sessionDuration = Duration.zero;
+  bool _voiceActionInFlight = false;
+  bool _sendingText = false;
 
   @override
   void initState() {
     super.initState();
     _audioService = ref.read(audioServiceProvider);
     _textCtrl.addListener(() => setState(() {}));
-    WidgetsBinding.instance.addPostFrameCallback((_) => _autoConnect());
   }
 
   void _startTimer() {
@@ -88,82 +89,107 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
     _sessionTimer = null;
   }
 
-  Future<void> _autoConnect() async {
-    if (_audioService.state != SessionState.disconnected) return;
-    if (ref.read(currentUserProvider) == null) return;
+  Future<bool> _autoConnect() async {
+    if (_audioService.state != SessionState.disconnected) return true;
     try {
       await _audioService.connect();
       _startTimer();
+      return _audioService.state != SessionState.disconnected;
     } catch (_) {}
+    return false;
   }
 
   Future<void> _toggleVoice() async {
+    if (_voiceActionInFlight) return;
+    _voiceActionInFlight = true;
     if (_audioService.state == SessionState.disconnected) {
-      await _autoConnect();
+      final started = await _autoConnect();
+      if (!started && mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('Could not start voice session. Please try again.'),
+          ),
+        );
+      }
     } else {
       _audioService.disconnect();
       _stopTimer();
       setState(() => _sessionDuration = Duration.zero);
     }
+    _voiceActionInFlight = false;
   }
 
   Future<void> _sendText() async {
+    if (_sendingText) return;
     final text = _textCtrl.text.trim();
     if (_drafts.isEmpty && text.isEmpty) return;
+    _sendingText = true;
+    try {
 
-    // If there are pending uploads, wait a bit instead of showing a snackbar.
-    if (_drafts.isNotEmpty &&
-        _drafts.any((d) => d.remoteUrl == null && d.status != 'Upload failed')) {
-      int retries = 0;
-      while (_drafts.any(
-              (d) => d.remoteUrl == null && d.status != 'Upload failed') &&
-          retries < 40) {
-        await Future<void>.delayed(const Duration(milliseconds: 500));
-        retries++;
+      // If there are pending uploads, wait a bit instead of showing a snackbar.
+      if (_drafts.isNotEmpty &&
+          _drafts
+              .any((d) => d.remoteUrl == null && d.status != 'Upload failed')) {
+        int retries = 0;
+        while (_drafts.any(
+                (d) => d.remoteUrl == null && d.status != 'Upload failed') &&
+            retries < 40) {
+          await Future<void>.delayed(const Duration(milliseconds: 500));
+          retries++;
+        }
       }
-    }
 
-    final failed = _drafts.where((d) => d.status == 'Upload failed').toList();
-    if (failed.isNotEmpty) {
-      if (mounted) {
+      final failed = _drafts.where((d) => d.status == 'Upload failed').toList();
+      if (failed.isNotEmpty) {
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(
+                content: Text('Some attachments failed to upload. '
+                    'Please remove them or try again.')),
+          );
+        }
+        return;
+      }
+
+      if (_drafts.any((d) => d.remoteUrl == null)) {
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(
+                content: Text('Attachment upload timed out. Please try again.')),
+          );
+        }
+        return;
+      }
+
+      final ready = _drafts.where((d) => d.remoteUrl != null).toList();
+      if (text.isEmpty && ready.isEmpty) return;
+
+      final message = text;
+      final attachments = [
+        for (final d in ready)
+          {
+            'url': d.remoteUrl!,
+            'kind': d.kind == _DraftKind.image ? 'image' : 'video',
+            'filename': d.filename
+          },
+      ];
+
+      // Clear UI state BEFORE the async call (or immediately after clearing text)
+      _textCtrl.clear();
+      final idsToRemove = ready.map((d) => d.id).toSet();
+      setState(() => _drafts.removeWhere((d) => idsToRemove.contains(d.id)));
+
+      final sent = await _audioService.sendText(message, attachments: attachments);
+      if (!sent && mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(
-              content: Text('Some attachments failed to upload. '
-                  'Please remove them or try again.')),
+            content: Text('Message sent locally, but reply generation failed.'),
+          ),
         );
       }
-      return;
+    } finally {
+      _sendingText = false;
     }
-
-    if (_drafts.any((d) => d.remoteUrl == null)) {
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-              content: Text('Attachment upload timed out. Please try again.')),
-        );
-      }
-      return;
-    }
-
-    final ready = _drafts.where((d) => d.remoteUrl != null).toList();
-    if (text.isEmpty && ready.isEmpty) return;
-
-    final message = text;
-    final attachments = [
-      for (final d in ready)
-        {
-          'url': d.remoteUrl!,
-          'kind': d.kind == _DraftKind.image ? 'image' : 'video',
-          'filename': d.filename
-        },
-    ];
-
-    // Clear UI state BEFORE the async call (or immediately after clearing text)
-    _textCtrl.clear();
-    final idsToRemove = ready.map((d) => d.id).toSet();
-    setState(() => _drafts.removeWhere((d) => idsToRemove.contains(d.id)));
-
-    await _audioService.sendText(message, attachments: attachments);
   }
 
   void _scrollToBottom() {
@@ -717,6 +743,11 @@ class _InputBarState extends State<_InputBar>
                                                 color: AymaColors.fg,
                                               ).copyWith(height: 1.1),
                                               cursorColor: AymaColors.accent,
+                                              keyboardType:
+                                                  TextInputType.multiline,
+                                              textInputAction: _canSend
+                                                  ? TextInputAction.send
+                                                  : TextInputAction.newline,
                                               minLines: 1,
                                               maxLines: 4,
                                               onSubmitted: (_) {

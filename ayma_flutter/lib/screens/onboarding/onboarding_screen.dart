@@ -34,7 +34,8 @@ class _OrbPainter extends CustomPainter {
             const Color(0x08C48312),
             Colors.transparent,
           ],
-        ).createShader(Rect.fromCircle(center: Offset(cx, cy), radius: r * 1.35)),
+        ).createShader(
+            Rect.fromCircle(center: Offset(cx, cy), radius: r * 1.35)),
     );
 
     // Border ring
@@ -149,9 +150,41 @@ class _OnboardingScreenState extends ConsumerState<OnboardingScreen> {
   List<String> _suggestions = [];
   Timer? _debounce;
   bool _locationExpanded = false;
+  int _locationRequestId = 0;
+
+  String _normalizedLocation(String input) =>
+      input.trim().replaceAll(RegExp(r'\s+'), ' ');
+
+  void _setLocationText(String value, {bool updateController = false}) {
+    final normalized = _normalizedLocation(value);
+    _locationText = normalized;
+    if (updateController && _locationCtrl.text != normalized) {
+      _locationCtrl.value = TextEditingValue(
+        text: normalized,
+        selection: TextSelection.collapsed(offset: normalized.length),
+      );
+    }
+  }
+
+  void _syncLocationFromController() {
+    final normalized = _normalizedLocation(_locationCtrl.text);
+    if (_locationText != normalized || _suggestions.isNotEmpty) {
+      setState(() {
+        _locationText = normalized;
+        _suggestions = [];
+      });
+    }
+  }
+
+  @override
+  void initState() {
+    super.initState();
+    _locationCtrl.addListener(_syncLocationFromController);
+  }
 
   @override
   void dispose() {
+    _locationCtrl.removeListener(_syncLocationFromController);
     _nameCtrl.dispose();
     _locationCtrl.dispose();
     _debounce?.cancel();
@@ -170,22 +203,31 @@ class _OnboardingScreenState extends ConsumerState<OnboardingScreen> {
   }
 
   Future<void> _detectLocation() async {
+    final requestId = ++_locationRequestId;
+    final startedWith = _normalizedLocation(_locationCtrl.text);
     setState(() => _locationLoading = true);
     try {
       final pos = await Geolocator.getCurrentPosition();
       // Use a simple reverse geocode string from lat/lon
-      final location = '${pos.latitude.toStringAsFixed(2)}, ${pos.longitude.toStringAsFixed(2)}';
+      final location =
+          '${pos.latitude.toStringAsFixed(2)}, ${pos.longitude.toStringAsFixed(2)}';
+      if (!mounted) return;
+      final currentInput = _normalizedLocation(_locationCtrl.text);
+      final canApply = requestId == _locationRequestId &&
+          (currentInput.isEmpty || currentInput == startedWith);
+      if (!canApply) return;
       setState(() {
-        _locationText = location;
-        _locationCtrl.text = location;
+        _setLocationText(location, updateController: true);
       });
     } catch (_) {}
-    setState(() => _locationLoading = false);
+    if (mounted && requestId == _locationRequestId) {
+      setState(() => _locationLoading = false);
+    }
   }
 
   void _onLocationChanged(String val) {
     setState(() {
-      _locationText = val;
+      _setLocationText(val);
       _suggestions = [];
     });
   }
@@ -202,7 +244,7 @@ class _OnboardingScreenState extends ConsumerState<OnboardingScreen> {
           'age_min': _minAge,
           'age_max': _maxAge,
         },
-        'location_region': _locationText,
+        'location_region': _normalizedLocation(_locationCtrl.text),
         'onboarding_complete': true,
       });
       await FirestoreService.initializeQuestions(
@@ -324,15 +366,13 @@ class _OnboardingScreenState extends ConsumerState<OnboardingScreen> {
           }),
           onLocationTap: () => setState(() {
             _locationExpanded = !_locationExpanded;
-            if (_locationExpanded && _locationText.isEmpty) _detectLocation();
+            if (_locationExpanded && _locationCtrl.text.trim().isEmpty) {
+              _detectLocation();
+            }
           }),
-          onLocationChanged: (v) {
-            _locationText = v;
-            _onLocationChanged(v);
-          },
+          onLocationChanged: _onLocationChanged,
           onSuggestionTap: (s) => setState(() {
-            _locationText = s;
-            _locationCtrl.text = s;
+            _setLocationText(s, updateController: true);
             _suggestions = [];
             _locationExpanded = false;
           }),
@@ -392,8 +432,7 @@ class _OnboardingScreenState extends ConsumerState<OnboardingScreen> {
           mainAxisSize: MainAxisSize.min,
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            Text('How Ayma works',
-                style: AymaFonts.serif(size: 22)),
+            Text('How Ayma works', style: AymaFonts.serif(size: 22)),
             const SizedBox(height: 16),
             _HowItem(
               icon: Icons.mic_rounded,
@@ -503,8 +542,7 @@ class _AboutYouStep extends StatelessWidget {
           const SizedBox(height: 4),
           _StepLabel('02 · ABOUT YOU'),
           const SizedBox(height: 16),
-          Text("Let's start with the facts.",
-              style: AymaFonts.serif(size: 28)),
+          Text("Let's start with the facts.", style: AymaFonts.serif(size: 28)),
           const SizedBox(height: 6),
           Text(
             "Three things. The rest I'll learn by talking to you.",
@@ -529,8 +567,7 @@ class _AboutYouStep extends StatelessWidget {
             crossAxisAlignment: CrossAxisAlignment.baseline,
             textBaseline: TextBaseline.alphabetic,
             children: [
-              Text('$age',
-                  style: AymaFonts.serif(size: 48)),
+              Text('$age', style: AymaFonts.serif(size: 48)),
               const SizedBox(width: 8),
               Text('YEARS',
                   style: AymaFonts.mono(size: 9, color: AymaColors.fgMute)),
@@ -544,10 +581,8 @@ class _AboutYouStep extends StatelessWidget {
               thumbColor: AymaColors.accent,
               overlayColor: AymaColors.accentSoft,
               trackHeight: 2,
-              thumbShape:
-                  const RoundSliderThumbShape(enabledThumbRadius: 7),
-              overlayShape:
-                  const RoundSliderOverlayShape(overlayRadius: 18),
+              thumbShape: const RoundSliderThumbShape(enabledThumbRadius: 7),
+              overlayShape: const RoundSliderOverlayShape(overlayRadius: 18),
             ),
             child: Slider(
               value: age.toDouble(),
@@ -607,8 +642,7 @@ class _PreferencesStep extends StatelessWidget {
           const SizedBox(height: 4),
           _StepLabel('03 · WHO I SHOULD LOOK FOR'),
           const SizedBox(height: 16),
-          Text('Just a starting point.',
-              style: AymaFonts.serif(size: 28)),
+          Text('Just a starting point.', style: AymaFonts.serif(size: 28)),
           const SizedBox(height: 6),
           Text(
             "I'll refine this as we talk.",
@@ -795,7 +829,8 @@ class _Chip extends StatelessWidget {
   final bool selected;
   final VoidCallback onTap;
 
-  const _Chip({required this.label, required this.selected, required this.onTap});
+  const _Chip(
+      {required this.label, required this.selected, required this.onTap});
 
   @override
   Widget build(BuildContext context) => GestureDetector(
@@ -817,8 +852,7 @@ class _Chip extends StatelessWidget {
             style: TextStyle(
               color: selected ? AymaColors.bg : AymaColors.fg,
               fontSize: 14,
-              fontWeight:
-                  selected ? FontWeight.w600 : FontWeight.w400,
+              fontWeight: selected ? FontWeight.w600 : FontWeight.w400,
               letterSpacing: -0.1,
             ),
           ),
@@ -854,8 +888,7 @@ class _LocationCard extends StatelessWidget {
         GestureDetector(
           onTap: onTap,
           child: Container(
-            padding:
-                const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
+            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
             decoration: BoxDecoration(
               color: AymaColors.bgCard,
               borderRadius: BorderRadius.circular(14),
@@ -871,8 +904,7 @@ class _LocationCard extends StatelessWidget {
                       ? TextField(
                           controller: locationCtrl,
                           autofocus: true,
-                          style: TextStyle(
-                              color: AymaColors.fg, fontSize: 15),
+                          style: TextStyle(color: AymaColors.fg, fontSize: 15),
                           decoration: InputDecoration(
                             hintText: 'City or region',
                             hintStyle: TextStyle(
@@ -903,8 +935,7 @@ class _LocationCard extends StatelessWidget {
                             if (locationText.isNotEmpty)
                               Text('Within 25 miles',
                                   style: TextStyle(
-                                      color: AymaColors.fgMute,
-                                      fontSize: 12)),
+                                      color: AymaColors.fgMute, fontSize: 12)),
                           ],
                         ),
                 ),
@@ -940,8 +971,8 @@ class _LocationCard extends StatelessWidget {
                   .map((s) => ListTile(
                         dense: true,
                         title: Text(s,
-                            style: TextStyle(
-                                color: AymaColors.fg, fontSize: 14)),
+                            style:
+                                TextStyle(color: AymaColors.fg, fontSize: 14)),
                         onTap: () => onSuggestionTap(s),
                       ))
                   .toList(),
@@ -988,8 +1019,7 @@ class _HowItem extends StatelessWidget {
   final String title;
   final String body;
 
-  const _HowItem(
-      {required this.icon, required this.title, required this.body});
+  const _HowItem({required this.icon, required this.title, required this.body});
 
   @override
   Widget build(BuildContext context) => Row(

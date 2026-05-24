@@ -114,11 +114,13 @@ class AymaAudioService extends ChangeNotifier {
   final BytesBuilder _pendingMicAudio = BytesBuilder(copy: false);
   final BytesBuilder _debugOutputAudio = BytesBuilder(copy: false);
   Timer? _micFlushTimer;
-  static const _micFlushInterval = Duration(milliseconds: 120);
+  static const _micFlushInterval = Duration(milliseconds: 200);
+  DateTime _lastMeterUiUpdate = DateTime.fromMillisecondsSinceEpoch(0);
 
   bool _restoredTranscript = false;
   String _sessionId = DateTime.now().millisecondsSinceEpoch.toString();
   String? _geminiApiKey; // cached from bootstrap for text-chat fallback
+  String? _systemPrompt; // cached from bootstrap for text-chat fallback
 
   AymaAudioService() {
     unawaited(_restoreTranscript());
@@ -249,6 +251,9 @@ class AymaAudioService extends ChangeNotifier {
     final apiKey = bootstrap['token'] as String?;
     _geminiApiKey = apiKey;
     final setup = bootstrap['setup'] as Map<String, dynamic>?;
+    _systemPrompt = (setup?['system_instruction']?['parts'] as List<dynamic>?)
+        ?.map((p) => p['text'] as String? ?? '')
+        .join('');
     if (liveWsUrl == null || liveWsUrl.isEmpty || apiKey == null) {
       _setState(SessionState.disconnected);
       throw Exception('Missing Gemini Live bootstrap data');
@@ -273,8 +278,11 @@ class AymaAudioService extends ChangeNotifier {
       _channel!.sink.add(jsonEncode({'setup': setup}));
       debugPrint('[ws] full setup sent');
     } else {
-      final modelName = bootstrap['model'] as String? ?? 'gemini-3.1-flash-live-preview';
-      _channel!.sink.add(jsonEncode({'setup': {'model': 'models/$modelName'}}));
+      final modelName =
+          bootstrap['model'] as String? ?? 'gemini-3.1-flash-live-preview';
+      _channel!.sink.add(jsonEncode({
+        'setup': {'model': 'models/$modelName'}
+      }));
       debugPrint('[ws] minimal setup sent: models/$modelName');
     }
 
@@ -332,7 +340,8 @@ class AymaAudioService extends ChangeNotifier {
     }
     _reconnectAttempts += 1;
     final delay = Duration(milliseconds: 800 * _reconnectAttempts);
-    debugPrint('[ws] scheduling reconnect attempt=$_reconnectAttempts delay=${delay.inMilliseconds}ms');
+    debugPrint(
+        '[ws] scheduling reconnect attempt=$_reconnectAttempts delay=${delay.inMilliseconds}ms');
     _reconnectTimer?.cancel();
     _reconnectTimer = Timer(delay, () {
       if (_manualDisconnect) return;
@@ -376,7 +385,8 @@ class AymaAudioService extends ChangeNotifier {
               raw[i + 3] == 115 && // s
               raw[i + 4] == 105 && // i
               raw[i + 5] == 111 && // o
-              raw[i + 6] == 110) { // n
+              raw[i + 6] == 110) {
+            // n
             isNoisy = true;
             break;
           }
@@ -385,7 +395,8 @@ class AymaAudioService extends ChangeNotifier {
               raw[i + 2] == 97 && // a
               raw[i + 3] == 116 && // t
               raw[i + 4] == 117 && // u
-              raw[i + 5] == 115) { // s
+              raw[i + 5] == 115) {
+            // s
             isNoisy = true;
             break;
           }
@@ -465,7 +476,8 @@ class AymaAudioService extends ChangeNotifier {
         }
       }
 
-      final outTx = serverContent['outputTranscription'] as Map<String, dynamic>?;
+      final outTx =
+          serverContent['outputTranscription'] as Map<String, dynamic>?;
       if (outTx != null) {
         final text = outTx['text'] as String?;
         if (text != null && text.isNotEmpty) {
@@ -549,17 +561,24 @@ class AymaAudioService extends ChangeNotifier {
       } else {
         output = 'Tool $name is not available.';
       }
-      responses.add({'id': id, 'name': name, 'response': {'output': output}});
+      responses.add({
+        'id': id,
+        'name': name,
+        'response': {'output': output}
+      });
     }
     if (_channel == null || _state == SessionState.disconnected) return;
-    _channel!.sink.add(jsonEncode({'toolResponse': {'functionResponses': responses}}));
+    _channel!.sink.add(jsonEncode({
+      'toolResponse': {'functionResponses': responses}
+    }));
   }
 
   Future<String> _execAddFollowup(Map<String, dynamic> args) async {
     final question = (args['question'] as String? ?? '').trim();
     if (question.isEmpty) return 'skipped: empty question';
     try {
-      await FirestoreService.addFollowupQuestion(question, sessionId: _sessionId);
+      await FirestoreService.addFollowupQuestion(question,
+          sessionId: _sessionId);
       debugPrint('[followup] queued: $question');
       return 'noted';
     } catch (e) {
@@ -615,7 +634,7 @@ class AymaAudioService extends ChangeNotifier {
         _inputVolume =
             0.5; // web doesn't give dB; use flat value while speaking
         _sendAudio(pcm16);
-        notifyListeners();
+        _notifyMetersThrottled();
       });
     } else {
       await _recorder.startRecorder(
@@ -640,9 +659,19 @@ class AymaAudioService extends ChangeNotifier {
             notifyListeners();
           });
         }
-        notifyListeners();
+        _notifyMetersThrottled();
       });
     }
+  }
+
+  void _notifyMetersThrottled() {
+    final now = DateTime.now();
+    if (now.difference(_lastMeterUiUpdate) <
+        const Duration(milliseconds: 120)) {
+      return;
+    }
+    _lastMeterUiUpdate = now;
+    notifyListeners();
   }
 
   StreamSink<Uint8List> _recorderSink() {
@@ -791,39 +820,55 @@ class AymaAudioService extends ChangeNotifier {
     _channel!.sink.add(jsonEncode(payload));
   }
 
-  Future<void> sendText(
+  Future<bool> sendText(
     String text, {
     List<Map<String, String>> attachments = const [],
   }) async {
     final trimmed = text.trim();
-    if (trimmed.isEmpty && attachments.isEmpty) return;
+    if (trimmed.isEmpty && attachments.isEmpty) return false;
     final attachmentSummary = attachments.isEmpty
         ? ''
         : '\n\nShared attachments:\n${attachments.map((a) => '- ${a['kind'] ?? 'file'}: ${a['filename'] ?? a['url'] ?? 'attachment'}').join('\n')}';
-    final historyText = trimmed.isEmpty ? attachmentSummary.trim() : '$trimmed$attachmentSummary';
+    final historyText = trimmed.isEmpty
+        ? attachmentSummary.trim()
+        : '$trimmed$attachmentSummary';
 
     final liveSessionActive =
         _state != SessionState.disconnected && _channel != null;
 
     // As per user requirement, text messages always use the text chat REST API
     // but with the full current context history.
-    _addTranscript(trimmed.isEmpty ? '[Shared ${attachments.length} attachment${attachments.length == 1 ? '' : 's'}]' : trimmed,
-        isUser: true, historyText: historyText, attachments: attachments);
+    _addTranscript(
+        trimmed.isEmpty
+            ? '[Shared ${attachments.length} attachment${attachments.length == 1 ? '' : 's'}]'
+            : trimmed,
+        isUser: true,
+        historyText: historyText,
+        attachments: attachments,
+        allowRecentDuplicate: true);
 
     if (!liveSessionActive) {
       _setState(SessionState.thinking);
     }
 
     try {
-      final requestText = trimmed.isEmpty ? historyText : trimmed;
+      await _bootstrapTextChatIfNeeded();
+      // Always send the exact history entry text so attachment context is preserved.
+      final requestText = historyText;
       final reply = await _geminiTextChat(requestText);
       if (reply.isNotEmpty) {
         _addTranscript(reply, isUser: false);
+        return true;
+      } else {
+        _addAssistantFallbackMessage();
+        return false;
       }
-      unawaited(_commitTurnToBackend());
     } catch (e) {
       debugPrint('[text-chat] error: $e');
+      _addAssistantFallbackMessage();
+      return false;
     } finally {
+      unawaited(_commitTurnToBackend());
       if (!liveSessionActive) {
         _setState(SessionState.disconnected);
       } else {
@@ -831,6 +876,20 @@ class AymaAudioService extends ChangeNotifier {
         // that might restart the recorder if we were in a different state.
         notifyListeners();
       }
+    }
+  }
+
+  Future<void> _bootstrapTextChatIfNeeded() async {
+    if ((_geminiApiKey ?? '').isNotEmpty) return;
+    final bootstrap = await BackendService.bootstrap();
+    final apiKey = bootstrap['token'] as String?;
+    final setup = bootstrap['setup'] as Map<String, dynamic>?;
+    _geminiApiKey = apiKey;
+    _systemPrompt = (setup?['system_instruction']?['parts'] as List<dynamic>?)
+        ?.map((p) => p['text'] as String? ?? '')
+        .join('');
+    if ((_geminiApiKey ?? '').isEmpty) {
+      throw Exception('Missing Gemini API key from bootstrap');
     }
   }
 
@@ -864,10 +923,13 @@ class AymaAudioService extends ChangeNotifier {
     notifyListeners();
   }
 
-  void _addTranscript(String text,
-      {required bool isUser,
-      String? historyText,
-      List<Map<String, dynamic>>? attachments}) {
+  void _addTranscript(
+    String text, {
+    required bool isUser,
+    String? historyText,
+    List<Map<String, dynamic>>? attachments,
+    bool allowRecentDuplicate = false,
+  }) {
     final normalized = text.trim();
     if (normalized.isEmpty && (attachments == null || attachments.isEmpty)) {
       return;
@@ -879,7 +941,7 @@ class AymaAudioService extends ChangeNotifier {
           last.text.trim() == normalized &&
           (last.attachments?.length ?? 0) == (attachments?.length ?? 0) &&
           DateTime.now().difference(last.time) < const Duration(seconds: 3);
-      if (isDuplicate) {
+      if (isDuplicate && !allowRecentDuplicate) {
         return;
       }
     }
@@ -904,13 +966,25 @@ class AymaAudioService extends ChangeNotifier {
   }
 
   Future<String> _geminiTextChat(String message) async {
+    await _bootstrapTextChatIfNeeded();
     final key = _geminiApiKey;
     if (key == null || key.isEmpty) return '';
 
     final contents = [
-      for (final h in _textHistory.sublist(0, math.max(0, _textHistory.length - 1)))
-        {'role': h['role'], 'parts': [{'text': h['text']}]},
-      {'role': 'user', 'parts': [{'text': message}]},
+      for (final h
+          in _textHistory.sublist(0, math.max(0, _textHistory.length - 1)))
+        {
+          'role': h['role'],
+          'parts': [
+            {'text': h['text']}
+          ]
+        },
+      {
+        'role': 'user',
+        'parts': [
+          {'text': message}
+        ]
+      },
     ];
 
     final res = await http
@@ -918,7 +992,15 @@ class AymaAudioService extends ChangeNotifier {
           Uri.parse(
               'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=$key'),
           headers: {'Content-Type': 'application/json'},
-          body: jsonEncode({'contents': contents}),
+          body: jsonEncode({
+            'contents': contents,
+            if (_systemPrompt != null && _systemPrompt!.isNotEmpty)
+              'systemInstruction': {
+                'parts': [
+                  {'text': _systemPrompt}
+                ]
+              },
+          }),
         )
         .timeout(const Duration(seconds: 30));
 
@@ -926,8 +1008,16 @@ class AymaAudioService extends ChangeNotifier {
     final body = jsonDecode(res.body) as Map<String, dynamic>;
     final candidates = body['candidates'] as List<dynamic>? ?? [];
     if (candidates.isEmpty) return '';
-    final parts = (candidates.first['content']?['parts'] as List<dynamic>? ?? []);
+    final parts =
+        (candidates.first['content']?['parts'] as List<dynamic>? ?? []);
     return parts.map((p) => (p['text'] as String? ?? '')).join(' ').trim();
+  }
+
+  void _addAssistantFallbackMessage() {
+    _addTranscript(
+      'I could not generate a reply right now. Please check your connection and try again.',
+      isUser: false,
+    );
   }
 
   @override
