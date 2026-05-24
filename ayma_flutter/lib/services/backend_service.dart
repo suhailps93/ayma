@@ -54,6 +54,26 @@ class BackendService {
         .timeout(const Duration(seconds: 15));
   }
 
+  static Future<Map<String, dynamic>> runMatching() async {
+    final token = await _idToken();
+    if (token == null) throw Exception('Not authenticated');
+
+    final response = await http
+        .post(
+          Uri.parse('${Env.bootstrapUrl}/run-matching'),
+          headers: {
+            'Content-Type': 'application/json',
+            'Authorization': 'Bearer $token',
+          },
+        )
+        .timeout(const Duration(seconds: 90));
+
+    if (response.statusCode != 200) {
+      throw Exception('Matching failed: ${response.body}');
+    }
+    return jsonDecode(response.body) as Map<String, dynamic>;
+  }
+
   static Future<String> uploadMedia(Uint8List bytes, String filename) async {
     final uid = FirebaseAuth.instance.currentUser?.uid;
     if (uid == null) throw Exception('Not authenticated');

@@ -7,6 +7,24 @@ import '../../models/match_model.dart';
 import '../../providers/providers.dart';
 import '../../theme.dart';
 
+String _userLabel(Map<String, dynamic> data) {
+  final parts = <String>[];
+  final name = (data['display_name'] as String?)?.trim();
+  if (name != null && name.isNotEmpty) parts.add(name);
+  final age = data['age'];
+  if (age is int) parts.add('$age');
+  return parts.join(', ');
+}
+
+String _userSub(Map<String, dynamic> data) {
+  final parts = <String>[];
+  final gender = (data['gender'] as String?)?.trim();
+  if (gender != null && gender.isNotEmpty) parts.add(gender);
+  final loc = (data['location_region'] as String?)?.trim();
+  if (loc != null && loc.isNotEmpty) parts.add(loc);
+  return parts.join(' · ');
+}
+
 class MatchDetailScreen extends ConsumerStatefulWidget {
   final MatchModel match;
   const MatchDetailScreen({super.key, required this.match});
@@ -57,9 +75,17 @@ class _MatchDetailScreenState extends ConsumerState<MatchDetailScreen> {
 
   @override
   Widget build(BuildContext context) {
+    final otherId = m.userA == m.currentUserId ? m.userB : m.userA;
+    final otherProfileAsync = ref.watch(userProfileByIdProvider(otherId));
+    final myProfileAsync = ref.watch(userProfileByIdProvider(m.currentUserId));
+
     final seed = m.id.hashCode.abs() % 30 + 1;
     final h1 = (seed * 37) % 360;
     final h2 = (h1 + 40) % 360;
+
+    final otherName = otherProfileAsync.valueOrNull != null
+        ? _userLabel(otherProfileAsync.valueOrNull!)
+        : 'Match';
 
     return Scaffold(
       backgroundColor: AymaColors.bg,
@@ -102,7 +128,7 @@ class _MatchDetailScreenState extends ConsumerState<MatchDetailScreen> {
                         color: Colors.white.withValues(alpha: 0.15),
                       ),
                     ),
-                    // Confidence badge
+                    // Score badge
                     Positioned(
                       top: 80, right: 20,
                       child: Container(
@@ -157,14 +183,20 @@ class _MatchDetailScreenState extends ConsumerState<MatchDetailScreen> {
                           crossAxisAlignment: CrossAxisAlignment.start,
                           children: [
                             Text(
-                              'Match',
+                              otherName,
                               style: AymaFonts.serif(size: 34, color: AymaColors.fg),
                             ),
                             const SizedBox(height: 4),
-                            Text(
-                              _timeAgo(m.createdAt),
-                              style: AymaFonts.mono(size: 9, color: AymaColors.fgMute),
-                            ),
+                            if (otherProfileAsync.valueOrNull != null)
+                              Text(
+                                _userSub(otherProfileAsync.valueOrNull!),
+                                style: AymaFonts.mono(size: 9, color: AymaColors.fgMute),
+                              )
+                            else
+                              Text(
+                                _timeAgo(m.createdAt),
+                                style: AymaFonts.mono(size: 9, color: AymaColors.fgMute),
+                              ),
                           ],
                         ),
                       ),
@@ -189,22 +221,30 @@ class _MatchDetailScreenState extends ConsumerState<MatchDetailScreen> {
                 ],
 
                 // ── Match status ──────────────────────────────────
-                if (m.status != 'pending') ...[
-                  _StatusBanner(status: m.status)
+                if ((_actionTaken ?? m.status) != 'pending') ...[
+                  _StatusBanner(status: _actionTaken ?? m.status)
                       .animate().fadeIn(duration: 300.ms),
                   const SizedBox(height: 16),
                 ],
 
-                // ── About them (summaryB if we're userA, else summaryA) ──
+                // ── Compatibility rationale ───────────────────────
                 if (m.rationale != null && m.rationale!.isNotEmpty) ...[
                   _InfoCard(
-                    title: 'Background',
+                    title: 'Why you two',
                     content: m.rationale!,
                   ).animate(delay: 80.ms).fadeIn(duration: 300.ms).slideY(begin: 0.04, end: 0),
                   const SizedBox(height: 16),
                 ],
 
-                // ── Curated today label ───────────────────────────
+                // ── Both profiles ─────────────────────────────────
+                _BothProfilesCard(
+                  match: m,
+                  otherProfile: otherProfileAsync.valueOrNull,
+                  myProfile: myProfileAsync.valueOrNull,
+                ).animate(delay: 120.ms).fadeIn(duration: 300.ms).slideY(begin: 0.04, end: 0),
+                const SizedBox(height: 16),
+
+                // ── Curated label ─────────────────────────────────
                 Padding(
                   padding: const EdgeInsets.only(bottom: 20),
                   child: Row(
@@ -461,6 +501,122 @@ class _ActionBar extends StatelessWidget {
                 ],
               ),
       ),
+    );
+  }
+}
+
+// ── Both profiles card ────────────────────────────────────────────────────────
+
+class _BothProfilesCard extends StatelessWidget {
+  final MatchModel match;
+  final Map<String, dynamic>? otherProfile;
+  final Map<String, dynamic>? myProfile;
+
+  const _BothProfilesCard({
+    required this.match,
+    this.otherProfile,
+    this.myProfile,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final mySnippet = _snippet(myProfile, match.userA == match.currentUserId
+        ? match.summaryA
+        : match.summaryB);
+    final theirSnippet = _snippet(otherProfile, match.userA == match.currentUserId
+        ? match.summaryB
+        : match.summaryA);
+
+    return Container(
+      padding: const EdgeInsets.all(18),
+      decoration: BoxDecoration(
+        color: AymaColors.bgElev,
+        borderRadius: BorderRadius.circular(20),
+        border: Border.all(color: AymaColors.lineSoft, width: 0.5),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text('THE MATCH', style: AymaFonts.mono(size: 9, color: AymaColors.fgMute)),
+          const SizedBox(height: 16),
+          _ProfileRow(
+            label: 'You',
+            name: myProfile != null ? _userLabel(myProfile!) : 'You',
+            sub: myProfile != null ? _userSub(myProfile!) : '',
+            snippet: mySnippet,
+          ),
+          Padding(
+            padding: const EdgeInsets.symmetric(vertical: 14),
+            child: Row(
+              children: [
+                Expanded(child: Container(height: 0.5, color: AymaColors.lineSoft)),
+                Padding(
+                  padding: const EdgeInsets.symmetric(horizontal: 12),
+                  child: _MiniOrb(),
+                ),
+                Expanded(child: Container(height: 0.5, color: AymaColors.lineSoft)),
+              ],
+            ),
+          ),
+          _ProfileRow(
+            label: 'Them',
+            name: otherProfile != null ? _userLabel(otherProfile!) : 'Your match',
+            sub: otherProfile != null ? _userSub(otherProfile!) : '',
+            snippet: theirSnippet,
+          ),
+        ],
+      ),
+    );
+  }
+
+  String _snippet(Map<String, dynamic>? profile, String? summaryOverride) {
+    if (summaryOverride != null && summaryOverride.isNotEmpty) return summaryOverride;
+    if (profile == null) return '';
+    final wiki = (profile['wiki_about_me'] as String?)?.trim();
+    if (wiki != null && wiki.isNotEmpty) {
+      return wiki.length > 120 ? '${wiki.substring(0, 120)}…' : wiki;
+    }
+    final pub = (profile['profile_public'] as String?)?.trim();
+    if (pub != null && pub.isNotEmpty) {
+      return pub.length > 120 ? '${pub.substring(0, 120)}…' : pub;
+    }
+    return '';
+  }
+}
+
+class _ProfileRow extends StatelessWidget {
+  final String label;
+  final String name;
+  final String sub;
+  final String snippet;
+
+  const _ProfileRow({
+    required this.label,
+    required this.name,
+    required this.sub,
+    required this.snippet,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Text(label.toUpperCase(), style: AymaFonts.mono(size: 8, color: AymaColors.fgMute)),
+        const SizedBox(height: 4),
+        Text(name, style: AymaFonts.serif(size: 18, color: AymaColors.fg)),
+        if (sub.isNotEmpty) ...[
+          const SizedBox(height: 2),
+          Text(sub, style: const TextStyle(fontSize: 12, color: AymaColors.fgMute)),
+        ],
+        if (snippet.isNotEmpty) ...[
+          const SizedBox(height: 8),
+          Text(
+            snippet,
+            style: const TextStyle(fontSize: 13, color: AymaColors.fgDim, height: 1.5),
+          ),
+        ],
+      ],
     );
   }
 }

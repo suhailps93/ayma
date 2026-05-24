@@ -91,13 +91,11 @@ ayma/
 
 ---
 
-## Planned (Phase 2 — Matching Engine)
+## Done (Phase 2 — Matching Engine)
 
-Do NOT start on these until Phase 1 is confirmed working.
-
-- [ ] `POST /run-matching` on Cloud Run: heuristic Firestore filter → PII-strip → Gemini scoring → write `matches/` docs
-- [ ] Match detail screen
-- [ ] Trigger matching from Flutter (manual or scheduled)
+- [x] `POST /run-matching` on Cloud Run: heuristic Firestore filter → PII-strip → Gemini scoring → write `matches/` docs
+- [x] Match detail screen — shows both users (name, age, location, snippet), score, and rationale
+- [x] Trigger matching from Flutter — "Find matches" button in Matches screen header + empty state CTA
 
 ## Planned (Phase 3 — Vibe Check)
 
