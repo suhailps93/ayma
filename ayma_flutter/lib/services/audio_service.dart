@@ -110,6 +110,7 @@ class AymaAudioService extends ChangeNotifier {
   Future<void>? _connectFuture;
   Timer? _reconnectTimer;
   bool _manualDisconnect = false;
+  bool _allowAutoReconnect = false;
   int _reconnectAttempts = 0;
   final BytesBuilder _pendingMicAudio = BytesBuilder(copy: false);
   final BytesBuilder _debugOutputAudio = BytesBuilder(copy: false);
@@ -198,7 +199,10 @@ class AymaAudioService extends ChangeNotifier {
 
   // ── Connect ─────────────────────────────────────────────────────────────────
 
-  Future<void> connect() async {
+  Future<void> connect({bool userInitiated = false}) async {
+    if (userInitiated) {
+      _allowAutoReconnect = true;
+    }
     _manualDisconnect = false;
     _reconnectTimer?.cancel();
     _reconnectTimer = null;
@@ -302,6 +306,7 @@ class AymaAudioService extends ChangeNotifier {
   void disconnect({bool notify = true}) {
     debugPrint('[ws] disconnect() state=$_state notify=$notify');
     _manualDisconnect = true;
+    _allowAutoReconnect = false;
     _reconnectTimer?.cancel();
     _reconnectTimer = null;
     _closeTransport();
@@ -333,7 +338,7 @@ class AymaAudioService extends ChangeNotifier {
   }
 
   void _scheduleReconnect() {
-    if (_manualDisconnect || _connectFuture != null) return;
+    if (_manualDisconnect || _connectFuture != null || !_allowAutoReconnect) return;
     if (_reconnectAttempts >= 5) {
       debugPrint('[ws] reconnect limit reached');
       return;

@@ -148,12 +148,85 @@ class FirestoreService {
       return '- [$date]($url)\n$caption';
     }).join('\n\n');
 
+    final skills = (data['skills'] as Map<String, dynamic>?) ?? const {};
+    final matchingPrefs =
+        (data['matching_prefs'] as Map<String, dynamic>?) ?? const {};
+
+    final aboutMe = _firstNonEmpty([
+      data['profile_public'],
+      data['about_me'],
+      skills['about_me'],
+      skills['bio'],
+    ]) ??
+        _composeAboutMeFallback(data);
+
+    final preferences = _firstNonEmpty([
+      data['profile_private'],
+      data['preferences'],
+      skills['preferences'],
+      skills['match_preferences'],
+    ]) ??
+        _composePreferencesFallback(matchingPrefs);
+
+    final context = _firstNonEmpty([
+      data['profile_ai_observations'],
+      data['context'],
+      skills['context'],
+      skills['current_chapter'],
+    ]) ??
+        '';
+
     return {
-      'about_me': (data['profile_public'] as String?) ?? '',
-      'preferences': (data['profile_private'] as String?) ?? '',
-      'context': (data['profile_ai_observations'] as String?) ?? '',
+      'about_me': aboutMe,
+      'preferences': preferences,
+      'context': context,
       'media': mediaLines,
     };
+  }
+
+  static String? _firstNonEmpty(List<dynamic> values) {
+    for (final v in values) {
+      final s = (v as String?)?.trim();
+      if (s != null && s.isNotEmpty) return s;
+    }
+    return null;
+  }
+
+  static String _composeAboutMeFallback(Map<String, dynamic> data) {
+    final parts = <String>[];
+    final name = (data['display_name'] as String?)?.trim();
+    final age = data['age'];
+    final gender = (data['gender'] as String?)?.trim();
+    final location = (data['location_region'] as String?)?.trim();
+    if (name != null && name.isNotEmpty) {
+      parts.add(name);
+    }
+    if (age is int) {
+      parts.add('$age');
+    }
+    if (gender != null && gender.isNotEmpty) {
+      parts.add(gender);
+    }
+    final headline = parts.join(' · ');
+    if (headline.isEmpty && (location == null || location.isEmpty)) return '';
+    if (location != null && location.isNotEmpty) {
+      return headline.isEmpty ? location : '$headline\nBased in $location';
+    }
+    return headline;
+  }
+
+  static String _composePreferencesFallback(Map<String, dynamic> prefs) {
+    final interestedIn = (prefs['interested_in'] as String?)?.trim();
+    final minAge = prefs['age_min'];
+    final maxAge = prefs['age_max'];
+    final lines = <String>[];
+    if (interestedIn != null && interestedIn.isNotEmpty) {
+      lines.add('Interested in: $interestedIn');
+    }
+    if (minAge is int && maxAge is int) {
+      lines.add('Preferred age range: $minAge-$maxAge');
+    }
+    return lines.join('\n');
   }
 
   // ── Questions ─────────────────────────────────────────────────────────────

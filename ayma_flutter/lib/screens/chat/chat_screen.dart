@@ -66,6 +66,7 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
   Duration _sessionDuration = Duration.zero;
   bool _voiceActionInFlight = false;
   bool _sendingText = false;
+  bool _initialScrollDone = false;
 
   @override
   void initState() {
@@ -92,7 +93,7 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
   Future<bool> _autoConnect() async {
     if (_audioService.state != SessionState.disconnected) return true;
     try {
-      await _audioService.connect();
+      await _audioService.connect(userInitiated: true);
       _startTimer();
       return _audioService.state != SessionState.disconnected;
     } catch (_) {}
@@ -318,6 +319,10 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
 
     if (transcriptN != _lastTranscriptCount) {
       _lastTranscriptCount = transcriptN;
+      _scrollToBottom();
+    }
+    if (!_initialScrollDone && transcript.isNotEmpty) {
+      _initialScrollDone = true;
       _scrollToBottom();
     }
 

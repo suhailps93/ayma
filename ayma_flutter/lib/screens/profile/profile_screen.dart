@@ -162,10 +162,15 @@ class _ReadView extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final insightsAsync = ref.watch(insightsProvider);
-    final aboutMe = insightsAsync.valueOrNull?['about_me'] ?? '';
-    final preview = aboutMe.trim().isEmpty
-        ? null
-        : aboutMe.trim().split('\n').first.trim();
+    final insights = insightsAsync.valueOrNull ?? const <String, String>{};
+    String? preview;
+    for (final key in const ['about_me', 'preferences', 'context']) {
+      final text = (insights[key] ?? '').trim();
+      if (text.isNotEmpty) {
+        preview = text.split('\n').first.trim();
+        break;
+      }
+    }
 
     return ListView(
       padding: const EdgeInsets.fromLTRB(20, 16, 20, 120),
