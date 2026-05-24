@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
+import 'package:geocoding/geocoding.dart';
 import 'package:geolocator/geolocator.dart';
 
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -151,6 +152,21 @@ class _OnboardingScreenState extends ConsumerState<OnboardingScreen> {
   Timer? _debounce;
   bool _locationExpanded = false;
   int _locationRequestId = 0;
+  double? _locationLat;
+  double? _locationLng;
+
+  static const List<String> _seedLocations = [
+    'San Francisco, CA',
+    'San Jose, CA',
+    'Oakland, CA',
+    'Los Angeles, CA',
+    'San Diego, CA',
+    'Seattle, WA',
+    'New York, NY',
+    'Austin, TX',
+    'Chicago, IL',
+    'Boston, MA',
+  ];
 
   String _normalizedLocation(String input) =>
       input.trim().replaceAll(RegExp(r'\s+'), ' ');
@@ -168,12 +184,30 @@ class _OnboardingScreenState extends ConsumerState<OnboardingScreen> {
 
   void _syncLocationFromController() {
     final normalized = _normalizedLocation(_locationCtrl.text);
-    if (_locationText != normalized || _suggestions.isNotEmpty) {
+    final nextSuggestions = _buildLocationSuggestions(normalized);
+    if (_locationText != normalized || !_sameSuggestions(_suggestions, nextSuggestions)) {
       setState(() {
         _locationText = normalized;
-        _suggestions = [];
+        _suggestions = nextSuggestions;
       });
     }
+  }
+
+  bool _sameSuggestions(List<String> a, List<String> b) {
+    if (a.length != b.length) return false;
+    for (var i = 0; i < a.length; i++) {
+      if (a[i] != b[i]) return false;
+    }
+    return true;
+  }
+
+  List<String> _buildLocationSuggestions(String input) {
+    final q = input.toLowerCase().trim();
+    if (q.isEmpty) return _seedLocations.take(5).toList();
+    return _seedLocations
+        .where((c) => c.toLowerCase().contains(q))
+        .take(6)
+        .toList();
   }
 
   @override
@@ -208,9 +242,23 @@ class _OnboardingScreenState extends ConsumerState<OnboardingScreen> {
     setState(() => _locationLoading = true);
     try {
       final pos = await Geolocator.getCurrentPosition();
-      // Use a simple reverse geocode string from lat/lon
-      final location =
-          '${pos.latitude.toStringAsFixed(2)}, ${pos.longitude.toStringAsFixed(2)}';
+      _locationLat = pos.latitude;
+      _locationLng = pos.longitude;
+      var location =
+          '${pos.latitude.toStringAsFixed(4)}, ${pos.longitude.toStringAsFixed(4)}';
+      try {
+        final marks = await placemarkFromCoordinates(pos.latitude, pos.longitude);
+        if (marks.isNotEmpty) {
+          final p = marks.first;
+          final city = (p.locality ?? p.subAdministrativeArea ?? '').trim();
+          final state = (p.administrativeArea ?? '').trim();
+          final country = (p.country ?? '').trim();
+          final parts = [city, state, country].where((s) => s.isNotEmpty).toList();
+          if (parts.isNotEmpty) {
+            location = parts.join(', ');
+          }
+        }
+      } catch (_) {}
       if (!mounted) return;
       final currentInput = _normalizedLocation(_locationCtrl.text);
       final canApply = requestId == _locationRequestId &&
@@ -218,6 +266,7 @@ class _OnboardingScreenState extends ConsumerState<OnboardingScreen> {
       if (!canApply) return;
       setState(() {
         _setLocationText(location, updateController: true);
+        _suggestions = _buildLocationSuggestions(location);
       });
     } catch (_) {}
     if (mounted && requestId == _locationRequestId) {
@@ -226,9 +275,22 @@ class _OnboardingScreenState extends ConsumerState<OnboardingScreen> {
   }
 
   void _onLocationChanged(String val) {
+    final normalized = _normalizedLocation(val);
+    _debounce?.cancel();
+    _debounce = Timer(const Duration(milliseconds: 180), () async {
+      if (!mounted || normalized.length < 3) return;
+      try {
+        final resolved = await locationFromAddress(normalized);
+        if (!mounted) return;
+        if (resolved.isNotEmpty) {
+          _locationLat = resolved.first.latitude;
+          _locationLng = resolved.first.longitude;
+        }
+      } catch (_) {}
+    });
     setState(() {
       _setLocationText(val);
-      _suggestions = [];
+      _suggestions = _buildLocationSuggestions(normalized);
     });
   }
 
@@ -245,6 +307,11 @@ class _OnboardingScreenState extends ConsumerState<OnboardingScreen> {
           'age_max': _maxAge,
         },
         'location_region': _normalizedLocation(_locationCtrl.text),
+        if (_locationLat != null && _locationLng != null)
+          'location_coords': {
+            'lat': _locationLat,
+            'lng': _locationLng,
+          },
         'onboarding_complete': true,
       });
       await FirestoreService.initializeQuestions(
@@ -366,8 +433,11 @@ class _OnboardingScreenState extends ConsumerState<OnboardingScreen> {
           }),
           onLocationTap: () => setState(() {
             _locationExpanded = !_locationExpanded;
-            if (_locationExpanded && _locationCtrl.text.trim().isEmpty) {
-              _detectLocation();
+            if (_locationExpanded) {
+              _suggestions = _buildLocationSuggestions(_locationCtrl.text);
+              if (_locationCtrl.text.trim().isEmpty) _detectLocation();
+            } else {
+              _suggestions = [];
             }
           }),
           onLocationChanged: _onLocationChanged,
