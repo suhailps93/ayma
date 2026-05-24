@@ -3,14 +3,56 @@ import 'package:flutter_animate/flutter_animate.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../models/match_model.dart';
 import '../../providers/providers.dart';
+import '../../services/backend_service.dart';
 import '../../theme.dart';
 import 'match_detail_screen.dart';
 
-class MatchesScreen extends ConsumerWidget {
+class MatchesScreen extends ConsumerStatefulWidget {
   const MatchesScreen({super.key});
 
   @override
-  Widget build(BuildContext context, WidgetRef ref) {
+  ConsumerState<MatchesScreen> createState() => _MatchesScreenState();
+}
+
+class _MatchesScreenState extends ConsumerState<MatchesScreen> {
+  bool _running = false;
+
+  Future<void> _triggerMatching() async {
+    setState(() => _running = true);
+    try {
+      final result = await BackendService.runMatching();
+      ref.invalidate(matchesProvider);
+      if (mounted) {
+        final created = result['matches_created'] as int? ?? 0;
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(
+              created == 0
+                  ? 'No new matches this time — check back later.'
+                  : 'Found $created new match${created != 1 ? 'es' : ''}!',
+            ),
+            backgroundColor: AymaColors.bgElev,
+            behavior: SnackBarBehavior.floating,
+          ),
+        );
+      }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('Matching failed: $e'),
+            backgroundColor: AymaColors.bgElev,
+            behavior: SnackBarBehavior.floating,
+          ),
+        );
+      }
+    } finally {
+      if (mounted) setState(() => _running = false);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
     final matchesAsync = ref.watch(matchesProvider);
 
     return Scaffold(
@@ -39,12 +81,22 @@ class MatchesScreen extends ConsumerWidget {
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    Text(
-                      matches.isEmpty
-                          ? 'No introductions yet'
-                          : '${matches.length} introduction${matches.length != 1 ? 's' : ''} · curated today',
-                      style: AymaFonts.mono(size: 10, color: AymaColors.fgMute),
-                    ).animate().fadeIn(duration: 300.ms),
+                    Row(
+                      children: [
+                        Expanded(
+                          child: Text(
+                            matches.isEmpty
+                                ? 'No introductions yet'
+                                : '${matches.length} introduction${matches.length != 1 ? 's' : ''} · curated today',
+                            style: AymaFonts.mono(size: 10, color: AymaColors.fgMute),
+                          ).animate().fadeIn(duration: 300.ms),
+                        ),
+                        _RunMatchingButton(
+                          running: _running,
+                          onTap: _running ? null : _triggerMatching,
+                        ),
+                      ],
+                    ),
                     const SizedBox(height: 8),
                     Text(
                       'People Ayma picked',
@@ -66,7 +118,7 @@ class MatchesScreen extends ConsumerWidget {
 
               Expanded(
                 child: matches.isEmpty
-                    ? _EmptyMatches()
+                    ? _EmptyMatches(running: _running, onRunMatching: _triggerMatching)
                     : ListView.builder(
                         padding: const EdgeInsets.fromLTRB(20, 0, 20, 120),
                         itemCount: matches.length,
@@ -88,7 +140,63 @@ class MatchesScreen extends ConsumerWidget {
   }
 }
 
+class _RunMatchingButton extends StatelessWidget {
+  final bool running;
+  final VoidCallback? onTap;
+
+  const _RunMatchingButton({required this.running, this.onTap});
+
+  @override
+  Widget build(BuildContext context) {
+    return GestureDetector(
+      onTap: onTap,
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 7),
+        decoration: BoxDecoration(
+          color: AymaColors.bgElev,
+          borderRadius: BorderRadius.circular(99),
+          border: Border.all(color: AymaColors.lineSoft, width: 0.5),
+        ),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            if (running)
+              const SizedBox(
+                width: 10, height: 10,
+                child: CircularProgressIndicator(
+                  strokeWidth: 1.5,
+                  color: AymaColors.accent,
+                ),
+              )
+            else
+              Container(
+                width: 6, height: 6,
+                decoration: const BoxDecoration(
+                  shape: BoxShape.circle,
+                  color: AymaColors.accent,
+                ),
+              ),
+            const SizedBox(width: 6),
+            Text(
+              running ? 'Finding…' : 'Find matches',
+              style: const TextStyle(
+                fontSize: 12,
+                color: AymaColors.fgDim,
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
 class _EmptyMatches extends StatelessWidget {
+  final bool running;
+  final VoidCallback onRunMatching;
+
+  const _EmptyMatches({required this.running, required this.onRunMatching});
+
   @override
   Widget build(BuildContext context) {
     return Center(
@@ -121,6 +229,47 @@ class _EmptyMatches extends StatelessWidget {
               'Keep talking — matches appear as you share more about yourself.',
               textAlign: TextAlign.center,
               style: TextStyle(color: AymaColors.fgDim, fontSize: 13, height: 1.55),
+            ),
+            const SizedBox(height: 28),
+            GestureDetector(
+              onTap: running ? null : onRunMatching,
+              child: Container(
+                padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 14),
+                decoration: BoxDecoration(
+                  color: AymaColors.bgElev,
+                  borderRadius: BorderRadius.circular(99),
+                  border: Border.all(color: AymaColors.lineSoft, width: 0.5),
+                ),
+                child: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    if (running)
+                      const SizedBox(
+                        width: 12, height: 12,
+                        child: CircularProgressIndicator(
+                          strokeWidth: 1.5,
+                          color: AymaColors.accent,
+                        ),
+                      )
+                    else
+                      Container(
+                        width: 6, height: 6,
+                        decoration: const BoxDecoration(
+                          shape: BoxShape.circle,
+                          color: AymaColors.accent,
+                        ),
+                      ),
+                    const SizedBox(width: 8),
+                    Text(
+                      running ? 'Finding matches…' : 'Find matches now',
+                      style: const TextStyle(
+                        fontSize: 14,
+                        color: AymaColors.fg,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
             ),
           ],
         ),

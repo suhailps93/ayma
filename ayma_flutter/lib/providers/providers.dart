@@ -60,6 +60,12 @@ final matchesProvider = FutureProvider<List<MatchModel>>((ref) async {
   return FirestoreService.getMatches();
 });
 
+final userProfileByIdProvider =
+    FutureProvider.family<Map<String, dynamic>?, String>((ref, userId) async {
+  if (userId.isEmpty) return null;
+  return FirestoreService.getPublicProfile(userId);
+});
+
 // ── Notifications ─────────────────────────────────────────────────────────────
 
 final notificationsProvider =

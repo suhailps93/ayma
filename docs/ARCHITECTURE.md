@@ -117,10 +117,10 @@ media/{id}
 - [ ] Firestore `traits` subcollection rule
 - [ ] Surface traits in Insights screen
 
-### Phase 2 — Matching Engine (next)
-- [ ] `/run-matching` endpoint — heuristic Firestore filter → PII-strip → LLM score → write matches
-- [ ] Trigger matching periodically or on demand from Flutter
-- [ ] Match detail screen with score + reasoning
+### Phase 2 — Matching Engine (done)
+- [x] `/run-matching` endpoint — heuristic Firestore filter → PII-strip → LLM score → write matches
+- [x] Trigger matching on demand from Flutter (button in Matches screen)
+- [x] Match detail screen with score + reasoning + both user profiles
 
 ### Phase 3 — Vibe Check
 - [ ] `/vibe-check` endpoint — agent-to-agent simulation loop (4-5 turns) → synergy score
