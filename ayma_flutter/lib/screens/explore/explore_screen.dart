@@ -478,6 +478,7 @@ class _PeopleGrid extends StatelessWidget {
       itemBuilder: (_, i) {
         final p = people[i];
         return _ProfileCard(
+          profile: p,
           name: (p['display_name'] as String?) ?? 'Someone',
           age:  p['age'] as int?,
           job:  (p['job'] as String?) ?? '',
@@ -490,6 +491,7 @@ class _PeopleGrid extends StatelessWidget {
 }
 
 class _ProfileCard extends StatelessWidget {
+  final Map<String, dynamic> profile;
   final String name;
   final int? age;
   final String job;
@@ -497,6 +499,7 @@ class _ProfileCard extends StatelessWidget {
   final int delay;
 
   const _ProfileCard({
+    required this.profile,
     required this.name,
     required this.age,
     required this.job,
@@ -509,7 +512,15 @@ class _ProfileCard extends StatelessWidget {
     final h1 = (seed * 37) % 360;
     final h2 = (h1 + 40) % 360;
 
-    return Container(
+    return GestureDetector(
+      onTap: () {
+        Navigator.of(context).push(
+          MaterialPageRoute<void>(
+            builder: (_) => _ExploreProfileScreen(profile: profile),
+          ),
+        );
+      },
+      child: Container(
       decoration: BoxDecoration(
         borderRadius: BorderRadius.circular(20),
         color: AymaColors.bgElev,
@@ -565,7 +576,7 @@ class _ProfileCard extends StatelessWidget {
           ),
         ],
       ),
-    ).animate(delay: Duration(milliseconds: delay)).fadeIn(duration: 300.ms).slideY(begin: 0.04, end: 0);
+    )).animate(delay: Duration(milliseconds: delay)).fadeIn(duration: 300.ms).slideY(begin: 0.04, end: 0);
   }
 }
 
@@ -666,6 +677,77 @@ class _ErrorState extends StatelessWidget {
               ),
               child: const Text('Retry',
                   style: TextStyle(color: AymaColors.fg, fontSize: 13)),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _ExploreProfileScreen extends StatelessWidget {
+  final Map<String, dynamic> profile;
+  const _ExploreProfileScreen({required this.profile});
+
+  @override
+  Widget build(BuildContext context) {
+    final name = (profile['display_name'] as String?)?.trim();
+    final age = profile['age'];
+    final gender = (profile['gender'] as String?)?.trim();
+    final bio = (profile['profile_public'] as String?)?.trim();
+    final location = (profile['location_region'] as String?)?.trim();
+    final job = (profile['job'] as String?)?.trim();
+
+    return Scaffold(
+      backgroundColor: AymaColors.bg,
+      appBar: AppBar(
+        backgroundColor: AymaColors.bg,
+        foregroundColor: AymaColors.fg,
+        elevation: 0,
+        title: const Text('Profile'),
+      ),
+      body: ListView(
+        padding: const EdgeInsets.fromLTRB(20, 12, 20, 28),
+        children: [
+          Container(
+            padding: const EdgeInsets.all(18),
+            decoration: BoxDecoration(
+              color: AymaColors.bgElev,
+              borderRadius: BorderRadius.circular(20),
+              border: Border.all(color: AymaColors.lineSoft, width: 0.5),
+            ),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  name?.isNotEmpty == true ? name! : 'Someone',
+                  style: AymaFonts.serif(size: 30, color: AymaColors.fg),
+                ),
+                const SizedBox(height: 8),
+                Text(
+                  [
+                    if (age is int) '$age',
+                    if (gender != null && gender.isNotEmpty) gender,
+                    if (location != null && location.isNotEmpty) location,
+                  ].join(' · '),
+                  style: const TextStyle(color: AymaColors.fgMute, fontSize: 14),
+                ),
+                if (job != null && job.isNotEmpty) ...[
+                  const SizedBox(height: 10),
+                  Text(
+                    job,
+                    style: AymaFonts.mono(size: 10, color: AymaColors.fgDim),
+                  ),
+                ],
+                if (bio != null && bio.isNotEmpty) ...[
+                  const SizedBox(height: 18),
+                  Text(
+                    bio,
+                    style: AymaFonts.elegantSans(size: 15, color: AymaColors.fg)
+                        .copyWith(height: 1.6),
+                  ),
+                ],
+              ],
             ),
           ),
         ],
