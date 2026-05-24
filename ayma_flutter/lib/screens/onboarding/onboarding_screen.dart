@@ -297,10 +297,17 @@ class _OnboardingScreenState extends ConsumerState<OnboardingScreen> {
   Future<void> _save() async {
     setState(() => _saving = true);
     try {
+      final voiceDefaults = FirestoreService.deriveVoiceDefaults(
+        gender: _gender,
+        locationRegion: _normalizedLocation(_locationCtrl.text),
+      );
       await FirestoreService.updateProfile({
         'display_name': _nameCtrl.text.trim(),
         'age': _age,
         'gender': _gender,
+        'voice_preference': voiceDefaults['voice_gender'],
+        'voice_accent': voiceDefaults['accent_locale'],
+        'voice_settings': voiceDefaults,
         'matching_prefs': {
           'interested_in': _interestedIn,
           'age_min': _minAge,

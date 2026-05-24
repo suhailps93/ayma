@@ -4,6 +4,7 @@ import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/foundation.dart';
 import 'package:google_sign_in/google_sign_in.dart';
+import 'firestore_service.dart';
 
 class AuthService extends ChangeNotifier {
   AuthService() {
@@ -31,11 +32,26 @@ class AuthService extends ChangeNotifier {
     final hasBasicOnboardingData =
         ((data['display_name'] as String?)?.trim().isNotEmpty ?? false) &&
             ((data['gender'] as String?)?.trim().isNotEmpty ?? false);
+    final defaults = FirestoreService.deriveVoiceDefaults(
+      gender: data['gender'] as String?,
+      locationRegion: data['location_region'] as String?,
+    );
+    final existingVoiceSettings =
+        (data['voice_settings'] as Map<String, dynamic>?) ?? const {};
 
     await ref.set({
       'display_name': fallbackName,
       'agent_name': data['agent_name'] ?? 'Ayma',
       'voice_preference': data['voice_preference'] ?? 'Charon',
+      'voice_accent': data['voice_accent'] ?? defaults['accent_locale'],
+      'voice_settings': {
+        'voice_gender': existingVoiceSettings['voice_gender'] ??
+            defaults['voice_gender'],
+        'accent_locale': existingVoiceSettings['accent_locale'] ??
+            defaults['accent_locale'],
+        'accent_label': existingVoiceSettings['accent_label'] ??
+            defaults['accent_label'],
+      },
       'matching_prefs': data['matching_prefs'] ?? {},
       // Preserve onboarding flag once user completed it.
       'onboarding_complete': exists

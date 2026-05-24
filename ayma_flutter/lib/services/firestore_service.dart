@@ -31,6 +31,195 @@ class FirestoreService {
         .set(fields, SetOptions(merge: true));
   }
 
+  static Future<Map<String, dynamic>?> getPublicProfile(String userId) async {
+    final userDoc = await _db.collection('users').doc(userId).get();
+    if (!userDoc.exists) return null;
+    final data = userDoc.data() ?? <String, dynamic>{};
+    final mediaSnap = await _db
+        .collection('media')
+        .where('user_id', isEqualTo: userId)
+        .orderBy('created_at', descending: true)
+        .limit(24)
+        .get();
+    final photos = mediaSnap.docs
+        .map((d) => (d.data()['photo_url'] as String?) ?? '')
+        .where((u) => u.isNotEmpty)
+        .toList();
+    return {
+      ...data,
+      'id': userId,
+      'photos': photos,
+    };
+  }
+
+  static Future<double> generateMatchScore(String otherUserId) async {
+    final me = await _db.collection('users').doc(_uid).get();
+    final other = await _db.collection('users').doc(otherUserId).get();
+    if (!me.exists || !other.exists) return 0.0;
+    final a = me.data() ?? <String, dynamic>{};
+    final b = other.data() ?? <String, dynamic>{};
+
+    var score = 0.45;
+    final aPrefs = (a['matching_prefs'] as Map<String, dynamic>?) ?? const {};
+    final bPrefs = (b['matching_prefs'] as Map<String, dynamic>?) ?? const {};
+    final aGender = (a['gender'] as String?)?.toLowerCase();
+    final bGender = (b['gender'] as String?)?.toLowerCase();
+    final aInterested = (aPrefs['interested_in'] as String?)?.toLowerCase();
+    final bInterested = (bPrefs['interested_in'] as String?)?.toLowerCase();
+    final aAge = a['age'] as int?;
+    final bAge = b['age'] as int?;
+
+    bool interested(String? pref, String? targetGender) {
+      if (pref == null || pref.isEmpty) return false;
+      if (pref == 'everyone') return true;
+      if (pref == 'men') return targetGender == 'man' || targetGender == 'male';
+      if (pref == 'women') {
+        return targetGender == 'woman' || targetGender == 'female';
+      }
+      return false;
+    }
+
+    if (interested(aInterested, bGender)) score += 0.20;
+    if (interested(bInterested, aGender)) score += 0.20;
+
+    if (aAge != null && bAge != null) {
+      final aMin = aPrefs['age_min'] as int?;
+      final aMax = aPrefs['age_max'] as int?;
+      final bMin = bPrefs['age_min'] as int?;
+      final bMax = bPrefs['age_max'] as int?;
+      if (aMin != null && aMax != null && bAge >= aMin && bAge <= aMax) {
+        score += 0.08;
+      }
+      if (bMin != null && bMax != null && aAge >= bMin && aAge <= bMax) {
+        score += 0.08;
+      }
+    }
+
+    return score.clamp(0.0, 0.99);
+  }
+
+  static Future<void> sendPoke(String targetUserId) async {
+    final me = await _db.collection('users').doc(_uid).get();
+    final myName = (me.data()?['display_name'] as String?)?.trim();
+    await _db.collection('notifications').add({
+      'user_id': targetUserId,
+      'type': 'profile_suggestion',
+      'title': 'New poke',
+      'body': '${myName?.isNotEmpty == true ? myName : 'Someone'} poked you.',
+      'read': false,
+      'created_at': DateTime.now().toIso8601String(),
+      'meta': {'from_user_id': _uid},
+    });
+  }
+
+  static Future<void> sendDirectMessage({
+    required String targetUserId,
+    required String text,
+  }) async {
+    final clean = text.trim();
+    if (clean.isEmpty) return;
+    await _db.collection('messages').add({
+      'from_user_id': _uid,
+      'to_user_id': targetUserId,
+      'text': clean,
+      'created_at': DateTime.now().toIso8601String(),
+      'read': false,
+    });
+    final me = await _db.collection('users').doc(_uid).get();
+    final myName = (me.data()?['display_name'] as String?)?.trim();
+    await _db.collection('notifications').add({
+      'user_id': targetUserId,
+      'type': 'agent_update',
+      'title': 'New message',
+      'body':
+          '${myName?.isNotEmpty == true ? myName : 'Someone'} sent you a message.',
+      'read': false,
+      'created_at': DateTime.now().toIso8601String(),
+      'meta': {'from_user_id': _uid},
+    });
+  }
+
+  static Map<String, String> deriveVoiceDefaults({
+    String? gender,
+    String? locationRegion,
+  }) {
+    final g = (gender ?? '').toLowerCase().trim();
+    final voiceGender = g == 'man' || g == 'male' ? 'female' : 'male';
+    final accentLocale = _deriveAccentLocale(locationRegion);
+    return {
+      'voice_gender': voiceGender,
+      'accent_locale': accentLocale,
+      'accent_label': accentLocale,
+    };
+  }
+
+  static String _deriveAccentLocale(String? locationRegion) {
+    final loc = (locationRegion ?? '').toLowerCase();
+    if (loc.contains('india')) return 'en-IN';
+    if (loc.contains('uk') ||
+        loc.contains('england') ||
+        loc.contains('london') ||
+        loc.contains('united kingdom')) {
+      return 'en-GB';
+    }
+    if (loc.contains('australia') || loc.contains('sydney')) return 'en-AU';
+    if (loc.contains('canada') || loc.contains('toronto')) return 'en-CA';
+    return 'en-US';
+  }
+
+  static Future<Map<String, String>> getVoiceSettings() async {
+    final doc = await _db.collection('users').doc(_uid).get();
+    final data = doc.data() ?? const <String, dynamic>{};
+    final saved = (data['voice_settings'] as Map<String, dynamic>?) ?? const {};
+    var voiceGender = (saved['voice_gender'] as String?)?.trim();
+    var accentLocale = (saved['accent_locale'] as String?)?.trim();
+    var accentLabel = (saved['accent_label'] as String?)?.trim();
+
+    if (voiceGender == null ||
+        voiceGender.isEmpty ||
+        accentLocale == null ||
+        accentLocale.isEmpty) {
+      final defaults = deriveVoiceDefaults(
+        gender: data['gender'] as String?,
+        locationRegion: data['location_region'] as String?,
+      );
+      voiceGender = defaults['voice_gender']!;
+      accentLocale = defaults['accent_locale']!;
+      accentLabel = defaults['accent_label']!;
+      await updateVoiceSettings(
+        voiceGender: voiceGender,
+        accentLocale: accentLocale,
+        accentLabel: accentLabel,
+      );
+    }
+    final resolvedGender = voiceGender;
+    final resolvedAccent = accentLocale;
+    return {
+      'voice_gender': resolvedGender,
+      'accent_locale': resolvedAccent,
+      'accent_label': (accentLabel == null || accentLabel.isEmpty)
+          ? resolvedAccent
+          : accentLabel,
+    };
+  }
+
+  static Future<void> updateVoiceSettings({
+    required String voiceGender,
+    required String accentLocale,
+    String? accentLabel,
+  }) async {
+    await _db.collection('users').doc(_uid).set({
+      'voice_settings': {
+        'voice_gender': voiceGender.toLowerCase().trim(),
+        'accent_locale': accentLocale.trim(),
+        'accent_label': (accentLabel ?? accentLocale).trim(),
+      },
+      'voice_preference': voiceGender.toLowerCase().trim(),
+      'voice_accent': accentLocale.trim(),
+      'voice_preferences_updated_at': FieldValue.serverTimestamp(),
+    }, SetOptions(merge: true));
+  }
+
   // ── Matches ────────────────────────────────────────────────────────────────
 
   static Future<List<MatchModel>> getMatches() async {

@@ -122,6 +122,7 @@ class AymaAudioService extends ChangeNotifier {
   String _sessionId = DateTime.now().millisecondsSinceEpoch.toString();
   String? _geminiApiKey; // cached from bootstrap for text-chat fallback
   String? _systemPrompt; // cached from bootstrap for text-chat fallback
+  String _sessionStyleInstruction = '';
 
   AymaAudioService() {
     unawaited(_restoreTranscript());
@@ -155,7 +156,7 @@ class AymaAudioService extends ChangeNotifier {
       for (final line in _transcript) {
         _textHistory.add({
           'role': line.isUser ? 'user' : 'model',
-          'text': line.text,
+          'text': _stampHistoryText(line.time, line.text),
         });
       }
       if (_textHistory.length > 50) {
@@ -258,6 +259,13 @@ class AymaAudioService extends ChangeNotifier {
     _systemPrompt = (setup?['system_instruction']?['parts'] as List<dynamic>?)
         ?.map((p) => p['text'] as String? ?? '')
         .join('');
+    _sessionStyleInstruction = await _buildSessionStyleInstruction();
+    if (_sessionStyleInstruction.isNotEmpty) {
+      _systemPrompt = ((_systemPrompt ?? '').trim().isEmpty
+              ? _sessionStyleInstruction
+              : '${_systemPrompt!.trim()}\n\n$_sessionStyleInstruction')
+          .trim();
+    }
     if (liveWsUrl == null || liveWsUrl.isEmpty || apiKey == null) {
       _setState(SessionState.disconnected);
       throw Exception('Missing Gemini Live bootstrap data');
@@ -279,7 +287,8 @@ class AymaAudioService extends ChangeNotifier {
     debugPrint('[ws] opening Gemini Live $wsUri');
 
     if (setup != null) {
-      _channel!.sink.add(jsonEncode({'setup': setup}));
+      final mergedSetup = _mergeSetupWithClientInstructions(setup);
+      _channel!.sink.add(jsonEncode({'setup': mergedSetup}));
       debugPrint('[ws] full setup sent');
     } else {
       final modelName =
@@ -562,6 +571,8 @@ class AymaAudioService extends ChangeNotifier {
       String output;
       if (name == 'add_followup_question') {
         output = await _execAddFollowup(args);
+      } else if (name == 'update_voice_preferences') {
+        output = await _execUpdateVoicePreferences(args);
       } else if (name == 'get_current_time') {
         output = DateTime.now().toIso8601String();
       } else {
@@ -589,6 +600,26 @@ class AymaAudioService extends ChangeNotifier {
       return 'noted';
     } catch (e) {
       debugPrint('[followup] error: $e');
+      return 'error: $e';
+    }
+  }
+
+  Future<String> _execUpdateVoicePreferences(Map<String, dynamic> args) async {
+    final voiceGender = (args['voice_gender'] as String? ?? '').trim();
+    final accentLocale = (args['accent_locale'] as String? ?? '').trim();
+    final accentLabel = (args['accent_label'] as String? ?? '').trim();
+    if (voiceGender.isEmpty || accentLocale.isEmpty) {
+      return 'error: voice_gender and accent_locale are required';
+    }
+    try {
+      await FirestoreService.updateVoiceSettings(
+        voiceGender: voiceGender,
+        accentLocale: accentLocale,
+        accentLabel: accentLabel.isEmpty ? null : accentLabel,
+      );
+      _sessionStyleInstruction = await _buildSessionStyleInstruction();
+      return 'updated: voice=$voiceGender accent=$accentLocale';
+    } catch (e) {
       return 'error: $e';
     }
   }
@@ -961,7 +992,7 @@ class AymaAudioService extends ChangeNotifier {
     // Keep context history in sync for text API calls
     _textHistory.add({
       'role': isUser ? 'user' : 'model',
-      'text': (historyText ?? normalized).trim(),
+      'text': _stampHistoryText(DateTime.now(), (historyText ?? normalized).trim()),
     });
     if (_textHistory.length > 50) {
       _textHistory.removeAt(0);
@@ -1004,7 +1035,7 @@ class AymaAudioService extends ChangeNotifier {
           headers: {'Content-Type': 'application/json'},
           body: jsonEncode({
             'contents': contents,
-            if (_systemPrompt != null && _systemPrompt!.isNotEmpty)
+            if ((_systemPrompt ?? '').isNotEmpty)
               'systemInstruction': {
                 'parts': [
                   {'text': _systemPrompt}
@@ -1028,6 +1059,67 @@ class AymaAudioService extends ChangeNotifier {
       'I could not generate a reply right now. Please check your connection and try again.',
       isUser: false,
     );
+  }
+
+  String _stampHistoryText(DateTime time, String text) {
+    final safe = text.trim();
+    if (safe.isEmpty) return safe;
+    return '[${time.toIso8601String()}] $safe';
+  }
+
+  Future<String> _buildSessionStyleInstruction() async {
+    final voice = await FirestoreService.getVoiceSettings();
+    final recent = _transcript.reversed.take(6).toList().reversed.toList();
+    final contextLines = recent
+        .map((l) =>
+            '- ${l.isUser ? 'user' : 'assistant'} @ ${l.time.toIso8601String()}: ${l.text}')
+        .join('\n');
+    return '''
+Use this stable speaking style unless the user requests a change:
+- voice_gender: ${voice['voice_gender']}
+- accent_locale: ${voice['accent_locale']}
+- accent_label: ${voice['accent_label']}
+
+When replying, consider recency and elapsed time from prior messages (minutes vs days).
+Recent conversation context with timestamps:
+$contextLines
+''';
+  }
+
+  Map<String, dynamic> _mergeSetupWithClientInstructions(
+      Map<String, dynamic> setup) {
+    final merged = Map<String, dynamic>.from(setup);
+
+    final systemInstruction =
+        Map<String, dynamic>.from(merged['system_instruction'] as Map? ?? {});
+    final parts = List<dynamic>.from(systemInstruction['parts'] as List? ?? []);
+    if (_sessionStyleInstruction.trim().isNotEmpty) {
+      parts.add({'text': _sessionStyleInstruction.trim()});
+    }
+    systemInstruction['parts'] = parts;
+    merged['system_instruction'] = systemInstruction;
+
+    final tools = List<dynamic>.from(merged['tools'] as List? ?? []);
+    tools.add({
+      'functionDeclarations': [
+        {
+          'name': 'update_voice_preferences',
+          'description':
+              'Update the user voice gender and accent locale preferences.',
+          'parameters': {
+            'type': 'object',
+            'properties': {
+              'voice_gender': {'type': 'string'},
+              'accent_locale': {'type': 'string'},
+              'accent_label': {'type': 'string'},
+            },
+            'required': ['voice_gender', 'accent_locale'],
+          },
+        }
+      ]
+    });
+    merged['tools'] = tools;
+    return merged;
   }
 
   Future<List<Map<String, dynamic>>> _buildUserParts({

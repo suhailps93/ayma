@@ -5,6 +5,7 @@ import 'package:flutter_animate/flutter_animate.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../providers/providers.dart';
+import '../../services/firestore_service.dart';
 import '../../theme.dart';
 
 class ExploreScreen extends ConsumerStatefulWidget {
@@ -685,19 +686,94 @@ class _ErrorState extends StatelessWidget {
   }
 }
 
-class _ExploreProfileScreen extends StatelessWidget {
+class _ExploreProfileScreen extends StatefulWidget {
   final Map<String, dynamic> profile;
   const _ExploreProfileScreen({required this.profile});
 
   @override
-  Widget build(BuildContext context) {
-    final name = (profile['display_name'] as String?)?.trim();
-    final age = profile['age'];
-    final gender = (profile['gender'] as String?)?.trim();
-    final bio = (profile['profile_public'] as String?)?.trim();
-    final location = (profile['location_region'] as String?)?.trim();
-    final job = (profile['job'] as String?)?.trim();
+  State<_ExploreProfileScreen> createState() => _ExploreProfileScreenState();
+}
 
+class _ExploreProfileScreenState extends State<_ExploreProfileScreen> {
+  late Future<Map<String, dynamic>?> _profileFuture;
+  double? _matchScore;
+  bool _busy = false;
+
+  @override
+  void initState() {
+    super.initState();
+    final id = widget.profile['id'] as String?;
+    _profileFuture = id == null
+        ? Future.value(widget.profile)
+        : FirestoreService.getPublicProfile(id);
+  }
+
+  Future<void> _generateScore(String userId) async {
+    setState(() => _busy = true);
+    try {
+      final score = await FirestoreService.generateMatchScore(userId);
+      if (!mounted) return;
+      setState(() => _matchScore = score);
+    } finally {
+      if (mounted) setState(() => _busy = false);
+    }
+  }
+
+  Future<void> _sendPoke(String userId) async {
+    setState(() => _busy = true);
+    try {
+      await FirestoreService.sendPoke(userId);
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Poke sent')),
+      );
+    } finally {
+      if (mounted) setState(() => _busy = false);
+    }
+  }
+
+  Future<void> _sendMessage(String userId) async {
+    final ctrl = TextEditingController();
+    final text = await showDialog<String>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: AymaColors.bgElev,
+        title: const Text('Send message'),
+        content: TextField(
+          controller: ctrl,
+          maxLines: 4,
+          decoration: const InputDecoration(
+            hintText: 'Write a message...',
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx),
+            child: const Text('Cancel'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, ctrl.text),
+            child: const Text('Send'),
+          ),
+        ],
+      ),
+    );
+    final msg = (text ?? '').trim();
+    if (msg.isEmpty) return;
+    setState(() => _busy = true);
+    try {
+      await FirestoreService.sendDirectMessage(targetUserId: userId, text: msg);
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Message sent')),
+      );
+    } finally {
+      if (mounted) setState(() => _busy = false);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
     return Scaffold(
       backgroundColor: AymaColors.bg,
       appBar: AppBar(
@@ -706,51 +782,146 @@ class _ExploreProfileScreen extends StatelessWidget {
         elevation: 0,
         title: const Text('Profile'),
       ),
-      body: ListView(
-        padding: const EdgeInsets.fromLTRB(20, 12, 20, 28),
-        children: [
-          Container(
-            padding: const EdgeInsets.all(18),
-            decoration: BoxDecoration(
-              color: AymaColors.bgElev,
-              borderRadius: BorderRadius.circular(20),
-              border: Border.all(color: AymaColors.lineSoft, width: 0.5),
-            ),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(
-                  name?.isNotEmpty == true ? name! : 'Someone',
-                  style: AymaFonts.serif(size: 30, color: AymaColors.fg),
-                ),
-                const SizedBox(height: 8),
-                Text(
-                  [
-                    if (age is int) '$age',
-                    if (gender != null && gender.isNotEmpty) gender,
-                    if (location != null && location.isNotEmpty) location,
-                  ].join(' · '),
-                  style: const TextStyle(color: AymaColors.fgMute, fontSize: 14),
-                ),
-                if (job != null && job.isNotEmpty) ...[
-                  const SizedBox(height: 10),
-                  Text(
-                    job,
-                    style: AymaFonts.mono(size: 10, color: AymaColors.fgDim),
+      body: FutureBuilder<Map<String, dynamic>?>(
+        future: _profileFuture,
+        builder: (context, snap) {
+          if (!snap.hasData) {
+            return const Center(
+              child: CircularProgressIndicator(color: AymaColors.accent),
+            );
+          }
+          final p = snap.data ?? widget.profile;
+          final userId = p['id'] as String? ?? '';
+          final name = (p['display_name'] as String?)?.trim();
+          final age = p['age'];
+          final gender = (p['gender'] as String?)?.trim();
+          final interestedIn =
+              ((p['matching_prefs'] as Map?)?['interested_in'] as String?)
+                  ?.trim();
+          final bio = (p['profile_public'] as String?)?.trim();
+          final location = (p['location_region'] as String?)?.trim();
+          final photos = (p['photos'] as List?)?.cast<String>() ?? const <String>[];
+
+          return ListView(
+            padding: const EdgeInsets.fromLTRB(20, 12, 20, 28),
+            children: [
+              if (photos.isNotEmpty) ...[
+                SizedBox(
+                  height: 220,
+                  child: ListView.separated(
+                    scrollDirection: Axis.horizontal,
+                    itemCount: photos.length,
+                    separatorBuilder: (_, __) => const SizedBox(width: 10),
+                    itemBuilder: (_, i) => ClipRRect(
+                      borderRadius: BorderRadius.circular(16),
+                      child: Image.network(
+                        photos[i],
+                        width: 170,
+                        fit: BoxFit.cover,
+                        errorBuilder: (_, __, ___) => Container(
+                          width: 170,
+                          color: AymaColors.bgElev,
+                        ),
+                      ),
+                    ),
                   ),
-                ],
-                if (bio != null && bio.isNotEmpty) ...[
-                  const SizedBox(height: 18),
-                  Text(
-                    bio,
-                    style: AymaFonts.elegantSans(size: 15, color: AymaColors.fg)
-                        .copyWith(height: 1.6),
-                  ),
-                ],
+                ),
+                const SizedBox(height: 16),
               ],
-            ),
+              Container(
+                padding: const EdgeInsets.all(18),
+                decoration: BoxDecoration(
+                  color: AymaColors.bgElev,
+                  borderRadius: BorderRadius.circular(20),
+                  border: Border.all(color: AymaColors.lineSoft, width: 0.5),
+                ),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      name?.isNotEmpty == true ? name! : 'Someone',
+                      style: AymaFonts.serif(size: 30, color: AymaColors.fg),
+                    ),
+                    const SizedBox(height: 8),
+                    Text(
+                      [
+                        if (age is int) '$age',
+                        if (gender != null && gender.isNotEmpty) gender,
+                        if (interestedIn != null && interestedIn.isNotEmpty)
+                          'Interested in $interestedIn',
+                        if (location != null && location.isNotEmpty) location,
+                      ].join(' · '),
+                      style: const TextStyle(color: AymaColors.fgMute, fontSize: 14),
+                    ),
+                    if (bio != null && bio.isNotEmpty) ...[
+                      const SizedBox(height: 18),
+                      Text(
+                        bio,
+                        style: AymaFonts.elegantSans(size: 15, color: AymaColors.fg)
+                            .copyWith(height: 1.6),
+                      ),
+                    ],
+                    const SizedBox(height: 18),
+                    Wrap(
+                      spacing: 8,
+                      runSpacing: 8,
+                      children: [
+                        _ActionBtn(
+                          label: _matchScore == null
+                              ? 'Generate Match Score'
+                              : 'Match ${(100 * _matchScore!).round()}%',
+                          onTap: _busy || userId.isEmpty
+                              ? null
+                              : () => _generateScore(userId),
+                        ),
+                        _ActionBtn(
+                          label: 'Send Poke',
+                          onTap: _busy || userId.isEmpty
+                              ? null
+                              : () => _sendPoke(userId),
+                        ),
+                        _ActionBtn(
+                          label: 'Message',
+                          onTap: _busy || userId.isEmpty
+                              ? null
+                              : () => _sendMessage(userId),
+                        ),
+                      ],
+                    ),
+                  ],
+                ),
+              ),
+            ],
+          );
+        },
+      ),
+    );
+  }
+}
+
+class _ActionBtn extends StatelessWidget {
+  final String label;
+  final VoidCallback? onTap;
+  const _ActionBtn({required this.label, this.onTap});
+
+  @override
+  Widget build(BuildContext context) {
+    return GestureDetector(
+      onTap: onTap,
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 9),
+        decoration: BoxDecoration(
+          color: AymaColors.bgCard,
+          borderRadius: BorderRadius.circular(12),
+          border: Border.all(color: AymaColors.lineSoft, width: 0.5),
+        ),
+        child: Text(
+          label,
+          style: TextStyle(
+            color: onTap == null ? AymaColors.fgMute : AymaColors.fg,
+            fontSize: 13,
           ),
-        ],
+        ),
       ),
     );
   }
