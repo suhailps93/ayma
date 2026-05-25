@@ -152,22 +152,18 @@ class FirestoreService {
         .orderBy('created_at', descending: true)
         .limit(300)
         .snapshots()
-        .map((snap) => snap.docs
-            .map((d) => d.data()..['id'] = d.id)
-            .where((m) {
+        .map((snap) => snap.docs.map((d) => d.data()..['id'] = d.id).where((m) {
               final from = (m['from_user_id'] as String?) ?? '';
               final to = (m['to_user_id'] as String?) ?? '';
-              final betweenMeAndOther =
-                  (from == _uid && to == otherUserId) ||
-                      (from == otherUserId && to == _uid);
+              final betweenMeAndOther = (from == _uid && to == otherUserId) ||
+                  (from == otherUserId && to == _uid);
               return betweenMeAndOther;
-            })
-            .toList()
-          ..sort((a, b) {
-            final ta = (a['created_at'] as String?) ?? '';
-            final tb = (b['created_at'] as String?) ?? '';
-            return ta.compareTo(tb);
-          }));
+            }).toList()
+              ..sort((a, b) {
+                final ta = (a['created_at'] as String?) ?? '';
+                final tb = (b['created_at'] as String?) ?? '';
+                return ta.compareTo(tb);
+              }));
   }
 
   static Map<String, String> deriveVoiceDefaults({
@@ -249,6 +245,50 @@ class FirestoreService {
       'voice_accent': accentLocale.trim(),
       'voice_preferences_updated_at': FieldValue.serverTimestamp(),
     }, SetOptions(merge: true));
+  }
+
+  static Future<void> clearAymaKnowledge() async {
+    final userRef = _db.collection('users').doc(_uid);
+    await userRef.set({
+      'wiki_about_me': FieldValue.delete(),
+      'wiki_about_me_updated_at': FieldValue.delete(),
+      'wiki_about_me_session_id': FieldValue.delete(),
+      'wiki_preferences': FieldValue.delete(),
+      'wiki_preferences_updated_at': FieldValue.delete(),
+      'wiki_preferences_session_id': FieldValue.delete(),
+      'wiki_context': FieldValue.delete(),
+      'wiki_context_updated_at': FieldValue.delete(),
+      'wiki_context_session_id': FieldValue.delete(),
+      'wiki_matching': FieldValue.delete(),
+      'wiki_matching_updated_at': FieldValue.delete(),
+      'wiki_matching_session_id': FieldValue.delete(),
+    }, SetOptions(merge: true));
+
+    await _deleteSubcollection(
+      userRef.collection('memories'),
+      orderByField: 'created_at',
+    );
+    await _deleteSubcollection(
+      userRef.collection('questions'),
+      orderByField: 'created_at',
+    );
+    await initializeQuestions();
+  }
+
+  static Future<void> _deleteSubcollection(
+    Query<Map<String, dynamic>> query, {
+    required String orderByField,
+  }) async {
+    while (true) {
+      final snap = await query.orderBy(orderByField).limit(200).get();
+      if (snap.docs.isEmpty) return;
+      final batch = _db.batch();
+      for (final doc in snap.docs) {
+        batch.delete(doc.reference);
+      }
+      await batch.commit();
+      if (snap.docs.length < 200) return;
+    }
   }
 
   // ── Matches ────────────────────────────────────────────────────────────────
@@ -362,13 +402,12 @@ class FirestoreService {
     final matchingPrefs =
         (data['matching_prefs'] as Map<String, dynamic>?) ?? const {};
     final hasMatchingPrefs = _hasMeaningfulMatchingPrefs(matchingPrefs);
-    final hasLegacyProfile =
-        _hasMeaningfulText(data['profile_public']) ||
-            _hasMeaningfulText(data['profile_private']) ||
-            _hasMeaningfulText(data['about_me']) ||
-            _hasMeaningfulText(data['preferences']) ||
-            _hasMeaningfulText(data['context']) ||
-            _hasMeaningfulText(data['profile_ai_observations']);
+    final hasLegacyProfile = _hasMeaningfulText(data['profile_public']) ||
+        _hasMeaningfulText(data['profile_private']) ||
+        _hasMeaningfulText(data['about_me']) ||
+        _hasMeaningfulText(data['preferences']) ||
+        _hasMeaningfulText(data['context']) ||
+        _hasMeaningfulText(data['profile_ai_observations']);
 
     final hasCoreOnboardingData =
         displayName.isNotEmpty && gender.isNotEmpty && hasAge;
@@ -440,20 +479,23 @@ class FirestoreService {
     // Wiki fields are AI-maintained by /post-turn — read them directly.
     // profile_public is the separate user-controlled public bio.
     final aboutMe = _firstNonEmpty([
-      data['wiki_about_me'],
-      data['about_me'],
-    ]) ?? _composeAboutMeFallback(data);
+          data['wiki_about_me'],
+          data['about_me'],
+        ]) ??
+        _composeAboutMeFallback(data);
 
     final preferences = _firstNonEmpty([
-      data['wiki_preferences'],
-      data['preferences'],
-    ]) ?? _composePreferencesFallback(matchingPrefs);
+          data['wiki_preferences'],
+          data['preferences'],
+        ]) ??
+        _composePreferencesFallback(matchingPrefs);
 
     final context = _firstNonEmpty([
-      data['wiki_context'],
-      data['context'],
-      data['profile_ai_observations'],
-    ]) ?? '';
+          data['wiki_context'],
+          data['context'],
+          data['profile_ai_observations'],
+        ]) ??
+        '';
 
     final matching = _firstNonEmpty([data['wiki_matching']]) ?? '';
     final publicProfile = _firstNonEmpty([data['profile_public']]) ?? '';
@@ -467,23 +509,24 @@ class FirestoreService {
       }
       return '';
     }
+
     String sid(String key) => (data[key] as String?) ?? '';
 
     return {
-      'about_me':              aboutMe,
-      'about_me_updated_at':   ts('wiki_about_me_updated_at'),
-      'about_me_session_id':   sid('wiki_about_me_session_id'),
-      'preferences':             preferences,
-      'preferences_updated_at':  ts('wiki_preferences_updated_at'),
-      'preferences_session_id':  sid('wiki_preferences_session_id'),
-      'context':               context,
-      'context_updated_at':    ts('wiki_context_updated_at'),
-      'context_session_id':    sid('wiki_context_session_id'),
-      'matching':              matching,
-      'matching_updated_at':   ts('wiki_matching_updated_at'),
-      'matching_session_id':   sid('wiki_matching_session_id'),
-      'media':                 mediaLines,
-      'public_profile':        publicProfile,
+      'about_me': aboutMe,
+      'about_me_updated_at': ts('wiki_about_me_updated_at'),
+      'about_me_session_id': sid('wiki_about_me_session_id'),
+      'preferences': preferences,
+      'preferences_updated_at': ts('wiki_preferences_updated_at'),
+      'preferences_session_id': sid('wiki_preferences_session_id'),
+      'context': context,
+      'context_updated_at': ts('wiki_context_updated_at'),
+      'context_session_id': sid('wiki_context_session_id'),
+      'matching': matching,
+      'matching_updated_at': ts('wiki_matching_updated_at'),
+      'matching_session_id': sid('wiki_matching_session_id'),
+      'media': mediaLines,
+      'public_profile': publicProfile,
     };
   }
 
@@ -766,12 +809,10 @@ class FirestoreService {
         .where('onboarding_complete', isEqualTo: true)
         .limit(150)
         .get();
-    final uid = _uid;
     final lowerQuery = query.toLowerCase();
     final normalizedGenderFilter = _normalizeGender(gender ?? '');
     final genderVariants = _genderVariants(normalizedGenderFilter);
     return snap.docs
-        .where((d) => d.id != uid)
         .map((d) => d.data()..['id'] = d.id)
         .where((d) {
       final age = d['age'];

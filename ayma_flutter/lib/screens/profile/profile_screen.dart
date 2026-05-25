@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_animate/flutter_animate.dart';
+import 'package:go_router/go_router.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:image_picker/image_picker.dart';
 
@@ -227,6 +228,27 @@ class _ProfileScreenState extends ConsumerState<ProfileScreen>
             child: Column(
               children: [
                 Padding(
+                  padding: const EdgeInsets.fromLTRB(16, 8, 12, 0),
+                  child: Row(
+                    children: [
+                      Text(
+                        'You',
+                        style:
+                            AymaFonts.serif(size: 22, weight: FontWeight.w700),
+                      ),
+                      const Spacer(),
+                      IconButton(
+                        tooltip: 'Settings',
+                        onPressed: () => context.push('/settings'),
+                        icon: const Icon(
+                          Icons.settings_rounded,
+                          color: AymaColors.fg,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+                Padding(
                   padding: const EdgeInsets.fromLTRB(16, 16, 16, 8),
                   child: _PillTabBar(controller: _tabController),
                 ),
@@ -234,7 +256,6 @@ class _ProfileScreenState extends ConsumerState<ProfileScreen>
                   child: TabBarView(
                     controller: _tabController,
                     children: [
-                      _YourStoryPane(profile: profile),
                       _EditPublicPane(
                         profile: profile,
                         uploadingPhoto: _uploadingPhoto,
@@ -242,6 +263,7 @@ class _ProfileScreenState extends ConsumerState<ProfileScreen>
                         onAddPhoto: () => _addPhoto(profile),
                         onToggleLocked: () => _toggleLocked(profile),
                       ),
+                      _YourStoryPane(profile: profile),
                     ],
                   ),
                 ),
@@ -283,8 +305,8 @@ class _PillTabBar extends StatelessWidget {
         labelStyle: AymaFonts.sans(size: 13, weight: FontWeight.w600),
         unselectedLabelStyle: AymaFonts.sans(size: 13),
         tabs: const [
-          Tab(text: 'Private Profile'),
           Tab(text: 'Public Profile'),
+          Tab(text: 'Private Profile'),
         ],
       ),
     );
@@ -307,43 +329,52 @@ class _YourStoryPane extends ConsumerWidget {
             strokeWidth: 1.5, color: AymaColors.accent),
       ),
       error: (e, _) => Center(
-        child: Text('Error: $e',
-            style: const TextStyle(color: AymaColors.fgMute)),
+        child:
+            Text('Error: $e', style: const TextStyle(color: AymaColors.fgMute)),
       ),
       data: (insights) {
-        final i = insights as Map<String, dynamic>? ?? const <String, dynamic>{};
+        final i =
+            insights as Map<String, dynamic>? ?? const <String, dynamic>{};
         return ListView(
           padding: const EdgeInsets.fromLTRB(16, 12, 16, 120),
           children: [
             _AymaBanner().animate().fadeIn(duration: 300.ms),
             const SizedBox(height: 16),
-
             _StoryCard(
               label: 'WHO YOU ARE',
               content: i['about_me']?.toString() ?? '',
               updatedAt: i['about_me_updated_at']?.toString() ?? '',
-            ).animate(delay: 40.ms).fadeIn(duration: 300.ms).slideY(begin: 0.03, end: 0),
+            )
+                .animate(delay: 40.ms)
+                .fadeIn(duration: 300.ms)
+                .slideY(begin: 0.03, end: 0),
             const SizedBox(height: 10),
-
             _StoryCard(
               label: "WHAT YOU'RE LOOKING FOR",
               content: i['preferences']?.toString() ?? '',
               updatedAt: i['preferences_updated_at']?.toString() ?? '',
-            ).animate(delay: 80.ms).fadeIn(duration: 300.ms).slideY(begin: 0.03, end: 0),
+            )
+                .animate(delay: 80.ms)
+                .fadeIn(duration: 300.ms)
+                .slideY(begin: 0.03, end: 0),
             const SizedBox(height: 10),
-
             _StoryCard(
               label: 'YOUR LIFE RIGHT NOW',
               content: i['context']?.toString() ?? '',
               updatedAt: i['context_updated_at']?.toString() ?? '',
-            ).animate(delay: 120.ms).fadeIn(duration: 300.ms).slideY(begin: 0.03, end: 0),
+            )
+                .animate(delay: 120.ms)
+                .fadeIn(duration: 300.ms)
+                .slideY(begin: 0.03, end: 0),
             const SizedBox(height: 10),
-
             _StoryCard(
               label: 'FOR MATCHING',
               content: i['matching']?.toString() ?? '',
               updatedAt: i['matching_updated_at']?.toString() ?? '',
-            ).animate(delay: 160.ms).fadeIn(duration: 300.ms).slideY(begin: 0.03, end: 0),
+            )
+                .animate(delay: 160.ms)
+                .fadeIn(duration: 300.ms)
+                .slideY(begin: 0.03, end: 0),
           ],
         );
       },
@@ -382,9 +413,7 @@ class _AymaBanner extends StatelessWidget {
               children: [
                 Text(
                   'This is what I know about you so far. It updates every time we talk.',
-                  style: AymaFonts.sans(
-                      size: 13,
-                      color: AymaColors.fgDim),
+                  style: AymaFonts.sans(size: 13, color: AymaColors.fgDim),
                 ),
                 const SizedBox(height: 6),
                 Text(
@@ -538,8 +567,8 @@ class _EditPublicPane extends ConsumerWidget {
             strokeWidth: 1.5, color: AymaColors.accent),
       ),
       error: (e, _) => Center(
-        child: Text('Error: $e',
-            style: const TextStyle(color: AymaColors.fgMute)),
+        child:
+            Text('Error: $e', style: const TextStyle(color: AymaColors.fgMute)),
       ),
       data: (pub) {
         final p = pub ?? const <String, dynamic>{};
@@ -554,8 +583,8 @@ class _EditPublicPane extends ConsumerWidget {
             : _first([p['display_name']]);
         final age = profile.age ?? _age([p['age']]);
         final gender = _first([profile.gender, p['gender']]);
-        final location = _cityOnly(
-            _first([profile.locationRegion, p['location_region']]));
+        final location =
+            _cityOnly(_first([profile.locationRegion, p['location_region']]));
         final interestedIn = _first([
           profile.matchingPrefs['interested_in'],
           (p['matching_prefs'] as Map?)?['interested_in'],
@@ -575,8 +604,9 @@ class _EditPublicPane extends ConsumerWidget {
 
             // Basics
             Text('BASICS',
-                style: AymaFonts.mono(size: 9, color: AymaColors.fgMute))
-                .animate(delay: 80.ms).fadeIn(duration: 300.ms),
+                    style: AymaFonts.mono(size: 9, color: AymaColors.fgMute))
+                .animate(delay: 80.ms)
+                .fadeIn(duration: 300.ms),
             const SizedBox(height: 10),
             Container(
               decoration: BoxDecoration(
@@ -617,8 +647,9 @@ class _EditPublicPane extends ConsumerWidget {
 
             // Public bio
             Text('PUBLIC BIO',
-                style: AymaFonts.mono(size: 9, color: AymaColors.fgMute))
-                .animate(delay: 140.ms).fadeIn(duration: 300.ms),
+                    style: AymaFonts.mono(size: 9, color: AymaColors.fgMute))
+                .animate(delay: 140.ms)
+                .fadeIn(duration: 300.ms),
             const SizedBox(height: 10),
             Container(
               padding: const EdgeInsets.all(18),
@@ -666,9 +697,7 @@ class _EditPublicPane extends ConsumerWidget {
                   bio.isNotEmpty
                       ? Text(bio,
                           style: const TextStyle(
-                              color: AymaColors.fg,
-                              fontSize: 14,
-                              height: 1.65))
+                              color: AymaColors.fg, fontSize: 14, height: 1.65))
                       : Text(
                           'No public bio yet. Talk to Ayma to build your profile.',
                           style: TextStyle(
@@ -691,14 +720,12 @@ class _EditPublicPane extends ConsumerWidget {
                               horizontal: 8, vertical: 4),
                           decoration: BoxDecoration(
                             color: profile.profilePublicLocked
-                                ? Colors.green.shade900
-                                    .withValues(alpha: 0.4)
+                                ? Colors.green.shade900.withValues(alpha: 0.4)
                                 : AymaColors.accent.withValues(alpha: 0.1),
                             borderRadius: BorderRadius.circular(6),
                             border: Border.all(
                               color: profile.profilePublicLocked
-                                  ? Colors.green.shade600
-                                      .withValues(alpha: 0.4)
+                                  ? Colors.green.shade600.withValues(alpha: 0.4)
                                   : AymaColors.accent.withValues(alpha: 0.3),
                               width: 0.5,
                             ),
@@ -788,7 +815,8 @@ class _PhotoCarouselState extends State<_PhotoCarousel> {
   Widget build(BuildContext context) {
     final photos = widget.photos;
     final hasPhotos = photos.isNotEmpty;
-    final h = MediaQuery.sizeOf(context).width * 1.1; // slightly taller than square
+    final h =
+        MediaQuery.sizeOf(context).width * 1.1; // slightly taller than square
 
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
@@ -857,7 +885,8 @@ class _PhotoCarouselState extends State<_PhotoCarousel> {
                             children: List.generate(photos.length, (i) {
                               return AnimatedContainer(
                                 duration: const Duration(milliseconds: 200),
-                                margin: const EdgeInsets.symmetric(horizontal: 3),
+                                margin:
+                                    const EdgeInsets.symmetric(horizontal: 3),
                                 width: _page == i ? 18 : 5,
                                 height: 4,
                                 decoration: BoxDecoration(
@@ -1008,8 +1037,8 @@ class _EditFormView extends StatelessWidget {
               child: SizedBox(
                   width: 20,
                   height: 20,
-                  child:
-                      CircularProgressIndicator(strokeWidth: 2, color: AymaColors.accent)),
+                  child: CircularProgressIndicator(
+                      strokeWidth: 2, color: AymaColors.accent)),
             )
           else
             TextButton(
@@ -1029,7 +1058,6 @@ class _EditFormView extends StatelessWidget {
           AymaTextField(
               controller: nameCtrl, label: 'Display name', maxLines: 1),
           const SizedBox(height: 16),
-
           _FieldLabel('Age'),
           AymaTextField(
               controller: ageCtrl,
@@ -1037,7 +1065,6 @@ class _EditFormView extends StatelessWidget {
               maxLines: 1,
               keyboardType: TextInputType.number),
           const SizedBox(height: 16),
-
           _FieldLabel('Gender'),
           const SizedBox(height: 6),
           Wrap(
@@ -1053,21 +1080,16 @@ class _EditFormView extends StatelessWidget {
             }).toList(),
           ),
           const SizedBox(height: 16),
-
           _FieldLabel('Location'),
           AymaTextField(
-              controller: locationCtrl,
-              label: 'City or region',
-              maxLines: 1),
+              controller: locationCtrl, label: 'City or region', maxLines: 1),
           const SizedBox(height: 16),
-
           _FieldLabel('Agent name'),
           AymaTextField(
               controller: agentNameCtrl,
               label: "Your AI agent's name",
               maxLines: 1),
           const SizedBox(height: 16),
-
           _FieldLabel('Voice'),
           const SizedBox(height: 6),
           Wrap(
@@ -1083,14 +1105,12 @@ class _EditFormView extends StatelessWidget {
             }).toList(),
           ),
           const SizedBox(height: 16),
-
           _FieldLabel('Public bio'),
           AymaTextField(
               controller: bioCtrl,
               label: 'Visible to potential matches',
               maxLines: 5),
           const SizedBox(height: 16),
-
           _FieldLabel('Private notes'),
           const SizedBox(height: 4),
           const Text(
@@ -1103,7 +1123,6 @@ class _EditFormView extends StatelessWidget {
               label: 'Notes (only you see this)',
               maxLines: 5),
           const SizedBox(height: 20),
-
           Container(
             padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
             decoration: BoxDecoration(
@@ -1137,10 +1156,8 @@ class _EditFormView extends StatelessWidget {
               ],
             ),
           ),
-
           const SizedBox(height: 28),
-          AymaButton(
-              label: 'Save changes', loading: saving, onPressed: onSave),
+          AymaButton(label: 'Save changes', loading: saving, onPressed: onSave),
           const SizedBox(height: 12),
           AymaButton(label: 'Cancel', outlined: true, onPressed: onBack),
         ],
@@ -1182,8 +1199,7 @@ class _BasicRow extends StatelessWidget {
               child: Text(label,
                   style: AymaFonts.sans(size: 14, color: AymaColors.fgMute)),
             ),
-            Text(value,
-                style: AymaFonts.sans(size: 14, color: AymaColors.fg)),
+            Text(value, style: AymaFonts.sans(size: 14, color: AymaColors.fg)),
             const SizedBox(width: 6),
             const Icon(Icons.chevron_right_rounded,
                 size: 16, color: AymaColors.fgMute),

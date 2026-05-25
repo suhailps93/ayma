@@ -5,6 +5,7 @@ import 'package:go_router/go_router.dart';
 
 import '../../providers/providers.dart';
 import 'package:firebase_auth/firebase_auth.dart';
+import '../../services/firestore_service.dart';
 import '../../theme.dart';
 
 class SettingsScreen extends ConsumerStatefulWidget {
@@ -16,6 +17,26 @@ class SettingsScreen extends ConsumerStatefulWidget {
 
 class _SettingsScreenState extends ConsumerState<SettingsScreen> {
   bool _pauseLoading = false;
+  bool _savingVoice = false;
+  bool _clearingMemory = false;
+  bool _previewingVoice = false;
+
+  String? _voiceGender;
+  String? _accentLocale;
+  String? _voiceName;
+  final TextEditingController _accentCtrl = TextEditingController();
+
+  static const Map<String, List<String>> _voicesByGender =
+      <String, List<String>>{
+    'female': <String>['Charon', 'Linden', 'Harbor'],
+    'male': <String>['March', 'Ash'],
+  };
+
+  @override
+  void dispose() {
+    _accentCtrl.dispose();
+    super.dispose();
+  }
 
   Future<void> _togglePause(bool value) async {
     setState(() => _pauseLoading = true);
@@ -45,14 +66,128 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
     }
   }
 
-  void _showExclusionsSheet() {
-    showModalBottomSheet(
+  Future<void> _saveAymaVoiceSettings() async {
+    final voiceGender = _voiceGender;
+    final accentLocale = _accentCtrl.text.trim();
+    final voiceName = _voiceName;
+    if (voiceGender == null || accentLocale.isEmpty || voiceName == null) {
+      return;
+    }
+    setState(() => _savingVoice = true);
+    try {
+      await FirestoreService.updateVoiceSettings(
+        voiceGender: voiceGender,
+        accentLocale: accentLocale,
+        accentLabel: accentLocale,
+      );
+      await updateProfile({'voice_preference': voiceName}, ref);
+      ref.invalidate(profileProvider);
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Ayma voice settings updated')),
+        );
+      }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Could not update voice settings: $e')),
+        );
+      }
+    }
+    if (mounted) setState(() => _savingVoice = false);
+  }
+
+  Future<void> _previewCurrentVoice() async {
+    if (_previewingVoice) {
+      return;
+    }
+    final voiceGender = _voiceGender;
+    final accentLocale = _accentCtrl.text.trim();
+    final voiceName = _voiceName;
+    if (voiceGender == null || accentLocale.isEmpty || voiceName == null) {
+      return;
+    }
+
+    setState(() => _previewingVoice = true);
+    try {
+      await FirestoreService.updateVoiceSettings(
+        voiceGender: voiceGender,
+        accentLocale: accentLocale,
+        accentLabel: accentLocale,
+      );
+      await updateProfile({'voice_preference': voiceName}, ref);
+      ref.invalidate(profileProvider);
+      final audio = ref.read(audioServiceProvider);
+      final ok = await audio.sendLivePrompt(
+        'Speak exactly one short preview sentence in the selected language/accent "$accentLocale" and in a natural ${voiceGender.toLowerCase()} voice. '
+        'Template meaning: "Hi, I am Ayma. This is your selected voice and accent preview."',
+      );
+      if (!ok && mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Could not play voice preview')),
+        );
+      }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Voice preview failed: $e')),
+        );
+      }
+    }
+    if (mounted) setState(() => _previewingVoice = false);
+  }
+
+  Future<void> _clearAymaKnowledge() async {
+    setState(() => _clearingMemory = true);
+    try {
+      await FirestoreService.clearAymaKnowledge();
+      await ref.read(audioServiceProvider).clearLocalTranscript();
+      ref.invalidate(insightsProvider);
+      ref.invalidate(profileProvider);
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Ayma memory cleared successfully')),
+        );
+      }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Could not clear Ayma memory: $e')),
+        );
+      }
+    }
+    if (mounted) setState(() => _clearingMemory = false);
+  }
+
+  void _confirmClearAymaKnowledge() {
+    showDialog(
       context: context,
-      backgroundColor: AymaColors.bgElev,
-      shape: const RoundedRectangleBorder(
-        borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
+      builder: (_) => AlertDialog(
+        backgroundColor: AymaColors.bgCard,
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
+        title: Text(
+          'Clear Ayma memory',
+          style: TextStyle(color: AymaColors.fg, fontSize: 18),
+        ),
+        content: Text(
+          'This deletes everything Ayma learned from conversations and resets follow-up questions. Your account stays active.',
+          style: TextStyle(color: AymaColors.fgDim, fontSize: 13, height: 1.5),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: Text('Cancel', style: TextStyle(color: AymaColors.fgDim)),
+          ),
+          TextButton(
+            onPressed: () {
+              Navigator.pop(context);
+              _clearAymaKnowledge();
+            },
+            child:
+                const Text('Clear', style: TextStyle(color: Colors.redAccent)),
+          ),
+        ],
       ),
-      builder: (_) => const _ExclusionsSheet(),
     );
   }
 
@@ -80,7 +215,8 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
               Navigator.pop(context);
               _deleteAccount();
             },
-            child: const Text('Delete', style: TextStyle(color: Colors.redAccent)),
+            child:
+                const Text('Delete', style: TextStyle(color: Colors.redAccent)),
           ),
         ],
       ),
@@ -94,6 +230,15 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
     final profile = profileAsync.valueOrNull;
     final displayName = profile?.displayName ?? 'You';
     final matchingPaused = profile?.matchingPaused ?? false;
+    if (profile != null) {
+      _voiceName ??= profile.voicePreference.isNotEmpty
+          ? profile.voicePreference
+          : 'Charon';
+      _voiceGender ??= (profile.voicePreference.toLowerCase() == 'march' ||
+              profile.voicePreference.toLowerCase() == 'ash')
+          ? 'male'
+          : 'female';
+    }
 
     return Scaffold(
       backgroundColor: AymaColors.bg,
@@ -117,40 +262,140 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
               subtitle: currentUser?.email ?? '',
               delay: 60,
             ),
-            const SizedBox(height: 2),
-            _Tile(
-              icon: Icons.edit_outlined,
-              title: 'Edit profile',
-              onTap: () => context.go('/profile'),
-              delay: 100,
-            ),
 
             const SizedBox(height: 20),
 
             // Agent section
             _SectionLabel('Ayma'),
-            _Tile(
-              icon: Icons.memory_rounded,
-              title: 'Manage memory',
-              subtitle: 'What Ayma knows about you',
-              onTap: () => context.go('/insights'),
-              delay: 140,
+            FutureBuilder<Map<String, String>>(
+              future: FirestoreService.getVoiceSettings(),
+              builder: (context, snapshot) {
+                final settings = snapshot.data;
+                _accentLocale ??= settings?['accent_locale'] ?? 'en-US';
+                if (_accentCtrl.text.isEmpty) {
+                  _accentCtrl.text = _accentLocale!;
+                }
+                _voiceGender ??=
+                    settings?['voice_gender'] ?? _voiceGender ?? 'female';
+                final voices =
+                    _voicesByGender[_voiceGender] ?? _voicesByGender['female']!;
+                if (!voices.contains(_voiceName)) _voiceName = voices.first;
+
+                return Container(
+                  margin: const EdgeInsets.only(bottom: 2),
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
+                  decoration: BoxDecoration(
+                    color: AymaColors.bgElev,
+                    borderRadius: BorderRadius.circular(16),
+                    border: Border.all(color: AymaColors.lineSoft, width: 0.5),
+                  ),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Row(
+                        children: [
+                          const Icon(Icons.record_voice_over_rounded,
+                              size: 18, color: AymaColors.fgDim),
+                          const SizedBox(width: 14),
+                          Text(
+                            'Voice & accent',
+                            style:
+                                TextStyle(color: AymaColors.fg, fontSize: 14),
+                          ),
+                        ],
+                      ),
+                      const SizedBox(height: 12),
+                      _InlineTextInput(
+                        label: 'Preferred language accent',
+                        controller: _accentCtrl,
+                        hintText: 'e.g. en-US, Spanish (Mexico), Hindi (India)',
+                        onSubmitted: (_) => _previewCurrentVoice(),
+                      ),
+                      const SizedBox(height: 10),
+                      _InlineDropdown<String>(
+                        label: 'Ayma voice',
+                        value: _voiceGender,
+                        items: _voicesByGender.keys.toList(),
+                        format: (value) =>
+                            value == 'male' ? 'Male voices' : 'Female voices',
+                        onChanged: (value) {
+                          setState(() {
+                            _voiceGender = value;
+                            final nextVoices = _voicesByGender[value]!;
+                            if (!nextVoices.contains(_voiceName)) {
+                              _voiceName = nextVoices.first;
+                            }
+                          });
+                          _previewCurrentVoice();
+                        },
+                      ),
+                      const SizedBox(height: 10),
+                      _InlineDropdown<String>(
+                        label: 'Voice name',
+                        value: _voiceName,
+                        items: voices,
+                        onChanged: (value) {
+                          setState(() => _voiceName = value);
+                          _previewCurrentVoice();
+                        },
+                      ),
+                      const SizedBox(height: 12),
+                      Align(
+                        alignment: Alignment.centerRight,
+                        child: Row(
+                          mainAxisAlignment: MainAxisAlignment.end,
+                          children: [
+                            TextButton(
+                              onPressed: _savingVoice || _previewingVoice
+                                  ? null
+                                  : _previewCurrentVoice,
+                              child: const Text('Play preview'),
+                            ),
+                            TextButton(
+                              onPressed: _savingVoice || _previewingVoice
+                                  ? null
+                                  : _saveAymaVoiceSettings,
+                              child: _savingVoice || _previewingVoice
+                                  ? const SizedBox(
+                                      width: 16,
+                                      height: 16,
+                                      child: CircularProgressIndicator(
+                                        strokeWidth: 2,
+                                        color: AymaColors.accent,
+                                      ),
+                                    )
+                                  : const Text('Save Ayma settings'),
+                            ),
+                          ],
+                        ),
+                      ),
+                    ],
+                  ),
+                )
+                    .animate(delay: 140.ms)
+                    .fadeIn(duration: 300.ms)
+                    .slideX(begin: 0.03, end: 0);
+              },
             ),
             const SizedBox(height: 2),
             _Tile(
-              icon: Icons.tune_rounded,
-              title: 'Matching preferences',
-              subtitle: 'Update your age range and interests',
-              onTap: () => context.go('/profile'),
+              icon: Icons.auto_delete_rounded,
+              title: 'Delete everything Ayma knows about me',
+              subtitle: 'Clear Ayma memory and reset learned profile',
+              titleColor: Colors.redAccent.shade100,
+              trailing: _clearingMemory
+                  ? const SizedBox(
+                      width: 18,
+                      height: 18,
+                      child: CircularProgressIndicator(
+                        strokeWidth: 2,
+                        color: AymaColors.accent,
+                      ),
+                    )
+                  : null,
+              onTap: _clearingMemory ? null : _confirmClearAymaKnowledge,
               delay: 180,
-            ),
-            const SizedBox(height: 2),
-            _Tile(
-              icon: Icons.block_rounded,
-              title: 'Exclusions',
-              subtitle: 'People or traits to exclude',
-              onTap: _showExclusionsSheet,
-              delay: 220,
             ),
 
             const SizedBox(height: 20),
@@ -165,7 +410,8 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
                   : 'Temporarily hide your profile',
               trailing: _pauseLoading
                   ? const SizedBox(
-                      width: 20, height: 20,
+                      width: 20,
+                      height: 20,
                       child: CircularProgressIndicator(
                           strokeWidth: 2, color: AymaColors.accent),
                     )
@@ -208,129 +454,106 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
   }
 }
 
-// ── Exclusions sheet ──────────────────────────────────────────────────────────
+class _InlineDropdown<T> extends StatelessWidget {
+  const _InlineDropdown({
+    required this.label,
+    required this.value,
+    required this.items,
+    required this.onChanged,
+    this.format,
+  });
 
-class _ExclusionsSheet extends ConsumerStatefulWidget {
-  const _ExclusionsSheet();
-
-  @override
-  ConsumerState<_ExclusionsSheet> createState() => _ExclusionsSheetState();
-}
-
-class _ExclusionsSheetState extends ConsumerState<_ExclusionsSheet> {
-  final _ctrl = TextEditingController();
-  bool _saving = false;
-
-  @override
-  void dispose() {
-    _ctrl.dispose();
-    super.dispose();
-  }
-
-  Future<void> _save() async {
-    final text = _ctrl.text.trim();
-    setState(() => _saving = true);
-    try {
-      final profile = ref.read(profileProvider).valueOrNull;
-      final currentPrefs = Map<String, dynamic>.from(profile?.matchingPrefs ?? const {});
-      if (text.isEmpty) {
-        currentPrefs.remove('exclusions');
-      } else {
-        currentPrefs['exclusions'] = text;
-      }
-      await updateProfile({'matching_prefs': currentPrefs}, ref);
-      if (mounted) Navigator.pop(context);
-    } catch (e) {
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Could not save: $e')),
-        );
-      }
-    }
-    if (mounted) setState(() => _saving = false);
-  }
+  final String label;
+  final T? value;
+  final List<T> items;
+  final ValueChanged<T?> onChanged;
+  final String Function(T value)? format;
 
   @override
   Widget build(BuildContext context) {
-    final profile = ref.watch(profileProvider).valueOrNull;
-    if (_ctrl.text.isEmpty && profile != null) {
-      final existing = (profile.matchingPrefs['exclusions'] as String?) ?? '';
-      if (existing.isNotEmpty) _ctrl.text = existing;
-    }
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Text(
+          label,
+          style: TextStyle(color: AymaColors.fgMute, fontSize: 12),
+        ),
+        const SizedBox(height: 6),
+        Container(
+          padding: const EdgeInsets.symmetric(horizontal: 10),
+          decoration: BoxDecoration(
+            color: AymaColors.bgCard,
+            borderRadius: BorderRadius.circular(12),
+            border: Border.all(color: AymaColors.lineSoft, width: 0.5),
+          ),
+          child: DropdownButtonHideUnderline(
+            child: DropdownButton<T>(
+              value: value,
+              isExpanded: true,
+              dropdownColor: AymaColors.bgCard,
+              iconEnabledColor: AymaColors.fgDim,
+              style: const TextStyle(color: AymaColors.fg, fontSize: 13),
+              items: items
+                  .map(
+                    (item) => DropdownMenuItem<T>(
+                      value: item,
+                      child: Text(format?.call(item) ?? item.toString()),
+                    ),
+                  )
+                  .toList(),
+              onChanged: onChanged,
+            ),
+          ),
+        ),
+      ],
+    );
+  }
+}
 
-    return Padding(
-      padding: EdgeInsets.only(
-        left: 20, right: 20, top: 24,
-        bottom: MediaQuery.viewInsetsOf(context).bottom + 24,
-      ),
-      child: Column(
-        mainAxisSize: MainAxisSize.min,
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Row(
-            children: [
-              Text('Exclusions', style: AymaFonts.serif(size: 22, color: AymaColors.fg)),
-              const Spacer(),
-              GestureDetector(
-                onTap: () => Navigator.pop(context),
-                child: Icon(Icons.close_rounded, color: AymaColors.fgMute, size: 20),
-              ),
-            ],
+class _InlineTextInput extends StatelessWidget {
+  const _InlineTextInput({
+    required this.label,
+    required this.controller,
+    required this.hintText,
+    this.onSubmitted,
+  });
+
+  final String label;
+  final TextEditingController controller;
+  final String hintText;
+  final ValueChanged<String>? onSubmitted;
+
+  @override
+  Widget build(BuildContext context) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Text(
+          label,
+          style: const TextStyle(color: AymaColors.fgMute, fontSize: 12),
+        ),
+        const SizedBox(height: 6),
+        Container(
+          padding: const EdgeInsets.symmetric(horizontal: 10),
+          decoration: BoxDecoration(
+            color: AymaColors.bgCard,
+            borderRadius: BorderRadius.circular(12),
+            border: Border.all(color: AymaColors.lineSoft, width: 0.5),
           ),
-          const SizedBox(height: 8),
-          Text(
-            'Describe people or traits you\'d like Ayma to avoid in matches.',
-            style: TextStyle(color: AymaColors.fgDim, fontSize: 13, height: 1.4),
-          ),
-          const SizedBox(height: 20),
-          Container(
-            decoration: BoxDecoration(
-              color: AymaColors.bgCard,
-              borderRadius: BorderRadius.circular(14),
-              border: Border.all(color: AymaColors.lineSoft, width: 0.5),
-            ),
-            child: TextField(
-              controller: _ctrl,
-              maxLines: 4,
-              style: TextStyle(color: AymaColors.fg, fontSize: 14),
-              decoration: InputDecoration(
-                hintText: 'e.g. smokers, long-distance, under 25',
-                hintStyle: TextStyle(color: AymaColors.fgMute, fontSize: 13),
-                border: InputBorder.none,
-                contentPadding: const EdgeInsets.all(14),
-              ),
-            ),
-          ),
-          const SizedBox(height: 16),
-          GestureDetector(
-            onTap: _saving ? null : _save,
-            child: Container(
-              width: double.infinity,
-              padding: const EdgeInsets.symmetric(vertical: 16),
-              decoration: BoxDecoration(
-                color: AymaColors.fg,
-                borderRadius: BorderRadius.circular(14),
-              ),
-              child: Center(
-                child: _saving
-                    ? const SizedBox(
-                        width: 18, height: 18,
-                        child: CircularProgressIndicator(
-                            strokeWidth: 2, color: Colors.black),
-                      )
-                    : const Text(
-                        'Save',
-                        style: TextStyle(
-                          color: Colors.black,
-                          fontWeight: FontWeight.w600,
-                          fontSize: 15,
-                        ),
-                      ),
-              ),
+          child: TextField(
+            controller: controller,
+            onSubmitted: onSubmitted,
+            style: const TextStyle(color: AymaColors.fg, fontSize: 13),
+            decoration: InputDecoration(
+              hintText: hintText,
+              hintStyle:
+                  const TextStyle(color: AymaColors.fgMute, fontSize: 12),
+              border: InputBorder.none,
+              isDense: true,
             ),
           ),
-        ],
-      ),
+        ),
+      ],
     );
   }
 }
@@ -342,12 +565,12 @@ class _SectionLabel extends StatelessWidget {
   const _SectionLabel(this.text);
   @override
   Widget build(BuildContext context) => Padding(
-    padding: const EdgeInsets.only(bottom: 10),
-    child: Text(
-      text.toUpperCase(),
-      style: AymaFonts.mono(size: 9, color: AymaColors.fgMute),
-    ),
-  );
+        padding: const EdgeInsets.only(bottom: 10),
+        child: Text(
+          text.toUpperCase(),
+          style: AymaFonts.mono(size: 9, color: AymaColors.fgMute),
+        ),
+      );
 }
 
 class _Tile extends StatelessWidget {
@@ -409,11 +632,15 @@ class _Tile extends StatelessWidget {
             if (trailing != null)
               trailing!
             else if (onTap != null)
-              Icon(Icons.chevron_right_rounded, size: 16, color: AymaColors.fgMute),
+              Icon(Icons.chevron_right_rounded,
+                  size: 16, color: AymaColors.fgMute),
           ],
         ),
       ),
-    ).animate(delay: Duration(milliseconds: delay)).fadeIn(duration: 300.ms).slideX(begin: 0.03, end: 0);
+    )
+        .animate(delay: Duration(milliseconds: delay))
+        .fadeIn(duration: 300.ms)
+        .slideX(begin: 0.03, end: 0);
   }
 }
 
@@ -438,7 +665,8 @@ class _SignOutTile extends ConsumerWidget {
         child: Row(
           mainAxisAlignment: MainAxisAlignment.center,
           children: [
-            Icon(Icons.logout_rounded, size: 16, color: Colors.redAccent.shade100),
+            Icon(Icons.logout_rounded,
+                size: 16, color: Colors.redAccent.shade100),
             const SizedBox(width: 8),
             Text(
               'Sign out',
