@@ -434,42 +434,56 @@ class FirestoreService {
       return '- [$date]($url)\n$caption';
     }).join('\n\n');
 
-    final skills = (data['skills'] as Map<String, dynamic>?) ?? const {};
     final matchingPrefs =
         (data['matching_prefs'] as Map<String, dynamic>?) ?? const {};
 
+    // Wiki fields are AI-maintained by /post-turn — read them directly.
+    // profile_public is the separate user-controlled public bio.
     final aboutMe = _firstNonEmpty([
-      data['profile_public'],
+      data['wiki_about_me'],
       data['about_me'],
-      skills['about_me'],
-      skills['bio'],
-    ]) ??
-        _composeAboutMeFallback(data);
+    ]) ?? _composeAboutMeFallback(data);
 
     final preferences = _firstNonEmpty([
-      data['profile_private'],
+      data['wiki_preferences'],
       data['preferences'],
-      skills['preferences'],
-      skills['match_preferences'],
-    ]) ??
-        _composePreferencesFallback(matchingPrefs);
+    ]) ?? _composePreferencesFallback(matchingPrefs);
 
     final context = _firstNonEmpty([
-      data['profile_ai_observations'],
+      data['wiki_context'],
       data['context'],
-      skills['context'],
-      skills['current_chapter'],
-    ]) ??
-        '';
+      data['profile_ai_observations'],
+    ]) ?? '';
 
+    final matching = _firstNonEmpty([data['wiki_matching']]) ?? '';
     final publicProfile = _firstNonEmpty([data['profile_public']]) ?? '';
 
+    // Provenance timestamps — written by /post-turn alongside each wiki update.
+    String ts(String key) {
+      final v = data[key];
+      if (v is Timestamp) {
+        final dt = v.toDate().toLocal();
+        return '${dt.year}-${dt.month.toString().padLeft(2, '0')}-${dt.day.toString().padLeft(2, '0')}';
+      }
+      return '';
+    }
+    String sid(String key) => (data[key] as String?) ?? '';
+
     return {
-      'about_me': aboutMe,
-      'preferences': preferences,
-      'context': context,
-      'media': mediaLines,
-      'public_profile': publicProfile,
+      'about_me':              aboutMe,
+      'about_me_updated_at':   ts('wiki_about_me_updated_at'),
+      'about_me_session_id':   sid('wiki_about_me_session_id'),
+      'preferences':             preferences,
+      'preferences_updated_at':  ts('wiki_preferences_updated_at'),
+      'preferences_session_id':  sid('wiki_preferences_session_id'),
+      'context':               context,
+      'context_updated_at':    ts('wiki_context_updated_at'),
+      'context_session_id':    sid('wiki_context_session_id'),
+      'matching':              matching,
+      'matching_updated_at':   ts('wiki_matching_updated_at'),
+      'matching_session_id':   sid('wiki_matching_session_id'),
+      'media':                 mediaLines,
+      'public_profile':        publicProfile,
     };
   }
 

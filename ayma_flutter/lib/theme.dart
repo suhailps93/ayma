@@ -22,10 +22,10 @@ class AymaColors {
   static const fgDim  = Color(0xFFBAB3A3); // oklch(0.74 0.010 70)
   static const fgMute = Color(0xFF7E7669); // oklch(0.52 0.008 70)
 
-  // Accent — warm amber (oklch 0.72 0.11 45)
-  static const accent      = Color(0xFFF1C45A); // Sunlight Golden
-  static const accentSoft  = Color(0x2EF1C45A); // ~18% alpha
-  static const accentFaint = Color(0x14F1C45A); // ~8% alpha
+  // Accent — Ember oklch(0.72 0.11 45) — warm terracotta-leaning orange
+  static const accent      = Color(0xFFDE8E69);
+  static const accentSoft  = Color(0x2EDE8E69); // ~18% alpha
+  static const accentFaint = Color(0x14DE8E69); // ~8% alpha
 
   // Legacy aliases (keep existing code compiling)
   static const surface   = bgElev;
@@ -38,17 +38,17 @@ class AymaColors {
   static const textTertiary  = fgMute;
 
   static const gold        = accent;
-  static const goldBright  = Color(0xFFD49A2A);
-  static const goldSun     = Color(0xFFF1C45A); // Warm sunlight gold
-  static const goldDim     = Color(0xFF7A5C0A);
-  static const goldGlow    = Color(0x22F1C45A);
-  static const goldGlowMid = Color(0x44F1C45A);
+  static const goldBright  = Color(0xFFCA7048); // ember bright
+  static const goldSun     = Color(0xFFDE8E69); // ember base
+  static const goldDim     = Color(0xFF7A3D20); // ember dark
+  static const goldGlow    = Color(0x22DE8E69);
+  static const goldGlowMid = Color(0x44DE8E69);
   static const accentDark  = goldDim;
   static const accentGlow  = goldGlow;
 
   static const success = Color(0xFF4CAF7D);
   static const error   = Color(0xFFCF4B4B);
-  static const warning = Color(0xFFD49A2A);
+  static const warning = Color(0xFFCA7048);
 
   static const LinearGradient accentGradient = LinearGradient(
     colors: [goldBright, accent, goldDim],
@@ -57,7 +57,7 @@ class AymaColors {
   );
 
   static const LinearGradient orbGradient = LinearGradient(
-    colors: [Color(0xFFEBD5A8), accent, goldDim],
+    colors: [Color(0xFFEDC9B0), accent, goldDim],
     begin: Alignment.topLeft,
     end: Alignment.bottomRight,
   );

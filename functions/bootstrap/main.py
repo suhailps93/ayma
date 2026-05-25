@@ -407,7 +407,11 @@ async def post_turn(body: PostTurnRequest, uid: str = Depends(verify_token)):
         _upsert_wiki_field(model, "matching",    current["matching"],    conversation, WIKI_MATCHING_PROMPT),
     )
 
+    now = datetime.now(timezone.utc)
     wiki_updates = {f"wiki_{field}": text for field, text in wiki_results}
+    for field, _ in wiki_results:
+        wiki_updates[f"wiki_{field}_updated_at"] = now
+        wiki_updates[f"wiki_{field}_session_id"] = body.session_id
     user_ref.update(wiki_updates)
 
     # Check which questions are now answered

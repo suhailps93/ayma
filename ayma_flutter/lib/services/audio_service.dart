@@ -83,8 +83,10 @@ class AymaAudioService extends ChangeNotifier {
 
   double _inputVolume = 0;
   double _outputVolume = 0;
+  double _rawInputVolume = 0; // PCM-RMS based, updated every chunk ~20ms
   double get inputVolume => _inputVolume;
   double get outputVolume => _outputVolume;
+  double get rawInputVolume => _rawInputVolume;
 
   bool _userTalking = false;
   bool get userTalking => _userTalking;
@@ -774,7 +776,7 @@ class AymaAudioService extends ChangeNotifier {
   void _notifyMetersThrottled() {
     final now = DateTime.now();
     if (now.difference(_lastMeterUiUpdate) <
-        const Duration(milliseconds: 120)) {
+        const Duration(milliseconds: 40)) {
       return;
     }
     _lastMeterUiUpdate = now;
@@ -784,6 +786,11 @@ class AymaAudioService extends ChangeNotifier {
   StreamSink<Uint8List> _recorderSink() {
     final ctrl = StreamController<Uint8List>();
     ctrl.stream.listen((data) {
+      final rms = _pcmRms(data);
+      _rawInputVolume = rms > _rawInputVolume
+          ? _rawInputVolume * 0.3 + rms * 0.7
+          : _rawInputVolume * 0.55 + rms * 0.45;
+      _notifyMetersThrottled();
       if (!_muted) _bufferAudio(data);
     });
     return ctrl.sink;
@@ -958,11 +965,13 @@ class AymaAudioService extends ChangeNotifier {
       _setState(SessionState.thinking);
     }
 
+    String textTurnReply = '';
     try {
       await _bootstrapTextChatIfNeeded();
       // Always send the exact history entry text so attachment context is preserved.
       final requestText = historyText;
       final reply = await _geminiTextChat(requestText, attachments: attachments);
+      textTurnReply = reply;
       if (reply.isNotEmpty) {
         _addTranscript(reply, isUser: false);
         return true;
@@ -975,6 +984,8 @@ class AymaAudioService extends ChangeNotifier {
       _addAssistantFallbackMessage();
       return false;
     } finally {
+      _pendingUserText = historyText;
+      _pendingAgentText = textTurnReply;
       unawaited(_commitTurnToBackend());
       if (!liveSessionActive) {
         _setState(SessionState.disconnected);
@@ -1031,6 +1042,7 @@ class AymaAudioService extends ChangeNotifier {
       _speechAttackFrames = 0;
       _lastVoiceAboveStopAt = null;
       _inputVolume = 0;
+      _rawInputVolume = 0;
     }
     if (s != SessionState.speaking) _outputVolume = 0;
     notifyListeners();

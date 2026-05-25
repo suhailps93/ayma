@@ -334,6 +334,10 @@ class _MatchCardState extends ConsumerState<MatchCard> {
   Widget build(BuildContext context) {
     final effectiveStatus = _localStatus ?? m.status;
     final seed = m.id.hashCode.abs() % 30 + 1;
+    final otherId = m.userA == m.currentUserId ? m.userB : m.userA;
+    final otherProfile = ref.watch(userProfileByIdProvider(otherId)).valueOrNull;
+    final rawName = (otherProfile?['display_name'] as String? ?? '').trim();
+    final displayFirst = rawName.isEmpty ? 'Someone new' : rawName.split(' ').first;
     final h1 = (seed * 37) % 360;
     final h2 = (h1 + 40) % 360;
 
@@ -390,7 +394,7 @@ class _MatchCardState extends ConsumerState<MatchCard> {
                             crossAxisAlignment: CrossAxisAlignment.start,
                             children: [
                               Text(
-                                'Match',
+                                displayFirst,
                                 style: AymaFonts.serif(size: 24, color: AymaColors.fg),
                               ),
                               const SizedBox(height: 2),

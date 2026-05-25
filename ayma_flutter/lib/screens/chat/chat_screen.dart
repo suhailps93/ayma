@@ -315,6 +315,8 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
         ref.watch(audioServiceProvider.select((a) => a.inputVolume));
     final outputVol =
         ref.watch(audioServiceProvider.select((a) => a.outputVolume));
+    final rawInputVol =
+        ref.watch(audioServiceProvider.select((a) => a.rawInputVolume));
     final userTalking =
         ref.watch(audioServiceProvider.select((a) => a.userTalking));
     final transcript = _audioService.transcript;
@@ -357,6 +359,7 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
               textCtrl: _textCtrl,
               focusNode: _focusNode,
               inputVolume: inputVol,
+              rawInputVolume: rawInputVol,
               outputVolume: outputVol,
               userTalking: userTalking,
               hasAttachment: _drafts.isNotEmpty,
@@ -600,6 +603,7 @@ class _InputBar extends StatefulWidget {
   final TextEditingController textCtrl;
   final FocusNode focusNode;
   final double inputVolume;
+  final double rawInputVolume;
   final double outputVolume;
   final bool hasAttachment;
   final List<_DraftAttachment> drafts;
@@ -615,6 +619,7 @@ class _InputBar extends StatefulWidget {
     required this.textCtrl,
     required this.focusNode,
     required this.inputVolume,
+    required this.rawInputVolume,
     required this.outputVolume,
     required this.userTalking,
     required this.hasAttachment,
@@ -661,6 +666,7 @@ class _InputBarState extends State<_InputBar>
   bool get _aymaActive =>
       widget.state == SessionState.speaking || widget.userTalking;
   bool get _voiceActive =>
+      widget.state == SessionState.connecting ||
       widget.state == SessionState.listening ||
       widget.state == SessionState.speaking ||
       widget.state == SessionState.thinking ||
@@ -672,7 +678,7 @@ class _InputBarState extends State<_InputBar>
 
   double get _volume => widget.state == SessionState.speaking
       ? widget.outputVolume
-      : widget.inputVolume;
+      : widget.rawInputVolume;
 
   @override
   Widget build(BuildContext context) {
@@ -787,9 +793,11 @@ class _InputBarState extends State<_InputBar>
                                     _DockActionCircle(
                                       icon: _canSend
                                           ? Icons.arrow_upward_rounded
-                                          : _voiceActive
-                                              ? Icons.mic_rounded
-                                              : Icons.mic_none_rounded,
+                                          : widget.state == SessionState.connecting
+                                              ? Icons.more_horiz_rounded
+                                              : _voiceActive
+                                                  ? Icons.mic_rounded
+                                                  : Icons.mic_none_rounded,
                                       onTap: _canSend
                                           ? () => widget.onSend()
                                           : widget.onMicTap,
@@ -1022,7 +1030,7 @@ class _ComposerOutlinePainter extends CustomPainter {
     final level = volume.clamp(0.0, 1.0);
     // AI talks on top, User talks on bottom
     final bool aiTalking = isAiTalking && level > 0.005;
-    final bool userTalking = isUserTalking && level > 0.005;
+    final bool userTalking = !isAiTalking && level > 0.015;
 
     final freqMod = 1.0 + level * 0.45;
     final speedMod = 1.0 + level * 0.6;

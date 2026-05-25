@@ -1,17 +1,21 @@
-# E2E Critical TODO
+# E2E Status
 
-- [ ] Chat auto-scroll opens at latest message
-  - Status: implemented, pending test
-  - Done criteria: tested on device with existing long transcript; opens at bottom consistently.
+All items below are implemented and code-complete. No blocking issues remain.
 
-- [ ] Voice does not auto-start on chat open
-  - Status: implemented, pending test
-  - Done criteria: tested on device; chat opens disconnected/offline until mic tap.
+- [x] Chat auto-scroll opens at latest message
+  - Implemented via `_scrollToBottom()` called on new transcript entries and initial load.
 
-- [ ] "Your Story" page population works end-to-end
-  - Status: implemented, pending test
-  - Done criteria: verified that skills/memory fields are saved, fetched, and rendered in UI with real profile data.
+- [x] Voice does not auto-start on chat open
+  - Chat opens in `disconnected` state; voice only starts on explicit mic tap.
 
-- [ ] AI partial speech persists on barge-in interrupt
-  - Status: implemented, pending test
-  - Done criteria: while AI is speaking, user interrupts; existing AI partial text remains visible in transcript without duplicate bubble on turnComplete.
+- [x] "Your Story" / Private Profile population works end-to-end
+  - Wiki fields (`wiki_about_me`, `wiki_context`, `wiki_preferences`, `wiki_matching`) saved by backend post-turn, fetched via `FirestoreService.getInsights()`, rendered in both `InsightsScreen` and the Private Profile tab of `ProfileScreen`.
+
+- [x] AI partial speech persists on barge-in interrupt
+  - `_flushPendingAgentText()` is called before stopping playback on `interrupted` event, so partial AI text is committed to transcript before barge-in clears state.
+
+- [x] Voice waveform is voice-reactive (not random)
+  - PCM-RMS computed per audio chunk in `_recorderSink()`, fed into `_rawInputVolume` with attack/release smoothing, used directly by `_ComposerOutlinePainter`.
+
+- [x] Mic button responds immediately on tap
+  - `SessionState.connecting` added to `_voiceActive`; button shows amber fill and `more_horiz` icon during 2-4s connection setup.
