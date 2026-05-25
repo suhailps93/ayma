@@ -1,0 +1,12 @@
+port: 3000
+defaults:
+  runtime: tmux
+  agent: opencode
+env:
+  OPENAI_API_BASE: "https://api.deepseek.com/v1" 
+  OPENAI_API_KEY: "sk-0f1e030aa1cf4217a4a1087380f11546"
+  # 1. Provide your DeepSeek API Key here
+  DEEPSEEK_API_KEY: "sk-0f1e030aa1cf4217a4a1087380f11546"
+
+  # 2. Tell Aider explicitly to use DeepSeek's flagship coder model
+  AIDER_MODEL: "deepseek/deepseek-coder"

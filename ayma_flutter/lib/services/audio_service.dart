@@ -153,7 +153,8 @@ class AymaAudioService extends ChangeNotifier {
     await _loadTranscriptForActiveUser();
   }
 
-  String _transcriptStorageKeyFor(String uid) => '$_transcriptStoragePrefix$uid';
+  String _transcriptStorageKeyFor(String uid) =>
+      '$_transcriptStoragePrefix$uid';
 
   Future<void> _onAuthUserChanged(String? nextUid) async {
     if (_activeUid == nextUid) return;
@@ -318,7 +319,8 @@ class AymaAudioService extends ChangeNotifier {
     debugPrint('[ws] opening Gemini Live $wsUri');
 
     if (setup != null) {
-      final mergedSetup = _mergeSetupWithClientInstructions(setup);
+      final mergedSetup =
+          _normalizeLiveSetupPayload(_mergeSetupWithClientInstructions(setup));
       _channel!.sink.add(jsonEncode({'setup': mergedSetup}));
       debugPrint('[ws] full setup sent');
     } else {
@@ -378,7 +380,9 @@ class AymaAudioService extends ChangeNotifier {
   }
 
   void _scheduleReconnect() {
-    if (_manualDisconnect || _connectFuture != null || !_allowAutoReconnect) return;
+    if (_manualDisconnect || _connectFuture != null || !_allowAutoReconnect) {
+      return;
+    }
     if (_reconnectAttempts >= 5) {
       debugPrint('[ws] reconnect limit reached');
       return;
@@ -767,7 +771,8 @@ class AymaAudioService extends ChangeNotifier {
     if (wasTalking != _userTalking) {
       _userTalkingDebounce?.cancel();
       if (_userTalking) {
-        _userTalkingDebounce = Timer(const Duration(milliseconds: releaseMs), () {});
+        _userTalkingDebounce =
+            Timer(const Duration(milliseconds: releaseMs), () {});
       }
       notifyListeners();
     }
@@ -775,8 +780,7 @@ class AymaAudioService extends ChangeNotifier {
 
   void _notifyMetersThrottled() {
     final now = DateTime.now();
-    if (now.difference(_lastMeterUiUpdate) <
-        const Duration(milliseconds: 40)) {
+    if (now.difference(_lastMeterUiUpdate) < const Duration(milliseconds: 40)) {
       return;
     }
     _lastMeterUiUpdate = now;
@@ -970,7 +974,8 @@ class AymaAudioService extends ChangeNotifier {
       await _bootstrapTextChatIfNeeded();
       // Always send the exact history entry text so attachment context is preserved.
       final requestText = historyText;
-      final reply = await _geminiTextChat(requestText, attachments: attachments);
+      final reply =
+          await _geminiTextChat(requestText, attachments: attachments);
       textTurnReply = reply;
       if (reply.isNotEmpty) {
         _addTranscript(reply, isUser: false);
@@ -1080,7 +1085,8 @@ class AymaAudioService extends ChangeNotifier {
     // Keep context history in sync for text API calls
     _textHistory.add({
       'role': isUser ? 'user' : 'model',
-      'text': _stampHistoryText(DateTime.now(), (historyText ?? normalized).trim()),
+      'text':
+          _stampHistoryText(DateTime.now(), (historyText ?? normalized).trim()),
     });
     if (_textHistory.length > 50) {
       _textHistory.removeAt(0);
@@ -1208,6 +1214,42 @@ $contextLines
     });
     merged['tools'] = tools;
     return merged;
+  }
+
+  static const Map<String, String> _liveSetupKeyAliases = {
+    'system_instruction': 'systemInstruction',
+    'generation_config': 'generationConfig',
+    'speech_config': 'speechConfig',
+    'voice_config': 'voiceConfig',
+    'prebuilt_voice_config': 'prebuiltVoiceConfig',
+    'voice_name': 'voiceName',
+    'function_declarations': 'functionDeclarations',
+    'response_modalities': 'responseModalities',
+  };
+
+  Map<String, dynamic> _normalizeLiveSetupPayload(Map<String, dynamic> setup) {
+    dynamic normalize(dynamic value) {
+      if (value is Map) {
+        final out = <String, dynamic>{};
+        value.forEach((key, v) {
+          final rawKey = key.toString();
+          final mappedKey = _liveSetupKeyAliases[rawKey] ?? rawKey;
+          final normalizedValue = normalize(v);
+          if (mappedKey == 'type' && normalizedValue is String) {
+            out[mappedKey] = normalizedValue.toLowerCase();
+          } else {
+            out[mappedKey] = normalizedValue;
+          }
+        });
+        return out;
+      }
+      if (value is List) {
+        return value.map(normalize).toList();
+      }
+      return value;
+    }
+
+    return normalize(setup) as Map<String, dynamic>;
   }
 
   Future<List<Map<String, dynamic>>> _buildUserParts({

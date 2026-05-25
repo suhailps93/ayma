@@ -1,0 +1,50 @@
+#!/usr/bin/env bash
+# adb-ts — connect ADB to an Android device over Tailscale
+#
+# Usage:
+#   adb-ts <tailscale-ip> <connect-port>
+#   adb-ts 100.x.x.x 46271
+#
+# The connect-port is shown on the phone under:
+#   Settings → Developer options → Wireless debugging
+# (It changes every time Wireless Debugging is toggled off/on)
+
+set -euo pipefail
+
+# Pixel 10 Pro Fold Tailscale IP (permanent — only the port changes)
+DEFAULT_IP="100.126.187.19"
+
+PHONE_IP="${1:-$DEFAULT_IP}"
+PHONE_PORT="${2:-}"
+
+if [[ -z "$PHONE_PORT" ]]; then
+  echo "Usage: adb-ts <port>  (or: adb-ts <tailscale-ip> <port>)"
+  echo "  e.g. adb-ts 44119"
+  echo "  Port is shown on phone: Settings → Developer options → Wireless debugging"
+  exit 1
+fi
+
+# Allow single-arg shorthand: adb-ts 44119
+if [[ -z "$2" ]]; then
+  PHONE_PORT="$1"
+  PHONE_IP="$DEFAULT_IP"
+fi
+
+TARGET="${PHONE_IP}:${PHONE_PORT}"
+
+echo "→ Killing old ADB server..."
+adb kill-server
+
+echo "→ Starting fresh ADB server..."
+adb start-server
+
+echo "→ Connecting to ${TARGET}..."
+adb connect "$TARGET"
+
+echo ""
+echo "→ Devices:"
+adb devices -l
+
+echo ""
+echo "→ Ready. Run the app with:"
+echo "   cd /home/suhailps/latest_claude/ayma/ayma_flutter && flutter run -d ${TARGET}"

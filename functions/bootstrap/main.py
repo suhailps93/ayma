@@ -28,7 +28,7 @@ db = firestore.client()
 
 GOOGLE_API_KEY = os.environ["GOOGLE_API_KEY"]
 LIVE_MODEL = os.environ.get("LIVE_MODEL", "gemini-3.1-flash-live-preview")
-TEXT_MODEL = os.environ.get("TEXT_MODEL", "gemini-2.5-flash")
+TEXT_MODEL = os.environ.get("TEXT_MODEL", "gemini-3-flash-preview")
 
 genai.configure(api_key=GOOGLE_API_KEY)
 
