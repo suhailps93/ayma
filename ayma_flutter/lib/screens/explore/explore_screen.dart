@@ -248,7 +248,7 @@ class _AgeFilterChip extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final isDefault = ageMin == 18 && ageMax == 60;
+    final isDefault = ageMin == 0 && ageMax == 120;
     return GestureDetector(
       onTap: () => _showAgeSheet(context),
       child: AnimatedContainer(
@@ -263,7 +263,7 @@ class _AgeFilterChip extends StatelessWidget {
           ),
         ),
         child: Text(
-          '$ageMin–$ageMax yrs',
+          isDefault ? 'Any age' : '$ageMin–$ageMax yrs',
           style: TextStyle(
             fontSize: 12,
             color: !isDefault ? AymaColors.accent : AymaColors.fgDim,
@@ -289,8 +289,8 @@ class _AgeFilterChip extends StatelessWidget {
               const SizedBox(height: 12),
               RangeSlider(
                 values: RangeValues(min.toDouble(), max.toDouble()),
-                min: 18, max: 70,
-                divisions: 52,
+                min: 0, max: 120,
+                divisions: 120,
                 activeColor: AymaColors.accent,
                 inactiveColor: AymaColors.lineSoft,
                 onChanged: (v) {

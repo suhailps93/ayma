@@ -799,8 +799,8 @@ class FirestoreService {
 
   static Future<List<Map<String, dynamic>>> explore({
     String? gender,
-    int ageMin = 18,
-    int ageMax = 60,
+    int ageMin = 0,
+    int ageMax = 120,
     String query = '',
   }) async {
     // Keep query shape simple to reduce composite-index requirements.
@@ -812,12 +812,12 @@ class FirestoreService {
     final lowerQuery = query.toLowerCase();
     final normalizedGenderFilter = _normalizeGender(gender ?? '');
     final genderVariants = _genderVariants(normalizedGenderFilter);
-    return snap.docs
+    final people = snap.docs
         .map((d) => d.data()..['id'] = d.id)
         .where((d) {
       final age = d['age'];
       final ageValue = age is num ? age.toInt() : null;
-      if (ageValue == null || ageValue < ageMin || ageValue > ageMax) {
+      if (ageValue != null && (ageValue < ageMin || ageValue > ageMax)) {
         return false;
       }
 
@@ -834,6 +834,25 @@ class FirestoreService {
       final bio = ((d['profile_public'] as String?) ?? '').toLowerCase();
       return name.contains(lowerQuery) || bio.contains(lowerQuery);
     }).toList();
+
+    // Ensure the current user's own profile is visible in Explore too.
+    final myDoc = await _db.collection('users').doc(_uid).get();
+    final myData = myDoc.data();
+    if (myData != null) {
+      final mine = <String, dynamic>{...myData, 'id': _uid};
+      final alreadyIncluded = people.any((p) => (p['id'] as String?) == _uid);
+      if (!alreadyIncluded) {
+        people.add(mine);
+      }
+    }
+
+    // Stable, neutral ordering (not pinned to top).
+    people.sort((a, b) {
+      final an = ((a['display_name'] as String?) ?? '').toLowerCase();
+      final bn = ((b['display_name'] as String?) ?? '').toLowerCase();
+      return an.compareTo(bn);
+    });
+    return people;
   }
 
   static String _normalizeGender(String raw) {

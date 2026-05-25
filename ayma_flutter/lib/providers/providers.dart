@@ -169,8 +169,8 @@ class ExploreFilters {
   const ExploreFilters({
     this.tab = 'people',
     this.gender,
-    this.ageMin = 18,
-    this.ageMax = 60,
+    this.ageMin = 0,
+    this.ageMax = 120,
     this.radiusKm = 50,
     this.query = '',
   });

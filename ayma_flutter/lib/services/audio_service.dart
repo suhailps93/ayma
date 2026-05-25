@@ -114,7 +114,6 @@ class AymaAudioService extends ChangeNotifier {
   String _sessionId = DateTime.now().millisecondsSinceEpoch.toString();
 
   bool _restoredTranscript = false;
-  bool _liveHistorySeeded = false;
   String _pendingTurnUser = '';
   String _pendingTurnModel = '';
   String _pendingDisplayModel = '';
@@ -210,7 +209,6 @@ class AymaAudioService extends ChangeNotifier {
 
     _setState(SessionState.connecting);
     _sessionId = DateTime.now().millisecondsSinceEpoch.toString();
-    _liveHistorySeeded = false;
 
     if (!kIsWeb) {
       final permission = await Permission.microphone.request();
@@ -331,7 +329,7 @@ class AymaAudioService extends ChangeNotifier {
     if (msg.containsKey('setupComplete')) {
       _setState(SessionState.ready);
       unawaited(_startRecorderAndBegin());
-      unawaited(_seedHistoryIntoLiveOnce());
+      _setState(SessionState.listening);
       return;
     }
 
@@ -450,33 +448,6 @@ class AymaAudioService extends ChangeNotifier {
     } catch (e) {
       return 'error: $e';
     }
-  }
-
-  Future<void> _seedHistoryIntoLiveOnce() async {
-    if (_liveHistorySeeded) return;
-    if (_channel == null || _history.isEmpty) {
-      _liveHistorySeeded = true;
-      return;
-    }
-
-    final turns = _history.take(12).map((h) {
-      return {
-        'role': h['role'] == 'user' ? 'user' : 'model',
-        'parts': [
-          {'text': h['text'] ?? ''}
-        ],
-      };
-    }).toList();
-
-    _channel!.sink.add(jsonEncode({
-      'clientContent': {
-        'turns': turns,
-        'turnComplete': true,
-      }
-    }));
-
-    _liveHistorySeeded = true;
-    _setState(SessionState.listening);
   }
 
   Future<void> _commitTurnToBackend() async {
