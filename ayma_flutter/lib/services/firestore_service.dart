@@ -1,3 +1,5 @@
+import 'dart:collection';
+
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 
@@ -32,6 +34,29 @@ class FirestoreService {
         .set(fields, SetOptions(merge: true));
   }
 
+  /// Called when user manually edits their bio — marks it as user-edited.
+  static Future<void> saveUserBio(String bio) async {
+    await _db.collection('users').doc(_uid).set({
+      'profile_public': bio,
+      'profile_public_user_edited': true,
+    }, SetOptions(merge: true));
+  }
+
+  /// Accept Ayma's pending suggestion (optionally edited by user).
+  static Future<void> acceptPendingBioSuggestion(String text) async {
+    await _db.collection('users').doc(_uid).set({
+      'profile_public': text,
+      'profile_public_pending': FieldValue.delete(),
+    }, SetOptions(merge: true));
+  }
+
+  /// Decline Ayma's pending suggestion.
+  static Future<void> declinePendingBioSuggestion() async {
+    await _db.collection('users').doc(_uid).set({
+      'profile_public_pending': FieldValue.delete(),
+    }, SetOptions(merge: true));
+  }
+
   static Future<Map<String, dynamic>?> getPublicProfile(String userId) async {
     final userDoc = await _db.collection('users').doc(userId).get();
     if (!userDoc.exists) return null;
@@ -49,12 +74,48 @@ class FirestoreService {
           .where((u) => u.isNotEmpty)
           .toList();
     } catch (_) {
-      // Keep profile usable even if media query is missing index or denied.
+      // Fallback path for environments where orderBy query may be blocked.
+      try {
+        final mediaSnap = await _db
+            .collection('media')
+            .where('user_id', isEqualTo: userId)
+            .limit(50)
+            .get();
+        final docs = mediaSnap.docs.toList()
+          ..sort((a, b) {
+            final ta = a.data()['created_at'];
+            final tb = b.data()['created_at'];
+            final ma = ta is Timestamp ? ta.millisecondsSinceEpoch : 0;
+            final mb = tb is Timestamp ? tb.millisecondsSinceEpoch : 0;
+            return mb.compareTo(ma);
+          });
+        photos = docs
+            .map((d) => (d.data()['photo_url'] as String?) ?? '')
+            .where((u) => u.isNotEmpty)
+            .take(24)
+            .toList();
+      } catch (_) {
+        // Keep profile usable even if media query is denied.
+      }
+    }
+    final dedupedPhotos = LinkedHashSet<String>.from(photos).toList();
+    final savedOrder = ((data['photo_order'] as List?) ?? const [])
+        .whereType<String>()
+        .toList();
+    if (savedOrder.isNotEmpty) {
+      final rank = <String, int>{
+        for (var i = 0; i < savedOrder.length; i++) savedOrder[i]: i,
+      };
+      dedupedPhotos.sort((a, b) {
+        final ra = rank[a] ?? 1 << 20;
+        final rb = rank[b] ?? 1 << 20;
+        return ra.compareTo(rb);
+      });
     }
     return {
       ...data,
       'id': userId,
-      'photos': photos,
+      'photos': dedupedPhotos,
     };
   }
 
@@ -795,6 +856,32 @@ class FirestoreService {
     });
   }
 
+  static Future<void> deleteMediaByUrl(String photoUrl) async {
+    final snap = await _db
+        .collection('media')
+        .where('user_id', isEqualTo: _uid)
+        .where('photo_url', isEqualTo: photoUrl)
+        .get();
+    if (snap.docs.isEmpty) return;
+    final batch = _db.batch();
+    for (final d in snap.docs) {
+      batch.delete(d.reference);
+    }
+    batch.set(
+        _db.collection('users').doc(_uid),
+        {
+          'photo_order': FieldValue.arrayRemove([photoUrl]),
+        },
+        SetOptions(merge: true));
+    await batch.commit();
+  }
+
+  static Future<void> updatePhotoOrder(List<String> orderedUrls) async {
+    await _db.collection('users').doc(_uid).set({
+      'photo_order': orderedUrls,
+    }, SetOptions(merge: true));
+  }
+
   // ── Explore ────────────────────────────────────────────────────────────────
 
   static Future<List<Map<String, dynamic>>> explore({
@@ -812,9 +899,7 @@ class FirestoreService {
     final lowerQuery = query.toLowerCase();
     final normalizedGenderFilter = _normalizeGender(gender ?? '');
     final genderVariants = _genderVariants(normalizedGenderFilter);
-    final people = snap.docs
-        .map((d) => d.data()..['id'] = d.id)
-        .where((d) {
+    final people = snap.docs.map((d) => d.data()..['id'] = d.id).where((d) {
       final age = d['age'];
       final ageValue = age is num ? age.toInt() : null;
       if (ageValue != null && (ageValue < ageMin || ageValue > ageMax)) {

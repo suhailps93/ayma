@@ -13,6 +13,8 @@ class UserProfile {
   final String communityProfile;
   final bool onboardingComplete;
   final bool matchingPaused;
+  final bool profilePublicUserEdited;
+  final String? profilePublicPending;
 
   const UserProfile({
     required this.id,
@@ -29,6 +31,8 @@ class UserProfile {
     required this.communityProfile,
     required this.onboardingComplete,
     required this.matchingPaused,
+    this.profilePublicUserEdited = false,
+    this.profilePublicPending,
   });
 
   factory UserProfile.fromMap(Map<String, dynamic> m) => UserProfile(
@@ -43,9 +47,11 @@ class UserProfile {
     age:                  m['age'] as int?,
     gender:               m['gender'] as String?,
     locationRegion:       m['location_region'] as String?,
-    communityProfile:     (m['community_profile'] as String?) ?? 'dating_standard',
-    onboardingComplete:   (m['onboarding_complete'] as bool?) ?? false,
-    matchingPaused:       (m['matching_paused'] as bool?) ?? false,
+    communityProfile:          (m['community_profile'] as String?) ?? 'dating_standard',
+    onboardingComplete:        (m['onboarding_complete'] as bool?) ?? false,
+    matchingPaused:            (m['matching_paused'] as bool?) ?? false,
+    profilePublicUserEdited:   (m['profile_public_user_edited'] as bool?) ?? false,
+    profilePublicPending:      m['profile_public_pending'] as String?,
   );
 
   UserProfile copyWith({
@@ -61,20 +67,29 @@ class UserProfile {
     String? locationRegion,
     bool? onboardingComplete,
     bool? matchingPaused,
+    bool? profilePublicUserEdited,
+    // Use Object? sentinel so callers can explicitly clear profilePublicPending.
+    Object? profilePublicPending = _sentinel,
   }) => UserProfile(
-    id:                   id,
-    displayName:          displayName ?? this.displayName,
-    profilePublic:        profilePublic ?? this.profilePublic,
-    profilePrivate:       profilePrivate ?? this.profilePrivate,
-    profilePublicLocked:  profilePublicLocked ?? this.profilePublicLocked,
-    agentName:            agentName ?? this.agentName,
-    voicePreference:      voicePreference ?? this.voicePreference,
-    matchingPrefs:        matchingPrefs ?? this.matchingPrefs,
-    age:                  age ?? this.age,
-    gender:               gender ?? this.gender,
-    locationRegion:       locationRegion ?? this.locationRegion,
-    communityProfile:     communityProfile,
-    onboardingComplete:   onboardingComplete ?? this.onboardingComplete,
-    matchingPaused:       matchingPaused ?? this.matchingPaused,
+    id:                        id,
+    displayName:               displayName ?? this.displayName,
+    profilePublic:             profilePublic ?? this.profilePublic,
+    profilePrivate:            profilePrivate ?? this.profilePrivate,
+    profilePublicLocked:       profilePublicLocked ?? this.profilePublicLocked,
+    agentName:                 agentName ?? this.agentName,
+    voicePreference:           voicePreference ?? this.voicePreference,
+    matchingPrefs:             matchingPrefs ?? this.matchingPrefs,
+    age:                       age ?? this.age,
+    gender:                    gender ?? this.gender,
+    locationRegion:            locationRegion ?? this.locationRegion,
+    communityProfile:          communityProfile,
+    onboardingComplete:        onboardingComplete ?? this.onboardingComplete,
+    matchingPaused:            matchingPaused ?? this.matchingPaused,
+    profilePublicUserEdited:   profilePublicUserEdited ?? this.profilePublicUserEdited,
+    profilePublicPending:      profilePublicPending == _sentinel
+        ? this.profilePublicPending
+        : profilePublicPending as String?,
   );
 }
+
+const Object _sentinel = Object();

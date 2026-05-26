@@ -101,7 +101,8 @@ class AymaFonts {
     FontWeight weight = FontWeight.w400,
     double? letterSpacing,
   }) =>
-      GoogleFonts.instrumentSans(
+      TextStyle(
+        fontFamily: 'Geist',
         fontSize: size,
         color: color,
         fontWeight: weight,
@@ -114,7 +115,8 @@ class AymaFonts {
     FontWeight weight = FontWeight.w300,
     double? letterSpacing,
   }) =>
-      GoogleFonts.instrumentSans(
+      TextStyle(
+        fontFamily: 'Geist',
         fontSize: size,
         color: color,
         fontWeight: weight,
@@ -234,8 +236,186 @@ class AymaTheme {
         showSelectedLabels: false,
         showUnselectedLabels: false,
       ),
+      extensions: [AymaColorExt.dark],
     );
   }
+
+  static ThemeData get light {
+    final base = ThemeData.light(useMaterial3: true);
+    final ext = AymaColorExt.light;
+    return base.copyWith(
+      scaffoldBackgroundColor: ext.bg,
+      colorScheme: ColorScheme.light(
+        surface:          ext.bgElev,
+        primary:          ext.accent,
+        onPrimary:        Colors.white,
+        secondary:        ext.bgCard,
+        onSecondary:      ext.fg,
+        error:            AymaColors.error,
+        surfaceContainer: ext.bgCard,
+      ),
+      appBarTheme: AppBarTheme(
+        backgroundColor: ext.bg,
+        surfaceTintColor: Colors.transparent,
+        elevation: 0,
+        scrolledUnderElevation: 0,
+        systemOverlayStyle: const SystemUiOverlayStyle(
+          statusBarColor: Colors.transparent,
+          statusBarIconBrightness: Brightness.dark,
+        ),
+        iconTheme: IconThemeData(color: ext.fgDim),
+      ),
+      cardTheme: CardThemeData(
+        color: ext.bgCard,
+        surfaceTintColor: Colors.transparent,
+        elevation: 0,
+        shape: RoundedRectangleBorder(
+          borderRadius: BorderRadius.circular(18),
+          side: BorderSide(color: ext.lineSoft, width: 0.5),
+        ),
+      ),
+      inputDecorationTheme: InputDecorationTheme(
+        filled: true,
+        fillColor: ext.bgElev,
+        border: OutlineInputBorder(
+          borderRadius: BorderRadius.circular(14),
+          borderSide: BorderSide(color: ext.lineSoft, width: 0.5),
+        ),
+        enabledBorder: OutlineInputBorder(
+          borderRadius: BorderRadius.circular(14),
+          borderSide: BorderSide(color: ext.lineSoft, width: 0.5),
+        ),
+        focusedBorder: OutlineInputBorder(
+          borderRadius: BorderRadius.circular(14),
+          borderSide: BorderSide(color: ext.accent, width: 1),
+        ),
+        contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
+        hintStyle: TextStyle(color: ext.fgMute, fontSize: 14),
+        labelStyle: TextStyle(color: ext.fgDim),
+      ),
+      dividerTheme: DividerThemeData(
+        color: ext.lineSoft,
+        thickness: 0.5,
+        space: 0,
+      ),
+      snackBarTheme: SnackBarThemeData(
+        backgroundColor: ext.bgCard,
+        contentTextStyle: TextStyle(color: ext.fg),
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+        behavior: SnackBarBehavior.floating,
+      ),
+      bottomNavigationBarTheme: BottomNavigationBarThemeData(
+        backgroundColor: Colors.transparent,
+        selectedItemColor: ext.fg,
+        unselectedItemColor: ext.fgMute,
+        type: BottomNavigationBarType.fixed,
+        elevation: 0,
+        showSelectedLabels: false,
+        showUnselectedLabels: false,
+      ),
+      extensions: [ext],
+    );
+  }
+}
+
+// ── Color extension (theme-aware tokens) ─────────────────────────────────────
+
+class AymaColorExt extends ThemeExtension<AymaColorExt> {
+  const AymaColorExt({
+    required this.bg,
+    required this.bgElev,
+    required this.bgCard,
+    required this.line,
+    required this.lineSoft,
+    required this.fg,
+    required this.fgDim,
+    required this.fgMute,
+    required this.accent,
+    required this.accentSoft,
+    required this.accentFaint,
+  });
+
+  final Color bg;
+  final Color bgElev;
+  final Color bgCard;
+  final Color line;
+  final Color lineSoft;
+  final Color fg;
+  final Color fgDim;
+  final Color fgMute;
+  final Color accent;
+  final Color accentSoft;
+  final Color accentFaint;
+
+  static const AymaColorExt dark = AymaColorExt(
+    bg:          AymaColors.bg,
+    bgElev:      AymaColors.bgElev,
+    bgCard:      AymaColors.bgCard,
+    line:        AymaColors.line,
+    lineSoft:    AymaColors.lineSoft,
+    fg:          AymaColors.fg,
+    fgDim:       AymaColors.fgDim,
+    fgMute:      AymaColors.fgMute,
+    accent:      AymaColors.accent,
+    accentSoft:  AymaColors.accentSoft,
+    accentFaint: AymaColors.accentFaint,
+  );
+
+  static const AymaColorExt light = AymaColorExt(
+    bg:          Color(0xFFFAF8F4),
+    bgElev:      Color(0xFFF3F0EB),
+    bgCard:      Color(0xFFEBE7E0),
+    line:        Color(0xFFCDC8BE),
+    lineSoft:    Color(0xFFDDD9D2),
+    fg:          Color(0xFF1A1714),
+    fgDim:       Color(0xFF4A443B),
+    fgMute:      Color(0xFF7A7468),
+    accent:      AymaColors.accent,
+    accentSoft:  AymaColors.accentSoft,
+    accentFaint: AymaColors.accentFaint,
+  );
+
+  @override
+  AymaColorExt copyWith({
+    Color? bg, Color? bgElev, Color? bgCard, Color? line, Color? lineSoft,
+    Color? fg, Color? fgDim, Color? fgMute, Color? accent,
+    Color? accentSoft, Color? accentFaint,
+  }) => AymaColorExt(
+    bg:          bg          ?? this.bg,
+    bgElev:      bgElev      ?? this.bgElev,
+    bgCard:      bgCard      ?? this.bgCard,
+    line:        line        ?? this.line,
+    lineSoft:    lineSoft    ?? this.lineSoft,
+    fg:          fg          ?? this.fg,
+    fgDim:       fgDim       ?? this.fgDim,
+    fgMute:      fgMute      ?? this.fgMute,
+    accent:      accent      ?? this.accent,
+    accentSoft:  accentSoft  ?? this.accentSoft,
+    accentFaint: accentFaint ?? this.accentFaint,
+  );
+
+  @override
+  AymaColorExt lerp(AymaColorExt? other, double t) {
+    if (other == null) return this;
+    return AymaColorExt(
+      bg:          Color.lerp(bg,          other.bg,          t)!,
+      bgElev:      Color.lerp(bgElev,      other.bgElev,      t)!,
+      bgCard:      Color.lerp(bgCard,      other.bgCard,      t)!,
+      line:        Color.lerp(line,        other.line,        t)!,
+      lineSoft:    Color.lerp(lineSoft,    other.lineSoft,    t)!,
+      fg:          Color.lerp(fg,          other.fg,          t)!,
+      fgDim:       Color.lerp(fgDim,       other.fgDim,       t)!,
+      fgMute:      Color.lerp(fgMute,      other.fgMute,      t)!,
+      accent:      Color.lerp(accent,      other.accent,      t)!,
+      accentSoft:  Color.lerp(accentSoft,  other.accentSoft,  t)!,
+      accentFaint: Color.lerp(accentFaint, other.accentFaint, t)!,
+    );
+  }
+}
+
+extension AymaContextColors on BuildContext {
+  AymaColorExt get ac =>
+      Theme.of(this).extension<AymaColorExt>() ?? AymaColorExt.dark;
 }
 
 // ── HUD Panel ─────────────────────────────────────────────────────────────────
@@ -262,10 +442,10 @@ class HudPanel extends StatelessWidget {
         Container(
           padding: padding,
           decoration: BoxDecoration(
-            color: AymaColors.bgCard,
+            color: context.ac.bgCard,
             borderRadius: BorderRadius.circular(14),
             border: Border.all(
-              color: glowing ? AymaColors.goldDim : AymaColors.lineSoft,
+              color: glowing ? AymaColors.goldDim : context.ac.lineSoft,
               width: 0.5,
             ),
             boxShadow: glowing

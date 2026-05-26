@@ -68,7 +68,7 @@ class _AuthScreenState extends ConsumerState<AuthScreen> {
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(
         content: Text('$label sign-in coming soon'),
-        backgroundColor: AymaColors.bgElev,
+        backgroundColor: context.ac.bgElev,
         behavior: SnackBarBehavior.floating,
       ),
     );
@@ -79,7 +79,7 @@ class _AuthScreenState extends ConsumerState<AuthScreen> {
     final h = MediaQuery.sizeOf(context).height;
 
     return Scaffold(
-      backgroundColor: AymaColors.bg,
+      backgroundColor: context.ac.bg,
       resizeToAvoidBottomInset: true,
       body: SafeArea(
         child: SingleChildScrollView(
@@ -105,22 +105,22 @@ class _AuthScreenState extends ConsumerState<AuthScreen> {
                       children: [
                         Text(
                           'AYMA  ·  EST. 2026',
-                          style: AymaFonts.mono(size: 10, color: AymaColors.fgMute),
+                          style: AymaFonts.mono(size: 10, color: context.ac.fgMute),
                         ).animate(delay: 100.ms).fadeIn(duration: 500.ms),
                         const SizedBox(height: 10),
                         Text(
                           'Slow down.',
-                          style: AymaFonts.serif(size: 48, color: AymaColors.fg),
+                          style: AymaFonts.serif(size: 48, color: context.ac.fg),
                         ).animate(delay: 160.ms).fadeIn(duration: 500.ms).slideY(begin: 0.06, end: 0),
                         Text(
                           'Be found.',
-                          style: AymaFonts.serif(size: 48, italic: true, color: AymaColors.accent),
+                          style: AymaFonts.serif(size: 48, italic: true, color: context.ac.accent),
                         ).animate(delay: 220.ms).fadeIn(duration: 500.ms).slideY(begin: 0.06, end: 0),
                         const SizedBox(height: 16),
                         Text(
                           'A matchmaker who actually listens. No swiping, no feed. Just conversations, and the people they lead to.',
                           style: TextStyle(
-                            color: AymaColors.fgDim,
+                            color: context.ac.fgDim,
                             fontSize: 14,
                             height: 1.55,
                           ),
@@ -183,7 +183,7 @@ class _AuthScreenState extends ConsumerState<AuthScreen> {
                       child: Text(
                         'BY CONTINUING YOU AGREE TO OUR\nTERMS  ·  PRIVACY  ·  CONVERSATION ETHICS',
                         textAlign: TextAlign.center,
-                        style: AymaFonts.mono(size: 8, color: AymaColors.fgMute),
+                        style: AymaFonts.mono(size: 8, color: context.ac.fgMute),
                       ),
                     ),
                   ).animate(delay: 500.ms).fadeIn(duration: 500.ms),
@@ -301,9 +301,9 @@ class _SmallPill extends StatelessWidget {
       child: Container(
         padding: const EdgeInsets.symmetric(vertical: 14),
         decoration: BoxDecoration(
-          color: AymaColors.bgElev,
+          color: context.ac.bgElev,
           borderRadius: BorderRadius.circular(50),
-          border: Border.all(color: AymaColors.lineSoft, width: 0.5),
+          border: Border.all(color: context.ac.lineSoft, width: 0.5),
         ),
         child: Row(
           mainAxisAlignment: MainAxisAlignment.center,
@@ -355,11 +355,11 @@ class _EmailForm extends StatelessWidget {
           onTap: onBack,
           child: Row(
             children: [
-              Icon(Icons.arrow_back_rounded, size: 18, color: AymaColors.fgMute),
+              Icon(Icons.arrow_back_rounded, size: 18, color: context.ac.fgMute),
               const SizedBox(width: 6),
               Text(
                 isLogin ? 'Sign in with email' : 'Create account',
-                style: AymaFonts.mono(size: 10, color: AymaColors.fgMute),
+                style: AymaFonts.mono(size: 10, color: context.ac.fgMute),
               ),
             ],
           ),
@@ -389,7 +389,7 @@ class _EmailForm extends StatelessWidget {
           child: Container(
             padding: const EdgeInsets.symmetric(vertical: 17),
             decoration: BoxDecoration(
-              color: AymaColors.fg,
+              color: context.ac.fg,
               borderRadius: BorderRadius.circular(50),
             ),
             child: Center(
@@ -417,7 +417,7 @@ class _EmailForm extends StatelessWidget {
             onTap: onToggle,
             child: Text(
               isLogin ? "Don't have an account? Sign up" : 'Already have an account? Sign in',
-              style: TextStyle(color: AymaColors.fgMute, fontSize: 13),
+              style: TextStyle(color: context.ac.fgMute, fontSize: 13),
             ),
           ),
         ),
@@ -437,23 +437,23 @@ class _EmailSentCard extends StatelessWidget {
     return Container(
       padding: const EdgeInsets.all(20),
       decoration: BoxDecoration(
-        color: AymaColors.bgElev,
+        color: context.ac.bgElev,
         borderRadius: BorderRadius.circular(18),
-        border: Border.all(color: AymaColors.accent.withValues(alpha: 0.25), width: 0.5),
+        border: Border.all(color: context.ac.accent.withValues(alpha: 0.25), width: 0.5),
       ),
       child: Row(
         children: [
-          Icon(Icons.mark_email_unread_outlined, color: AymaColors.accent, size: 24),
+          Icon(Icons.mark_email_unread_outlined, color: context.ac.accent, size: 24),
           const SizedBox(width: 14),
           Expanded(
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
                 Text('Check your inbox',
-                    style: TextStyle(color: AymaColors.fg, fontSize: 14, fontWeight: FontWeight.w500)),
+                    style: TextStyle(color: context.ac.fg, fontSize: 14, fontWeight: FontWeight.w500)),
                 const SizedBox(height: 3),
                 Text('Confirmation link sent to $email',
-                    style: TextStyle(color: AymaColors.fgDim, fontSize: 12)),
+                    style: TextStyle(color: context.ac.fgDim, fontSize: 12)),
               ],
             ),
           ),
@@ -484,19 +484,19 @@ class _AuthField extends StatelessWidget {
   Widget build(BuildContext context) {
     return Container(
       decoration: BoxDecoration(
-        color: AymaColors.bgElev,
+        color: context.ac.bgElev,
         borderRadius: BorderRadius.circular(14),
-        border: Border.all(color: AymaColors.lineSoft, width: 0.5),
+        border: Border.all(color: context.ac.lineSoft, width: 0.5),
       ),
       child: TextField(
         controller: controller,
         obscureText: obscure,
         keyboardType: keyboardType,
         onSubmitted: onSubmitted,
-        style: TextStyle(color: AymaColors.fg, fontSize: 15),
+        style: TextStyle(color: context.ac.fg, fontSize: 15),
         decoration: InputDecoration(
           hintText: label,
-          hintStyle: TextStyle(color: AymaColors.fgMute, fontSize: 15),
+          hintStyle: TextStyle(color: context.ac.fgMute, fontSize: 15),
           border: InputBorder.none,
           contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 16),
         ),

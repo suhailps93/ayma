@@ -4,18 +4,15 @@ import 'dart:math' as math;
 import 'dart:typed_data';
 
 import 'package:flutter/foundation.dart';
-import 'package:flutter_sound/flutter_sound.dart';
-import 'package:logger/logger.dart' show Level;
+import 'package:http/http.dart' as http;
 import 'package:permission_handler/permission_handler.dart';
 import 'package:shared_preferences/shared_preferences.dart';
-import 'package:web_socket_channel/io.dart';
-import 'package:web_socket_channel/web_socket_channel.dart';
 
-import 'package:http/http.dart' as http;
-
+import 'audio_recorder_service.dart';
+import 'audio_streamer_service.dart';
 import 'backend_service.dart';
 import 'firestore_service.dart';
-import 'web_audio_stub.dart' if (dart.library.html) 'web_audio_impl.dart';
+import 'gemini_live_client.dart';
 
 // ignore_for_file: deprecated_member_use
 
@@ -59,20 +56,16 @@ class TranscriptLine {
   }
 }
 
+// Orchestrates GeminiLiveClient + AudioRecorderService + AudioStreamerService,
+// mirroring how useLiveAPI hook + ControlTray wire together in the React reference.
 class AymaAudioService extends ChangeNotifier {
   static const _transcriptStorageKey = 'ayma.chat.transcript';
 
-  WebSocketChannel? _channel;
-  StreamSubscription? _wsSub;
+  final _client = GeminiLiveClient();
+  final _recorder = AudioRecorderService();
+  final _streamer = AudioStreamerService();
 
-  final _recorder = FlutterSoundRecorder(logLevel: Level.nothing);
-  final _player = FlutterSoundPlayer(logLevel: Level.nothing);
-  bool _playerStreaming = false;
-  int _playerSampleRate = 24000;
-  int _playerChannels = 1;
-
-  final _webMic = WebMicCapture();
-  final _webPlayer = WebPcmPlayer();
+  final List<StreamSubscription<dynamic>> _subs = [];
 
   SessionState _state = SessionState.disconnected;
   SessionState get state => _state;
@@ -95,104 +88,171 @@ class AymaAudioService extends ChangeNotifier {
   final List<TranscriptLine> _transcript = [];
   List<TranscriptLine> get transcript => List.unmodifiable(_transcript);
 
-  // Shared context for both Live and Text APIs.
   final List<Map<String, String>> _history = [];
 
-  bool _audioInitialized = false;
-  Future<void>? _audioInitFuture;
-  Future<void>? _connectFuture;
-
-  final BytesBuilder _pendingMicAudio = BytesBuilder(copy: false);
-  Timer? _micFlushTimer;
-  static const _micFlushInterval = Duration(milliseconds: 120);
-
-  DateTime _lastMeterUiUpdate = DateTime.fromMillisecondsSinceEpoch(0);
-  DateTime _lastUserVoiceAt = DateTime.fromMillisecondsSinceEpoch(0);
+  bool _restoredTranscript = false;
+  String _pendingTurnUser = '';
+  String _pendingTurnModel = '';
+  Timer? _persistDebounce;
+  static const int _maxTranscriptLines = 180;
 
   String? _geminiApiKey;
   String? _systemPrompt;
   String _sessionId = DateTime.now().millisecondsSinceEpoch.toString();
 
-  bool _restoredTranscript = false;
-  String _pendingTurnUser = '';
-  String _pendingTurnModel = '';
-  String _pendingDisplayModel = '';
+  Future<void>? _connectFuture;
+
+  DateTime _lastMeterUiUpdate = DateTime.fromMillisecondsSinceEpoch(0);
+  DateTime _lastUserVoiceAt = DateTime.fromMillisecondsSinceEpoch(0);
+
+  final BytesBuilder _pendingMicAudio = BytesBuilder(copy: false);
+  Timer? _micFlushTimer;
+  static const _micFlushInterval = Duration(milliseconds: 120);
 
   AymaAudioService() {
     unawaited(_restoreTranscript());
+    _wireClientStreams();
+    _wireRecorderStreams();
   }
 
   Future<void> init() async {
     await _restoreTranscript();
-    await _ensureAudioInitialized();
   }
 
-  Future<void> _restoreTranscript() async {
-    if (_restoredTranscript) return;
-    _restoredTranscript = true;
+  // ── Wire GeminiLiveClient events → session state (mirrors use-live-api.ts) ──
 
-    try {
-      final prefs = await SharedPreferences.getInstance();
-      final raw = prefs.getString(_transcriptStorageKey);
-      if (raw == null || raw.isEmpty) return;
-      final decoded = jsonDecode(raw) as List<dynamic>;
+  void _wireClientStreams() {
+    // setupComplete → start mic (mirrors ControlTray useEffect on `connected`)
+    _subs.add(_client.setupCompleteStream.listen((_) {
+      _setState(SessionState.ready);
+      unawaited(_recorder.start());
+      _setState(SessionState.listening);
+    }));
 
-      _transcript
-        ..clear()
-        ..addAll(decoded
-            .whereType<Map<String, dynamic>>()
-            .map(TranscriptLine.fromMap)
-            .where((line) => line.text.isNotEmpty));
+    // audio → streamer (mirrors onAudio → audioStreamer.addPCM16 in useLiveAPI)
+    _subs.add(_client.audioStream.listen((chunk) {
+      if (_speakerMuted) return;
+      _setState(SessionState.speaking);
+      _outputVolume = _pcmRms(chunk.data);
+      unawaited(_streamer.addPcm16(chunk.data, mimeType: chunk.mimeType));
+      _notifyMetersThrottled();
+    }));
 
-      _history.clear();
-      for (final line in _transcript) {
-        _history.add({
-          'role': line.isUser ? 'user' : 'model',
-          'text': _stamp(line.time, line.text),
-        });
+    // interrupted → stop streamer (mirrors stopAudioStreamer in useLiveAPI)
+    _subs.add(_client.interruptedStream.listen((_) {
+      _streamer.stop();
+      _outputVolume = 0;
+      final userText = _pendingTurnUser.trim();
+      if (userText.isNotEmpty) {
+        _addTranscript(userText, isUser: true, allowRecentDuplicate: true);
       }
-      _trimHistory();
-      notifyListeners();
-    } catch (_) {}
+      final partialModel = _pendingTurnModel.trim();
+      if (partialModel.isNotEmpty) {
+        _addTranscript(partialModel, isUser: false);
+      }
+      unawaited(_commitTurnToBackend());
+      _pendingTurnModel = '';
+      _setState(SessionState.listening);
+    }));
+
+    _subs.add(_client.outputTranscriptStream.listen((text) {
+      _pendingTurnModel = _mergeTurnText(_pendingTurnModel, text);
+    }));
+
+    _subs.add(_client.inputTranscriptStream.listen((text) {
+      _pendingTurnUser = _mergeTurnText(_pendingTurnUser, text);
+    }));
+
+    _subs.add(_client.turnCompleteStream.listen((_) {
+      final userText = _pendingTurnUser.trim();
+      if (userText.isNotEmpty) {
+        _addTranscript(userText, isUser: true, allowRecentDuplicate: true);
+      }
+      final modelText = _pendingTurnModel.trim();
+      if (modelText.isNotEmpty) {
+        _addTranscript(modelText, isUser: false, allowRecentDuplicate: true);
+      }
+      unawaited(_commitTurnToBackend());
+      _setState(SessionState.listening);
+    }));
+
+    _subs.add(_client.toolCallStream.listen((calls) {
+      unawaited(_handleToolCalls(calls));
+    }));
+
+    _subs.add(_client.disconnectedStream.listen((_) {
+      _clearPendingMicAudio();
+      _pendingTurnUser = '';
+      _pendingTurnModel = '';
+      _setState(SessionState.disconnected);
+    }));
   }
 
-  Future<void> _persistTranscript() async {
-    try {
-      final prefs = await SharedPreferences.getInstance();
-      await prefs.setString(
-        _transcriptStorageKey,
-        jsonEncode(_transcript.map((line) => line.toMap()).toList()),
-      );
-    } catch (_) {}
+  // ── Wire AudioRecorderService → client (mirrors ControlTray onData handler) ─
+
+  void _wireRecorderStreams() {
+    _subs.add(_recorder.pcmStream.listen((pcm16) {
+      _rawInputVolume = _pcmRms(pcm16);
+      if (!_muted) _bufferAudio(pcm16);
+      _notifyMetersThrottled();
+    }));
+
+    _subs.add(_recorder.volumeStream.listen((vol) {
+      _inputVolume = vol;
+      // Web emits raw PCM RMS (threshold 0.03); native emits normalised dB (0.20)
+      _userTalking = kIsWeb ? vol > 0.03 : vol > 0.20;
+      if (_userTalking) _lastUserVoiceAt = DateTime.now();
+      _notifyMetersThrottled();
+    }));
   }
 
-  Future<void> _ensureAudioInitialized() async {
-    if (kIsWeb || _audioInitialized) return;
-    if (_audioInitFuture != null) {
-      await _audioInitFuture;
+  // ── Mic audio buffering + echo suppression ────────────────────────────────────
+
+  void _bufferAudio(Uint8List pcm) {
+    if (!_client.isConnected || _state == SessionState.disconnected || _muted) return;
+    _pendingMicAudio.add(pcm);
+    _micFlushTimer ??= Timer(_micFlushInterval, _flushBufferedAudio);
+  }
+
+  void _flushBufferedAudio() {
+    _micFlushTimer = null;
+    if (_pendingMicAudio.length == 0) return;
+    if (!_client.isConnected || _state == SessionState.disconnected || _muted) {
+      _clearPendingMicAudio();
       return;
     }
-
-    _audioInitFuture = () async {
-      await _recorder.openRecorder();
-      await _player.openPlayer();
-      await _recorder.setSubscriptionDuration(const Duration(milliseconds: 80));
-      _audioInitialized = true;
-    }();
-
-    try {
-      await _audioInitFuture;
-    } finally {
-      _audioInitFuture = null;
-    }
+    final pcm = _pendingMicAudio.takeBytes();
+    _sendAudioToClient(pcm);
   }
+
+  void _clearPendingMicAudio() {
+    _micFlushTimer?.cancel();
+    _micFlushTimer = null;
+    if (_pendingMicAudio.length > 0) _pendingMicAudio.clear();
+  }
+
+  void _sendAudioToClient(Uint8List pcm) {
+    if (!_client.isConnected || _state == SessionState.disconnected || _muted) return;
+
+    final speaking = _state == SessionState.speaking;
+    final recentVoice =
+        DateTime.now().difference(_lastUserVoiceAt) < const Duration(milliseconds: 900);
+    if (speaking) {
+      if (!_userTalking && !recentVoice) return;
+      final likelyEcho = _outputVolume > 0.07 && _rawInputVolume < 0.09;
+      if (likelyEcho) return;
+    }
+
+    _client.sendRealtimeAudio(pcm);
+  }
+
+  // ── Connection lifecycle ─────────────────────────────────────────────────────
 
   Future<void> connect({bool userInitiated = false}) async {
     if (_connectFuture != null) {
       await _connectFuture;
       return;
     }
-
     _connectFuture = _connect();
     try {
       await _connectFuture;
@@ -203,7 +263,7 @@ class AymaAudioService extends ChangeNotifier {
 
   Future<void> _connect() async {
     if (_state != SessionState.disconnected) {
-      _closeTransport();
+      _disconnectTransport();
       _setState(SessionState.disconnected);
     }
 
@@ -216,7 +276,6 @@ class AymaAudioService extends ChangeNotifier {
         _setState(SessionState.disconnected);
         throw Exception('Microphone permission denied');
       }
-      await _ensureAudioInitialized();
     }
 
     final bootstrap = await BackendService.bootstrap();
@@ -234,45 +293,30 @@ class AymaAudioService extends ChangeNotifier {
       throw Exception('Missing Gemini Live bootstrap data');
     }
 
-    final wsUri = Uri.parse(liveWsUrl).replace(queryParameters: {'key': apiKey});
+    final payload = setup ??
+        {
+          'model': 'models/${bootstrap['model'] ?? 'gemini-3.1-flash-live-preview'}',
+          'response_modalities': ['AUDIO'],
+        };
 
-    if (kIsWeb) {
-      _channel = WebSocketChannel.connect(wsUri);
-    } else {
-      _channel = IOWebSocketChannel.connect(
-        wsUri,
-        pingInterval: const Duration(seconds: 30),
-      );
-    }
-
-    final normalizedSetup =
-        _normalizeLiveSetupPayload(setup ?? _minimalSetup(bootstrap));
-    _channel!.sink.add(jsonEncode({'setup': normalizedSetup}));
-
-    _wsSub = _channel!.stream.listen(
-      _onMessage,
-      onError: (_) => _handleRemoteDisconnect(),
-      onDone: _handleRemoteDisconnect,
-    );
-  }
-
-  Map<String, dynamic> _minimalSetup(Map<String, dynamic> bootstrap) {
-    final modelName =
-        bootstrap['model'] as String? ?? 'gemini-3.1-flash-live-preview';
-    return {
-      'model': 'models/$modelName',
-      'response_modalities': ['AUDIO'],
-    };
+    await _client.connect(liveWsUrl, apiKey, payload);
   }
 
   void disconnect({bool notify = true}) {
-    _closeTransport();
+    _disconnectTransport();
     _clearPendingMicAudio();
-    _pendingDisplayModel = '';
     _pendingTurnUser = '';
     _pendingTurnModel = '';
     _setState(SessionState.disconnected, notify: notify);
   }
+
+  void _disconnectTransport() {
+    _client.disconnect();
+    _recorder.stop();
+    _streamer.stop();
+  }
+
+  // ── Transcript persistence ────────────────────────────────────────────────────
 
   Future<void> clearLocalTranscript() async {
     _transcript.clear();
@@ -281,174 +325,92 @@ class AymaAudioService extends ChangeNotifier {
     notifyListeners();
   }
 
-  void _closeTransport() {
-    _wsSub?.cancel();
-    _wsSub = null;
-    _channel?.sink.close();
-    _channel = null;
-
-    if (kIsWeb) {
-      _webMic.stop();
-      _webPlayer.stop();
-    } else {
-      if (_recorder.isRecording) {
-        _recorder.stopRecorder();
-      }
-      _stopStreamPlayer();
-    }
-  }
-
-  void _handleRemoteDisconnect() {
-    _closeTransport();
-    _clearPendingMicAudio();
-    _pendingDisplayModel = '';
-    _pendingTurnUser = '';
-    _pendingTurnModel = '';
-    _setState(SessionState.disconnected);
-  }
-
-  void _onMessage(dynamic raw) {
-    final String decoded;
-    if (raw is String) {
-      decoded = raw;
-    } else if (raw is List<int>) {
-      decoded = utf8.decode(raw);
-    } else if (raw is Uint8List) {
-      decoded = utf8.decode(raw);
-    } else {
-      return;
-    }
-
-    final Map<String, dynamic> msg;
+  Future<void> _restoreTranscript() async {
+    if (_restoredTranscript) return;
+    _restoredTranscript = true;
     try {
-      msg = jsonDecode(decoded) as Map<String, dynamic>;
-    } catch (_) {
-      return;
-    }
-
-    if (msg.containsKey('setupComplete')) {
-      _setState(SessionState.ready);
-      unawaited(_startRecorderAndBegin());
-      _setState(SessionState.listening);
-      return;
-    }
-
-    final serverContent = msg['serverContent'] as Map<String, dynamic>?;
-    if (serverContent != null) {
-      final interrupted = (serverContent['interrupted'] as bool?) ?? false;
-      if (interrupted) {
-        if (kIsWeb) {
-          _webPlayer.stop();
-        } else {
-          _stopStreamPlayer();
-        }
-        _flushPendingModelText();
-        _setState(SessionState.listening);
-        return;
+      final prefs = await SharedPreferences.getInstance();
+      final raw = prefs.getString(_transcriptStorageKey);
+      if (raw == null || raw.isEmpty) return;
+      final decoded = jsonDecode(raw) as List<dynamic>;
+      _transcript
+        ..clear()
+        ..addAll(decoded
+            .whereType<Map<String, dynamic>>()
+            .map(TranscriptLine.fromMap)
+            .where((l) => l.text.isNotEmpty));
+      _history.clear();
+      for (final line in _transcript) {
+        _history.add({
+          'role': line.isUser ? 'user' : 'model',
+          'text': _stamp(line.time, line.text),
+        });
       }
-
-      final modelTurn = serverContent['modelTurn'] as Map<String, dynamic>?;
-      if (modelTurn != null) {
-        _setState(SessionState.speaking);
-        final parts =
-            (modelTurn['parts'] as List<dynamic>? ?? []).whereType<Map<String, dynamic>>();
-
-        for (final part in parts) {
-          final inlineData = part['inlineData'] as Map<String, dynamic>?;
-          if (inlineData != null) {
-            final mimeType = inlineData['mimeType'] as String?;
-            final data = inlineData['data'] as String?;
-            if (data != null && (mimeType?.contains('audio') ?? false)) {
-              _playPcm(base64Decode(data), mimeType: mimeType!);
-            }
-          }
-
-          final text = (part['text'] as String? ?? '').trim();
-          if (text.isNotEmpty) {
-            _appendPendingModelText(text);
-          }
-        }
-      }
-
-      final outTx = serverContent['outputTranscription'] as Map<String, dynamic>?;
-      final outText = (outTx?['text'] as String? ?? '').trim();
-      if (outText.isNotEmpty) {
-        _appendPendingModelText(outText);
-      }
-
-      final inTx = serverContent['inputTranscription'] as Map<String, dynamic>?;
-      final inText = (inTx?['text'] as String? ?? '').trim();
-      if (inText.isNotEmpty) {
-        _pendingTurnUser = inText;
-        _addTranscript(inText, isUser: true);
-      }
-
-      final turnComplete = (serverContent['turnComplete'] as bool?) ?? false;
-      if (turnComplete) {
-        _flushPendingModelText();
-        unawaited(_commitTurnToBackend());
-        _setState(SessionState.listening);
-      }
-      return;
-    }
-
-    final toolCall = msg['toolCall'] as Map<String, dynamic>?;
-    if (toolCall != null) {
-      final functionCalls = (toolCall['functionCalls'] as List<dynamic>? ?? [])
-          .whereType<Map<String, dynamic>>()
-          .toList();
-      if (functionCalls.isNotEmpty) {
-        unawaited(_handleToolCall(functionCalls));
-      }
-      return;
-    }
-
-    if (msg.containsKey('goAway')) {
-      _handleRemoteDisconnect();
-      return;
-    }
+      _trimHistory();
+      notifyListeners();
+    } catch (_) {}
   }
 
-  Future<void> _handleToolCall(List<Map<String, dynamic>> functionCalls) async {
-    final responses = <Map<String, dynamic>>[];
-
-    for (final call in functionCalls) {
-      final id = call['id'] as String? ?? '';
-      final name = call['name'] as String? ?? '';
-      final args = call['args'] as Map<String, dynamic>? ?? {};
-
-      String output;
-      if (name == 'add_followup_question') {
-        output = await _execAddFollowup(args);
-      } else if (name == 'get_current_time') {
-        output = DateTime.now().toIso8601String();
-      } else {
-        output = 'Tool $name is not available.';
-      }
-
-      responses.add({
-        'id': id,
-        'name': name,
-        'response': {'output': output},
-      });
-    }
-
-    if (_channel == null || _state == SessionState.disconnected) return;
-    _channel!.sink.add(jsonEncode({
-      'toolResponse': {'functionResponses': responses}
-    }));
-  }
-
-  Future<String> _execAddFollowup(Map<String, dynamic> args) async {
-    final question = (args['question'] as String? ?? '').trim();
-    if (question.isEmpty) return 'skipped: empty question';
+  Future<void> _persistTranscript() async {
     try {
-      await FirestoreService.addFollowupQuestion(question, sessionId: _sessionId);
-      return 'noted';
-    } catch (e) {
-      return 'error: $e';
-    }
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setString(
+        _transcriptStorageKey,
+        jsonEncode(_transcript.map((l) => l.toMap()).toList()),
+      );
+    } catch (_) {}
   }
+
+  void _schedulePersistTranscript() {
+    _persistDebounce?.cancel();
+    _persistDebounce = Timer(const Duration(milliseconds: 900), () {
+      unawaited(_persistTranscript());
+    });
+  }
+
+  void _addTranscript(
+    String text, {
+    required bool isUser,
+    String? historyText,
+    List<Map<String, dynamic>>? attachments,
+    bool allowRecentDuplicate = false,
+  }) {
+    final normalized = text.trim();
+    if (normalized.isEmpty && (attachments == null || attachments.isEmpty)) return;
+
+    if (_transcript.isNotEmpty) {
+      final last = _transcript.last;
+      final isDuplicate = last.isUser == isUser &&
+          last.text.trim() == normalized &&
+          DateTime.now().difference(last.time) < const Duration(seconds: 3);
+      if (isDuplicate && !allowRecentDuplicate) return;
+    }
+
+    final now = DateTime.now();
+    _transcript.add(
+      TranscriptLine(normalized, isUser: isUser, time: now, attachments: attachments),
+    );
+    _trimTranscriptIfNeeded();
+
+    _history.add({
+      'role': isUser ? 'user' : 'model',
+      'text': _stamp(now, (historyText ?? normalized).trim()),
+    });
+    _trimHistory();
+    _schedulePersistTranscript();
+    notifyListeners();
+  }
+
+  void _trimHistory() {
+    if (_history.length > 60) _history.removeRange(0, _history.length - 60);
+  }
+
+  void _trimTranscriptIfNeeded() {
+    if (_transcript.length <= _maxTranscriptLines) return;
+    _transcript.removeRange(0, _transcript.length - _maxTranscriptLines);
+  }
+
+  // ── Backend turn commit ───────────────────────────────────────────────────────
 
   Future<void> _commitTurnToBackend() async {
     final userText = _pendingTurnUser.trim();
@@ -467,175 +429,42 @@ class AymaAudioService extends ChangeNotifier {
     } catch (_) {}
   }
 
-  void _appendPendingModelText(String chunk) {
-    final normalized = chunk.trim();
-    if (normalized.isEmpty) return;
-    if (_pendingDisplayModel.isEmpty) {
-      _pendingDisplayModel = normalized;
-    } else if (_pendingDisplayModel == normalized ||
-        _pendingDisplayModel.endsWith(normalized)) {
-      return;
-    } else if (normalized.startsWith(_pendingDisplayModel)) {
-      _pendingDisplayModel = normalized;
-    } else {
-      _pendingDisplayModel = '$_pendingDisplayModel $normalized';
-    }
-    _pendingTurnModel = _pendingDisplayModel;
-  }
+  // ── Tool call handling ────────────────────────────────────────────────────────
 
-  void _flushPendingModelText() {
-    final text = _pendingDisplayModel.trim();
-    if (text.isNotEmpty) {
-      _addTranscript(text, isUser: false);
-    }
-    _pendingDisplayModel = '';
-  }
-
-  Future<void> _startRecorderAndBegin() async {
-    if (kIsWeb) {
-      await _webMic.start((pcm16) {
-        final rms = _pcmRms(pcm16);
-        _rawInputVolume = rms;
-        _inputVolume = rms;
-        _userTalking = rms > 0.03;
-        if (_userTalking) _lastUserVoiceAt = DateTime.now();
-        _bufferAudio(pcm16);
-        _notifyMetersThrottled();
-      });
-    } else {
-      await _recorder.startRecorder(
-        toStream: _recorderSink(),
-        codec: Codec.pcm16,
-        numChannels: 1,
-        sampleRate: 16000,
-        audioSource: AudioSource.voice_communication,
-      );
-
-      _recorder.onProgress?.listen((e) {
-        final vol = ((e.decibels ?? -60) + 60) / 60;
-        _inputVolume = vol;
-        _userTalking = vol > 0.20;
-        if (_userTalking) _lastUserVoiceAt = DateTime.now();
-        _notifyMetersThrottled();
-      });
-    }
-  }
-
-  StreamSink<Uint8List> _recorderSink() {
-    final ctrl = StreamController<Uint8List>();
-    ctrl.stream.listen((data) {
-      final rms = _pcmRms(data);
-      _rawInputVolume = rms;
-      if (!_muted) {
-        _bufferAudio(data);
+  Future<void> _handleToolCalls(List<LiveToolCall> calls) async {
+    final responses = <Map<String, dynamic>>[];
+    for (final call in calls) {
+      String output;
+      if (call.name == 'add_followup_question') {
+        output = await _execAddFollowup(call.args);
+      } else if (call.name == 'get_current_time') {
+        output = DateTime.now().toIso8601String();
+      } else {
+        output = 'Tool ${call.name} is not available.';
       }
-    });
-    return ctrl.sink;
-  }
-
-  void _bufferAudio(Uint8List pcm) {
-    if (_channel == null || _state == SessionState.disconnected || _muted) return;
-    _pendingMicAudio.add(pcm);
-    _micFlushTimer ??= Timer(_micFlushInterval, _flushBufferedAudio);
-  }
-
-  void _flushBufferedAudio() {
-    _micFlushTimer = null;
-    if (_pendingMicAudio.length == 0) return;
-    if (_channel == null || _state == SessionState.disconnected || _muted) {
-      _clearPendingMicAudio();
-      return;
-    }
-
-    final pcm = _pendingMicAudio.takeBytes();
-    _sendAudio(pcm);
-  }
-
-  void _clearPendingMicAudio() {
-    _micFlushTimer?.cancel();
-    _micFlushTimer = null;
-    if (_pendingMicAudio.length > 0) {
-      _pendingMicAudio.clear();
-    }
-  }
-
-  void _sendAudio(Uint8List pcm) {
-    if (_channel == null || _state == SessionState.disconnected || _muted) return;
-
-    // During model output, keep duplex open but suppress clear echo-only windows.
-    final speaking = _state == SessionState.speaking;
-    final recentVoice =
-        DateTime.now().difference(_lastUserVoiceAt) < const Duration(milliseconds: 900);
-    if (speaking && _outputVolume > 0.06 && !recentVoice) {
-      return;
-    }
-
-    _channel!.sink.add(jsonEncode({
-      'realtimeInput': {
-        'audio': {
-          'mimeType': 'audio/pcm;rate=16000',
-          'data': base64Encode(pcm),
-        }
-      }
-    }));
-  }
-
-  void _playPcm(Uint8List data, {required String mimeType}) {
-    if (_speakerMuted) return;
-
-    final cfg = _parsePcmConfig(mimeType);
-    _outputVolume = _pcmRms(data);
-
-    if (kIsWeb) {
-      _webPlayer.play(data);
-      _notifyMetersThrottled();
-      return;
-    }
-
-    if (!_playerStreaming ||
-        _playerSampleRate != cfg.sampleRate ||
-        _playerChannels != cfg.channels) {
-      _stopStreamPlayer();
-      _playerSampleRate = cfg.sampleRate;
-      _playerChannels = cfg.channels;
-      unawaited(_startStreamPlayer());
-    }
-
-    final sink = _player.uint8ListSink;
-    if (sink != null) {
-      sink.add(data);
-    } else {
-      Future<void>.delayed(const Duration(milliseconds: 25), () {
-        _player.uint8ListSink?.add(data);
+      responses.add({
+        'id': call.id,
+        'name': call.name,
+        'response': {'output': output},
       });
     }
-
-    _notifyMetersThrottled();
-  }
-
-  Future<void> _startStreamPlayer() async {
-    if (_playerStreaming) return;
-    _playerStreaming = true;
-    try {
-      await _player.startPlayerFromStream(
-        codec: Codec.pcm16,
-        interleaved: false,
-        sampleRate: _playerSampleRate,
-        numChannels: _playerChannels,
-        bufferSize: 8192,
-      );
-    } catch (_) {
-      _playerStreaming = false;
+    if (_client.isConnected) {
+      _client.sendToolResponse(responses);
     }
   }
 
-  void _stopStreamPlayer() {
-    if (!_playerStreaming && _player.isStopped) return;
+  Future<String> _execAddFollowup(Map<String, dynamic> args) async {
+    final question = (args['question'] as String? ?? '').trim();
+    if (question.isEmpty) return 'skipped: empty question';
     try {
-      _player.stopPlayer();
-    } catch (_) {}
-    _playerStreaming = false;
+      await FirestoreService.addFollowupQuestion(question, sessionId: _sessionId);
+      return 'noted';
+    } catch (e) {
+      return 'error: $e';
+    }
   }
+
+  // ── Text chat (HTTP) ─────────────────────────────────────────────────────────
 
   Future<bool> sendText(
     String text, {
@@ -647,9 +476,8 @@ class AymaAudioService extends ChangeNotifier {
     final attachmentSummary = attachments.isEmpty
         ? ''
         : '\n\nShared attachments:\n${attachments.map((a) => '- ${a['kind'] ?? 'file'}: ${a['filename'] ?? a['url'] ?? 'attachment'}').join('\n')}';
-    final historyText = trimmed.isEmpty
-        ? attachmentSummary.trim()
-        : '$trimmed$attachmentSummary';
+    final historyText =
+        trimmed.isEmpty ? attachmentSummary.trim() : '$trimmed$attachmentSummary';
 
     _addTranscript(
       trimmed.isEmpty
@@ -661,9 +489,7 @@ class AymaAudioService extends ChangeNotifier {
       allowRecentDuplicate: true,
     );
 
-    if (_state == SessionState.disconnected) {
-      _setState(SessionState.thinking);
-    }
+    if (_state == SessionState.disconnected) _setState(SessionState.thinking);
 
     try {
       await _bootstrapTextChatIfNeeded();
@@ -681,9 +507,7 @@ class AymaAudioService extends ChangeNotifier {
       _addAssistantFallbackMessage();
       return false;
     } finally {
-      if (_state == SessionState.thinking) {
-        _setState(SessionState.disconnected);
-      }
+      if (_state == SessionState.thinking) _setState(SessionState.disconnected);
     }
   }
 
@@ -691,7 +515,7 @@ class AymaAudioService extends ChangeNotifier {
     final text = prompt.trim();
     if (text.isEmpty) return false;
 
-    if (_state == SessionState.disconnected || _channel == null) {
+    if (_state == SessionState.disconnected || !_client.isConnected) {
       await connect(userInitiated: true);
     }
 
@@ -700,23 +524,10 @@ class AymaAudioService extends ChangeNotifier {
       await Future<void>.delayed(const Duration(milliseconds: 120));
     }
 
-    if (_channel == null || _state == SessionState.disconnected) return false;
+    if (!_client.isConnected || _state == SessionState.disconnected) return false;
 
     _addTranscript(text, isUser: true, allowRecentDuplicate: true);
-    _channel!.sink.add(jsonEncode({
-      'clientContent': {
-        'turns': [
-          {
-            'role': 'user',
-            'parts': [
-              {'text': text}
-            ],
-          }
-        ],
-        'turnComplete': true,
-      }
-    }));
-
+    _client.sendText(text);
     return true;
   }
 
@@ -724,12 +535,10 @@ class AymaAudioService extends ChangeNotifier {
     if ((_geminiApiKey ?? '').isNotEmpty) return;
     final bootstrap = await BackendService.bootstrap();
     _geminiApiKey = bootstrap['token'] as String?;
-
     final setup = bootstrap['setup'] as Map<String, dynamic>?;
     _systemPrompt = (setup?['system_instruction']?['parts'] as List<dynamic>?)
         ?.map((p) => p['text'] as String? ?? '')
         .join('');
-
     if ((_geminiApiKey ?? '').isEmpty) {
       throw Exception('Missing Gemini API key from bootstrap');
     }
@@ -743,10 +552,7 @@ class AymaAudioService extends ChangeNotifier {
     final key = _geminiApiKey;
     if (key == null || key.isEmpty) return '';
 
-    final userParts = await _buildUserParts(
-      message: message,
-      attachments: attachments,
-    );
+    final userParts = await _buildUserParts(message: message, attachments: attachments);
 
     final contents = [
       for (final h in _history.sublist(0, math.max(0, _history.length - 1)))
@@ -756,10 +562,7 @@ class AymaAudioService extends ChangeNotifier {
             {'text': h['text']}
           ]
         },
-      {
-        'role': 'user',
-        'parts': userParts,
-      }
+      {'role': 'user', 'parts': userParts},
     ];
 
     final response = await http
@@ -806,18 +609,13 @@ class AymaAudioService extends ChangeNotifier {
         final res = await http.get(Uri.parse(url)).timeout(const Duration(seconds: 12));
         if (res.statusCode != 200 || res.bodyBytes.isEmpty) continue;
         if (res.bodyBytes.length > 4 * 1024 * 1024) continue;
-
         final mimeType = _detectImageMimeType(att, res.headers) ?? 'image/jpeg';
         parts.add({
-          'inlineData': {
-            'mimeType': mimeType,
-            'data': base64Encode(res.bodyBytes),
-          }
+          'inlineData': {'mimeType': mimeType, 'data': base64Encode(res.bodyBytes)}
         });
         imageCount++;
       } catch (_) {}
     }
-
     return parts;
   }
 
@@ -837,6 +635,8 @@ class AymaAudioService extends ChangeNotifier {
     return null;
   }
 
+  // ── Controls ─────────────────────────────────────────────────────────────────
+
   void toggleMute() {
     _muted = !_muted;
     notifyListeners();
@@ -844,92 +644,37 @@ class AymaAudioService extends ChangeNotifier {
 
   void toggleSpeaker() {
     _speakerMuted = !_speakerMuted;
-    if (_speakerMuted) {
-      if (kIsWeb) {
-        _webPlayer.stop();
-      } else {
-        _stopStreamPlayer();
-      }
-    }
+    if (_speakerMuted) _streamer.stop();
     notifyListeners();
   }
 
+  // ── Internal helpers ─────────────────────────────────────────────────────────
+
   void _setState(SessionState next, {bool notify = true}) {
+    final changed = _state != next;
     _state = next;
-    if (next != SessionState.speaking) {
-      _outputVolume = 0;
-    }
-    if (notify) {
-      notifyListeners();
-    }
+    if (changed && next != SessionState.speaking) _outputVolume = 0;
+    if (notify && changed) notifyListeners();
   }
 
   void _notifyMetersThrottled() {
     final now = DateTime.now();
-    if (now.difference(_lastMeterUiUpdate) < const Duration(milliseconds: 40)) {
-      return;
-    }
+    if (now.difference(_lastMeterUiUpdate) < const Duration(milliseconds: 260)) return;
     _lastMeterUiUpdate = now;
     notifyListeners();
   }
 
-  void _addTranscript(
-    String text, {
-    required bool isUser,
-    String? historyText,
-    List<Map<String, dynamic>>? attachments,
-    bool allowRecentDuplicate = false,
-  }) {
-    final normalized = text.trim();
-    if (normalized.isEmpty && (attachments == null || attachments.isEmpty)) return;
-
-    if (_transcript.isNotEmpty) {
-      final last = _transcript.last;
-      final isDuplicate =
-          last.isUser == isUser &&
-          last.text.trim() == normalized &&
-          DateTime.now().difference(last.time) < const Duration(seconds: 3);
-      if (isDuplicate && !allowRecentDuplicate) return;
-    }
-
-    final now = DateTime.now();
-    _transcript.add(
-      TranscriptLine(
-        normalized,
-        isUser: isUser,
-        time: now,
-        attachments: attachments,
-      ),
-    );
-
-    _history.add({
-      'role': isUser ? 'user' : 'model',
-      'text': _stamp(now, (historyText ?? normalized).trim()),
-    });
-    _trimHistory();
-
-    unawaited(_persistTranscript());
-    notifyListeners();
+  String _mergeTurnText(String existing, String incoming) {
+    final next = incoming.trim();
+    final cur = existing.trim();
+    if (next.isEmpty) return cur;
+    if (cur.isEmpty) return next;
+    if (cur == next || cur.endsWith(next)) return cur;
+    if (next.startsWith(cur)) return next;
+    return '$cur $next';
   }
 
-  String _stamp(DateTime time, String text) {
-    return '[${time.toIso8601String()}] $text';
-  }
-
-  void _trimHistory() {
-    if (_history.length > 60) {
-      _history.removeRange(0, _history.length - 60);
-    }
-  }
-
-  ({int sampleRate, int channels}) _parsePcmConfig(String mimeType) {
-    final rateMatch = RegExp(r'rate=(\d+)', caseSensitive: false).firstMatch(mimeType);
-    final channelsMatch =
-        RegExp(r'channels=(\d+)', caseSensitive: false).firstMatch(mimeType);
-    final sampleRate = int.tryParse(rateMatch?.group(1) ?? '') ?? 24000;
-    final channels = int.tryParse(channelsMatch?.group(1) ?? '') ?? 1;
-    return (sampleRate: sampleRate, channels: channels);
-  }
+  String _stamp(DateTime time, String text) => '[${time.toIso8601String()}] $text';
 
   double _pcmRms(Uint8List pcm16) {
     if (pcm16.length < 2) return 0;
@@ -943,37 +688,6 @@ class AymaAudioService extends ChangeNotifier {
     return math.sqrt(sum / count).clamp(0.0, 1.0);
   }
 
-  static const Map<String, String> _liveSetupKeyAliases = {
-    'system_instruction': 'systemInstruction',
-    'generation_config': 'generationConfig',
-    'speech_config': 'speechConfig',
-    'voice_config': 'voiceConfig',
-    'prebuilt_voice_config': 'prebuiltVoiceConfig',
-    'voice_name': 'voiceName',
-    'function_declarations': 'functionDeclarations',
-    'response_modalities': 'responseModalities',
-  };
-
-  Map<String, dynamic> _normalizeLiveSetupPayload(Map<String, dynamic> setup) {
-    dynamic normalize(dynamic value) {
-      if (value is Map) {
-        final out = <String, dynamic>{};
-        value.forEach((key, v) {
-          final rawKey = key.toString();
-          final mappedKey = _liveSetupKeyAliases[rawKey] ?? rawKey;
-          out[mappedKey] = normalize(v);
-        });
-        return out;
-      }
-      if (value is List) {
-        return value.map(normalize).toList();
-      }
-      return value;
-    }
-
-    return normalize(setup) as Map<String, dynamic>;
-  }
-
   void _addAssistantFallbackMessage() {
     _addTranscript(
       'I could not generate a reply right now. Please check your connection and try again.',
@@ -984,11 +698,13 @@ class AymaAudioService extends ChangeNotifier {
   @override
   void dispose() {
     _micFlushTimer?.cancel();
-    disconnect(notify: false);
-    if (!kIsWeb && _audioInitialized) {
-      _recorder.closeRecorder();
-      _player.closePlayer();
+    _persistDebounce?.cancel();
+    for (final sub in _subs) {
+      sub.cancel();
     }
+    _client.dispose();
+    _recorder.dispose();
+    _streamer.dispose();
     super.dispose();
   }
 }

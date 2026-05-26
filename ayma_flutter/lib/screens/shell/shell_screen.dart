@@ -28,7 +28,7 @@ class ShellScreen extends ConsumerWidget {
     if (selectedIndex == -1) selectedIndex = 0;
 
     return Scaffold(
-      backgroundColor: AymaColors.bg,
+      backgroundColor: context.ac.bg,
       body: Padding(
         padding: EdgeInsets.only(bottom: 56 + bottomInset),
         child: child,
@@ -67,7 +67,7 @@ class _AymaTabBar extends StatelessWidget {
       ),
       child: ClipRect(
         child: Container(
-          color: AymaColors.bg.withValues(alpha: 0.92),
+          color: context.ac.bg.withValues(alpha: 0.92),
           child: SafeArea(
             top: false,
             child: SizedBox(
@@ -96,7 +96,7 @@ class _AymaTabBar extends StatelessWidget {
                                   child: Container(
                                     width: 14,
                                     height: 14,
-                                    decoration: const BoxDecoration(
+                                    decoration: BoxDecoration(
                                       color: AymaColors.accent,
                                       shape: BoxShape.circle,
                                     ),
@@ -119,7 +119,7 @@ class _AymaTabBar extends StatelessWidget {
                             tab.label.toUpperCase(),
                             style: AymaFonts.mono(
                               size: 8,
-                              color: active ? AymaColors.fg : AymaColors.fgMute,
+                              color: active ? context.ac.fg : context.ac.fgMute,
                               letterSpacing: 0.15,
                             ),
                           ),
@@ -144,8 +144,8 @@ class _TabIcon extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final c = active ? AymaColors.fg : AymaColors.fgMute;
-    final accentC = active ? AymaColors.accent : Colors.transparent;
+    final c = active ? context.ac.fg : context.ac.fgMute;
+    final accentC = active ? context.ac.accent : Colors.transparent;
 
     return SizedBox(
       width: 22,

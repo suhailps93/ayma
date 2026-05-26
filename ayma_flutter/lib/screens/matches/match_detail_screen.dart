@@ -88,14 +88,14 @@ class _MatchDetailScreenState extends ConsumerState<MatchDetailScreen> {
         : 'Match';
 
     return Scaffold(
-      backgroundColor: AymaColors.bg,
+      backgroundColor: context.ac.bg,
       body: CustomScrollView(
         slivers: [
           // ── Photo header ────────────────────────────────────────
           SliverAppBar(
             expandedHeight: 300,
             pinned: true,
-            backgroundColor: AymaColors.bg,
+            backgroundColor: context.ac.bg,
             leading: IconButton(
               icon: Container(
                 width: 36, height: 36,
@@ -134,9 +134,9 @@ class _MatchDetailScreenState extends ConsumerState<MatchDetailScreen> {
                       child: Container(
                         padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
                         decoration: BoxDecoration(
-                          color: AymaColors.bg.withValues(alpha: 0.8),
+                          color: context.ac.bg.withValues(alpha: 0.8),
                           borderRadius: BorderRadius.circular(99),
-                          border: Border.all(color: AymaColors.accent.withValues(alpha: 0.4), width: 0.5),
+                          border: Border.all(color: context.ac.accent.withValues(alpha: 0.4), width: 0.5),
                         ),
                         child: Row(
                           mainAxisSize: MainAxisSize.min,
@@ -152,7 +152,7 @@ class _MatchDetailScreenState extends ConsumerState<MatchDetailScreen> {
                                 alignment: Alignment.centerLeft,
                                 child: Container(
                                   decoration: BoxDecoration(
-                                    color: AymaColors.accent,
+                                    color: context.ac.accent,
                                     borderRadius: BorderRadius.circular(2),
                                   ),
                                 ),
@@ -161,7 +161,7 @@ class _MatchDetailScreenState extends ConsumerState<MatchDetailScreen> {
                             const SizedBox(width: 8),
                             Text(
                               '${m.scorePercent}% match',
-                              style: AymaFonts.mono(size: 10, color: AymaColors.accent),
+                              style: AymaFonts.mono(size: 10, color: context.ac.accent),
                             ),
                           ],
                         ),
@@ -174,7 +174,7 @@ class _MatchDetailScreenState extends ConsumerState<MatchDetailScreen> {
                         padding: const EdgeInsets.fromLTRB(20, 40, 20, 20),
                         decoration: BoxDecoration(
                           gradient: LinearGradient(
-                            colors: [Colors.transparent, AymaColors.bg.withValues(alpha: 0.9)],
+                            colors: [Colors.transparent, context.ac.bg.withValues(alpha: 0.9)],
                             begin: Alignment.topCenter,
                             end: Alignment.bottomCenter,
                           ),
@@ -184,18 +184,18 @@ class _MatchDetailScreenState extends ConsumerState<MatchDetailScreen> {
                           children: [
                             Text(
                               otherName,
-                              style: AymaFonts.serif(size: 34, color: AymaColors.fg),
+                              style: AymaFonts.serif(size: 34, color: context.ac.fg),
                             ),
                             const SizedBox(height: 4),
                             if (otherProfileAsync.valueOrNull != null)
                               Text(
                                 _userSub(otherProfileAsync.valueOrNull!),
-                                style: AymaFonts.mono(size: 9, color: AymaColors.fgMute),
+                                style: AymaFonts.mono(size: 9, color: context.ac.fgMute),
                               )
                             else
                               Text(
                                 _timeAgo(m.createdAt),
-                                style: AymaFonts.mono(size: 9, color: AymaColors.fgMute),
+                                style: AymaFonts.mono(size: 9, color: context.ac.fgMute),
                               ),
                           ],
                         ),
@@ -249,11 +249,11 @@ class _MatchDetailScreenState extends ConsumerState<MatchDetailScreen> {
                   padding: const EdgeInsets.only(bottom: 20),
                   child: Row(
                     children: [
-                      Expanded(child: Container(height: 0.5, color: AymaColors.lineSoft)),
+                      Expanded(child: Container(height: 0.5, color: context.ac.lineSoft)),
                       const SizedBox(width: 14),
-                      Text('CURATED BY AYMA', style: AymaFonts.mono(size: 9, color: AymaColors.fgMute)),
+                      Text('CURATED BY AYMA', style: AymaFonts.mono(size: 9, color: context.ac.fgMute)),
                       const SizedBox(width: 14),
-                      Expanded(child: Container(height: 0.5, color: AymaColors.lineSoft)),
+                      Expanded(child: Container(height: 0.5, color: context.ac.lineSoft)),
                     ],
                   ),
                 ),
@@ -295,9 +295,9 @@ class _ReasoningCard extends StatelessWidget {
     return Container(
       padding: const EdgeInsets.all(18),
       decoration: BoxDecoration(
-        color: AymaColors.bgElev,
+        color: context.ac.bgElev,
         borderRadius: BorderRadius.circular(20),
-        border: Border.all(color: AymaColors.lineSoft, width: 0.5),
+        border: Border.all(color: context.ac.lineSoft, width: 0.5),
       ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
@@ -306,13 +306,13 @@ class _ReasoningCard extends StatelessWidget {
             children: [
               _MiniOrb(),
               const SizedBox(width: 8),
-              Text('WHY AYMA CHOSE THEM', style: AymaFonts.mono(size: 9, color: AymaColors.fgMute)),
+              Text('WHY AYMA CHOSE THEM', style: AymaFonts.mono(size: 9, color: context.ac.fgMute)),
             ],
           ),
           const SizedBox(height: 14),
           Text(
             '"${match.summary}"',
-            style: AymaFonts.serif(size: 19, italic: true, color: AymaColors.fg),
+            style: AymaFonts.serif(size: 19, italic: true, color: context.ac.fg),
           ),
         ],
       ),
@@ -332,20 +332,20 @@ class _InfoCard extends StatelessWidget {
     return Container(
       padding: const EdgeInsets.all(18),
       decoration: BoxDecoration(
-        color: AymaColors.bgElev,
+        color: context.ac.bgElev,
         borderRadius: BorderRadius.circular(20),
-        border: Border.all(color: AymaColors.lineSoft, width: 0.5),
+        border: Border.all(color: context.ac.lineSoft, width: 0.5),
       ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Text(title.toUpperCase(), style: AymaFonts.mono(size: 9, color: AymaColors.fgMute)),
+          Text(title.toUpperCase(), style: AymaFonts.mono(size: 9, color: context.ac.fgMute)),
           const SizedBox(height: 12),
           Text(
             content,
-            style: const TextStyle(
+            style: TextStyle(
               fontSize: 14,
-              color: AymaColors.fgDim,
+              color: context.ac.fgDim,
               height: 1.6,
             ),
           ),
@@ -364,7 +364,7 @@ class _StatusBanner extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final isAccepted = status == 'accepted';
-    final color = isAccepted ? Colors.green.shade400 : AymaColors.fgMute;
+    final color = isAccepted ? Colors.green.shade400 : context.ac.fgMute;
     final label = isAccepted ? 'You sent a hello' : 'Dismissed';
     final icon = isAccepted ? Icons.check_circle_outline_rounded : Icons.cancel_outlined;
 
@@ -414,16 +414,16 @@ class _ActionBar extends StatelessWidget {
             ? Container(
                 padding: const EdgeInsets.symmetric(vertical: 16),
                 decoration: BoxDecoration(
-                  color: AymaColors.bgElev,
+                  color: context.ac.bgElev,
                   borderRadius: BorderRadius.circular(18),
-                  border: Border.all(color: AymaColors.lineSoft, width: 0.5),
+                  border: Border.all(color: context.ac.lineSoft, width: 0.5),
                 ),
                 child: Center(
                   child: Text(
                     actionTaken == 'accepted' || status == 'accepted'
                         ? 'Hello sent ✓'
                         : 'Dismissed',
-                    style: const TextStyle(color: AymaColors.fgDim, fontSize: 14),
+                    style: TextStyle(color: context.ac.fgDim, fontSize: 14),
                   ),
                 ),
               )
@@ -436,16 +436,16 @@ class _ActionBar extends StatelessWidget {
                       child: Container(
                         padding: const EdgeInsets.symmetric(vertical: 16),
                         decoration: BoxDecoration(
-                          color: AymaColors.bgElev,
+                          color: context.ac.bgElev,
                           borderRadius: BorderRadius.circular(18),
-                          border: Border.all(color: AymaColors.lineSoft, width: 0.5),
+                          border: Border.all(color: context.ac.lineSoft, width: 0.5),
                         ),
                         child: Center(
                           child: Text(
                             'Not for me',
                             style: TextStyle(
                               fontSize: 14,
-                              color: loading ? AymaColors.fgMute : AymaColors.fgDim,
+                              color: loading ? context.ac.fgMute : context.ac.fgDim,
                             ),
                           ),
                         ),
@@ -461,7 +461,7 @@ class _ActionBar extends StatelessWidget {
                       child: Container(
                         padding: const EdgeInsets.symmetric(vertical: 16),
                         decoration: BoxDecoration(
-                          color: AymaColors.fg,
+                          color: context.ac.fg,
                           borderRadius: BorderRadius.circular(18),
                         ),
                         child: Center(
@@ -478,9 +478,9 @@ class _ActionBar extends StatelessWidget {
                                   children: [
                                     Container(
                                       width: 6, height: 6,
-                                      decoration: const BoxDecoration(
+                                      decoration: BoxDecoration(
                                         shape: BoxShape.circle,
-                                        color: AymaColors.accent,
+                                        color: context.ac.accent,
                                       ),
                                     ),
                                     const SizedBox(width: 8),
@@ -530,14 +530,14 @@ class _BothProfilesCard extends StatelessWidget {
     return Container(
       padding: const EdgeInsets.all(18),
       decoration: BoxDecoration(
-        color: AymaColors.bgElev,
+        color: context.ac.bgElev,
         borderRadius: BorderRadius.circular(20),
-        border: Border.all(color: AymaColors.lineSoft, width: 0.5),
+        border: Border.all(color: context.ac.lineSoft, width: 0.5),
       ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Text('THE MATCH', style: AymaFonts.mono(size: 9, color: AymaColors.fgMute)),
+          Text('THE MATCH', style: AymaFonts.mono(size: 9, color: context.ac.fgMute)),
           const SizedBox(height: 16),
           _ProfileRow(
             label: 'You',
@@ -549,12 +549,12 @@ class _BothProfilesCard extends StatelessWidget {
             padding: const EdgeInsets.symmetric(vertical: 14),
             child: Row(
               children: [
-                Expanded(child: Container(height: 0.5, color: AymaColors.lineSoft)),
+                Expanded(child: Container(height: 0.5, color: context.ac.lineSoft)),
                 Padding(
                   padding: const EdgeInsets.symmetric(horizontal: 12),
                   child: _MiniOrb(),
                 ),
-                Expanded(child: Container(height: 0.5, color: AymaColors.lineSoft)),
+                Expanded(child: Container(height: 0.5, color: context.ac.lineSoft)),
               ],
             ),
           ),
@@ -602,18 +602,18 @@ class _ProfileRow extends StatelessWidget {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        Text(label.toUpperCase(), style: AymaFonts.mono(size: 8, color: AymaColors.fgMute)),
+        Text(label.toUpperCase(), style: AymaFonts.mono(size: 8, color: context.ac.fgMute)),
         const SizedBox(height: 4),
-        Text(name, style: AymaFonts.serif(size: 18, color: AymaColors.fg)),
+        Text(name, style: AymaFonts.serif(size: 18, color: context.ac.fg)),
         if (sub.isNotEmpty) ...[
           const SizedBox(height: 2),
-          Text(sub, style: const TextStyle(fontSize: 12, color: AymaColors.fgMute)),
+          Text(sub, style: TextStyle(fontSize: 12, color: context.ac.fgMute)),
         ],
         if (snippet.isNotEmpty) ...[
           const SizedBox(height: 8),
           Text(
             snippet,
-            style: const TextStyle(fontSize: 13, color: AymaColors.fgDim, height: 1.5),
+            style: TextStyle(fontSize: 13, color: context.ac.fgDim, height: 1.5),
           ),
         ],
       ],

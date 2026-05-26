@@ -31,7 +31,7 @@ class _InsightsScreenState extends ConsumerState<InsightsScreen> {
     final async = ref.watch(insightsProvider);
 
     return Scaffold(
-      backgroundColor: AymaColors.bg,
+      backgroundColor: context.ac.bg,
       body: SafeArea(
         child: async.when(
           loading: () => const _LoadingView(),
@@ -156,7 +156,7 @@ class _Header extends StatelessWidget {
             children: [
               Text(
                 'YOUR STORY',
-                style: AymaFonts.serif(size: 36, color: AymaColors.fg),
+                style: AymaFonts.serif(size: 36, color: context.ac.fg),
               ).animate().fadeIn(duration: 400.ms),
               const Spacer(),
               // Refresh button
@@ -168,7 +168,7 @@ class _Header extends StatelessWidget {
                   child: Icon(
                     Icons.refresh_rounded,
                     size: 20,
-                    color: refreshing ? AymaColors.accent : AymaColors.fgMute,
+                    color: refreshing ? context.ac.accent : context.ac.fgMute,
                   ),
                 ),
               ),
@@ -179,7 +179,7 @@ class _Header extends StatelessWidget {
           const SizedBox(height: 6),
           Text(
             'What Ayma has learned about you — updated after every conversation.',
-            style: TextStyle(color: AymaColors.fgMute, fontSize: 12, height: 1.5),
+            style: TextStyle(color: context.ac.fgMute, fontSize: 12, height: 1.5),
           ).animate(delay: 100.ms).fadeIn(duration: 400.ms),
         ],
       ),
@@ -299,17 +299,17 @@ class _WikiCardState extends State<_WikiCard> {
                     width: 32,
                     height: 32,
                     decoration: BoxDecoration(
-                      color: AymaColors.gold.withValues(alpha: 0.08),
+                      color: context.ac.accent.withValues(alpha: 0.08),
                       borderRadius: BorderRadius.circular(8),
                       border: Border.all(
-                        color: AymaColors.gold.withValues(alpha: 0.2),
+                        color: context.ac.accent.withValues(alpha: 0.2),
                         width: 0.5,
                       ),
                     ),
                     child: Icon(
                       widget.def.icon,
                       size: 16,
-                      color: hasContent ? AymaColors.gold : AymaColors.textTertiary,
+                      color: hasContent ? context.ac.accent : context.ac.fgMute,
                     ),
                   ),
                   const SizedBox(width: 12),
@@ -321,8 +321,8 @@ class _WikiCardState extends State<_WikiCard> {
                           widget.def.title,
                           style: TextStyle(
                             color: hasContent
-                                ? AymaColors.textPrimary
-                                : AymaColors.textSecondary,
+                                ? context.ac.fg
+                                : context.ac.fgDim,
                             fontSize: 13,
                             fontWeight: FontWeight.w600,
                             letterSpacing: 0.3,
@@ -331,7 +331,7 @@ class _WikiCardState extends State<_WikiCard> {
                         Text(
                           widget.def.subtitle,
                           style: TextStyle(
-                            color: AymaColors.textTertiary,
+                            color: context.ac.fgMute,
                             fontSize: 10,
                             letterSpacing: 0.3,
                           ),
@@ -344,7 +344,7 @@ class _WikiCardState extends State<_WikiCard> {
                         ? Icons.keyboard_arrow_up_rounded
                         : Icons.keyboard_arrow_down_rounded,
                     size: 16,
-                    color: AymaColors.textTertiary,
+                    color: context.ac.fgMute,
                   ),
                 ],
               ),
@@ -354,7 +354,7 @@ class _WikiCardState extends State<_WikiCard> {
             if (_expanded)
               Container(
                 height: 0.5,
-                color: AymaColors.border,
+                color: context.ac.lineSoft,
               ),
 
             // Content
@@ -387,8 +387,8 @@ class _TextContent extends StatelessWidget {
   Widget build(BuildContext context) {
     return SelectableText(
       text.trim(),
-      style: const TextStyle(
-        color: AymaColors.textPrimary,
+      style: TextStyle(
+        color: context.ac.fg,
         fontSize: 13,
         height: 1.65,
         letterSpacing: 0.1,
@@ -466,7 +466,7 @@ class _MediaEntryCard extends StatelessWidget {
       margin: const EdgeInsets.only(bottom: 10),
       padding: const EdgeInsets.all(12),
       decoration: BoxDecoration(
-        color: AymaColors.surface,
+        color: context.ac.bgElev,
         borderRadius: BorderRadius.circular(10),
         border: Border.all(color: AymaColors.borderSub),
       ),
@@ -477,17 +477,17 @@ class _MediaEntryCard extends StatelessWidget {
             width: 40,
             height: 40,
             decoration: BoxDecoration(
-              color: AymaColors.gold.withValues(alpha: 0.06),
+              color: context.ac.accent.withValues(alpha: 0.06),
               borderRadius: BorderRadius.circular(6),
               border: Border.all(
-                color: AymaColors.gold.withValues(alpha: 0.15),
+                color: context.ac.accent.withValues(alpha: 0.15),
                 width: 0.5,
               ),
             ),
             child: Icon(
               Icons.image_outlined,
               size: 18,
-              color: AymaColors.textTertiary,
+              color: context.ac.fgMute,
             ),
           ),
           const SizedBox(width: 12),
@@ -498,8 +498,8 @@ class _MediaEntryCard extends StatelessWidget {
                 if (entry.caption.isNotEmpty)
                   Text(
                     entry.caption,
-                    style: const TextStyle(
-                      color: AymaColors.textPrimary,
+                    style: TextStyle(
+                      color: context.ac.fg,
                       fontSize: 12,
                       height: 1.5,
                     ),
@@ -508,8 +508,8 @@ class _MediaEntryCard extends StatelessWidget {
                   const SizedBox(height: 5),
                   Text(
                     entry.date,
-                    style: const TextStyle(
-                      color: AymaColors.textTertiary,
+                    style: TextStyle(
+                      color: context.ac.fgMute,
                       fontSize: 10,
                       letterSpacing: 0.3,
                     ),
@@ -534,8 +534,8 @@ class _EmptyContent extends StatelessWidget {
   Widget build(BuildContext context) {
     return Text(
       hint,
-      style: const TextStyle(
-        color: AymaColors.textTertiary,
+      style: TextStyle(
+        color: context.ac.fgMute,
         fontSize: 12,
         height: 1.6,
         fontStyle: FontStyle.italic,
@@ -551,10 +551,10 @@ class _LoadingView extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return const Center(
+    return Center(
       child: CircularProgressIndicator(
         strokeWidth: 1.5,
-        color: AymaColors.gold,
+        color: context.ac.accent,
       ),
     );
   }
@@ -571,7 +571,7 @@ class _ErrorView extends StatelessWidget {
         padding: const EdgeInsets.all(32),
         child: Text(
           'Could not load insights',
-          style: TextStyle(color: AymaColors.textSecondary, fontSize: 14),
+          style: TextStyle(color: context.ac.fgDim, fontSize: 14),
         ),
       ),
     );

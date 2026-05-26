@@ -7,6 +7,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../providers/providers.dart';
 import '../../services/firestore_service.dart';
 import '../../theme.dart';
+import '../../widgets/public_profile_view.dart';
 import 'direct_message_screen.dart';
 
 class ExploreScreen extends ConsumerStatefulWidget {
@@ -41,11 +42,11 @@ class _ExploreScreenState extends ConsumerState<ExploreScreen> {
 
   @override
   Widget build(BuildContext context) {
-    final filters  = ref.watch(exploreFiltersProvider);
+    final filters = ref.watch(exploreFiltersProvider);
     final resultAsync = ref.watch(exploreProvider);
 
     return Scaffold(
-      backgroundColor: AymaColors.bg,
+      backgroundColor: context.ac.bg,
       body: SafeArea(
         bottom: false,
         child: Column(
@@ -59,38 +60,43 @@ class _ExploreScreenState extends ConsumerState<ExploreScreen> {
                 children: [
                   Text(
                     'EXPLORE',
-                    style: AymaFonts.mono(size: 10, color: AymaColors.fgMute),
+                    style: AymaFonts.mono(size: 10, color: context.ac.fgMute),
                   ).animate().fadeIn(duration: 300.ms),
                   const SizedBox(height: 6),
                   Text(
                     'Browse profiles',
-                    style: AymaFonts.serif(size: 32, color: AymaColors.fg),
+                    style: AymaFonts.serif(size: 32, color: context.ac.fg),
                   ).animate(delay: 60.ms).fadeIn(duration: 400.ms),
                   const SizedBox(height: 16),
 
                   // Search bar
                   Container(
-                    padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+                    padding: const EdgeInsets.symmetric(
+                        horizontal: 14, vertical: 10),
                     decoration: BoxDecoration(
-                      color: AymaColors.bgElev,
+                      color: context.ac.bgElev,
                       borderRadius: BorderRadius.circular(14),
-                      border: Border.all(color: AymaColors.lineSoft, width: 0.5),
+                      border:
+                          Border.all(color: context.ac.lineSoft, width: 0.5),
                     ),
                     child: Row(
                       children: [
-                        const Icon(Icons.search_rounded, size: 18, color: AymaColors.fgMute),
+                        Icon(Icons.search_rounded,
+                            size: 18, color: context.ac.fgMute),
                         const SizedBox(width: 10),
                         Expanded(
                           child: TextField(
                             controller: _searchCtrl,
                             onChanged: _onSearch,
-                            style: const TextStyle(color: AymaColors.fg, fontSize: 14),
-                            cursorColor: AymaColors.accent,
-                            decoration: const InputDecoration(
+                            style: TextStyle(
+                                color: context.ac.fg, fontSize: 14),
+                            cursorColor: context.ac.accent,
+                            decoration: InputDecoration(
                               isCollapsed: true,
                               border: InputBorder.none,
                               hintText: 'Search by name, interest…',
-                              hintStyle: TextStyle(color: AymaColors.fgMute, fontSize: 14),
+                              hintStyle: TextStyle(
+                                  color: context.ac.fgMute, fontSize: 14),
                             ),
                           ),
                         ),
@@ -100,7 +106,8 @@ class _ExploreScreenState extends ConsumerState<ExploreScreen> {
                               _searchCtrl.clear();
                               _setFilter((f) => f.copyWith(query: ''));
                             },
-                            child: const Icon(Icons.close_rounded, size: 16, color: AymaColors.fgMute),
+                            child: Icon(Icons.close_rounded,
+                                size: 16, color: context.ac.fgMute),
                           ),
                       ],
                     ),
@@ -115,14 +122,16 @@ class _ExploreScreenState extends ConsumerState<ExploreScreen> {
                         _FilterChip(
                           label: 'Everyone',
                           active: filters.gender == null,
-                          onTap: () => _setFilter((f) => f.copyWith(gender: null)),
+                          onTap: () =>
+                              _setFilter((f) => f.copyWith(gender: null)),
                         ),
                         const SizedBox(width: 8),
                         _FilterChip(
                           label: 'Women',
                           active: filters.gender == 'women',
                           onTap: () => _setFilter((f) => f.copyWith(
-                              gender: filters.gender == 'women' ? null : 'women')),
+                              gender:
+                                  filters.gender == 'women' ? null : 'women')),
                         ),
                         const SizedBox(width: 8),
                         _FilterChip(
@@ -135,13 +144,14 @@ class _ExploreScreenState extends ConsumerState<ExploreScreen> {
                         _AgeFilterChip(
                           ageMin: filters.ageMin,
                           ageMax: filters.ageMax,
-                          onChanged: (min, max) =>
-                              _setFilter((f) => f.copyWith(ageMin: min, ageMax: max)),
+                          onChanged: (min, max) => _setFilter(
+                              (f) => f.copyWith(ageMin: min, ageMax: max)),
                         ),
                         const SizedBox(width: 8),
                         _RadiusFilterChip(
                           radiusKm: filters.radiusKm,
-                          onChanged: (r) => _setFilter((f) => f.copyWith(radiusKm: r)),
+                          onChanged: (r) =>
+                              _setFilter((f) => f.copyWith(radiusKm: r)),
                         ),
                       ],
                     ),
@@ -154,13 +164,15 @@ class _ExploreScreenState extends ConsumerState<ExploreScreen> {
                       _TabPill(
                         label: 'People',
                         active: filters.tab == 'people',
-                        onTap: () => _setFilter((f) => f.copyWith(tab: 'people')),
+                        onTap: () =>
+                            _setFilter((f) => f.copyWith(tab: 'people')),
                       ),
                       const SizedBox(width: 8),
                       _TabPill(
                         label: 'Prompts',
                         active: filters.tab == 'prompts',
-                        onTap: () => _setFilter((f) => f.copyWith(tab: 'prompts')),
+                        onTap: () =>
+                            _setFilter((f) => f.copyWith(tab: 'prompts')),
                       ),
                     ],
                   ),
@@ -172,10 +184,10 @@ class _ExploreScreenState extends ConsumerState<ExploreScreen> {
             // ── Results ─────────────────────────────────────────────
             Expanded(
               child: resultAsync.when(
-                loading: () => const Center(
+                loading: () => Center(
                   child: CircularProgressIndicator(
                     strokeWidth: 1.5,
-                    color: AymaColors.accent,
+                    color: context.ac.accent,
                   ),
                 ),
                 error: (e, _) => _ErrorState(
@@ -186,12 +198,14 @@ class _ExploreScreenState extends ConsumerState<ExploreScreen> {
                     final people = (data['people'] as List?) ?? [];
                     return people.isEmpty
                         ? _EmptyState(tab: 'people')
-                        : _PeopleGrid(people: people.cast<Map<String, dynamic>>());
+                        : _PeopleGrid(
+                            people: people.cast<Map<String, dynamic>>());
                   } else {
                     final prompts = (data['prompts'] as List?) ?? [];
                     return prompts.isEmpty
                         ? _EmptyState(tab: 'prompts')
-                        : _PromptsList(prompts: prompts.cast<Map<String, dynamic>>());
+                        : _PromptsList(
+                            prompts: prompts.cast<Map<String, dynamic>>());
                   }
                 },
               ),
@@ -210,7 +224,8 @@ class _FilterChip extends StatelessWidget {
   final bool active;
   final VoidCallback onTap;
 
-  const _FilterChip({required this.label, required this.active, required this.onTap});
+  const _FilterChip(
+      {required this.label, required this.active, required this.onTap});
 
   @override
   Widget build(BuildContext context) {
@@ -220,10 +235,14 @@ class _FilterChip extends StatelessWidget {
         duration: const Duration(milliseconds: 180),
         padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 7),
         decoration: BoxDecoration(
-          color: active ? AymaColors.accent.withValues(alpha: 0.14) : AymaColors.bgElev,
+          color: active
+              ? context.ac.accent.withValues(alpha: 0.14)
+              : context.ac.bgElev,
           borderRadius: BorderRadius.circular(99),
           border: Border.all(
-            color: active ? AymaColors.accent.withValues(alpha: 0.4) : AymaColors.lineSoft,
+            color: active
+                ? context.ac.accent.withValues(alpha: 0.4)
+                : context.ac.lineSoft,
             width: 0.5,
           ),
         ),
@@ -231,7 +250,7 @@ class _FilterChip extends StatelessWidget {
           label,
           style: TextStyle(
             fontSize: 12,
-            color: active ? AymaColors.accent : AymaColors.fgDim,
+            color: active ? context.ac.accent : context.ac.fgDim,
             fontWeight: active ? FontWeight.w500 : FontWeight.w400,
           ),
         ),
@@ -244,7 +263,8 @@ class _AgeFilterChip extends StatelessWidget {
   final int ageMin, ageMax;
   final void Function(int, int) onChanged;
 
-  const _AgeFilterChip({required this.ageMin, required this.ageMax, required this.onChanged});
+  const _AgeFilterChip(
+      {required this.ageMin, required this.ageMax, required this.onChanged});
 
   @override
   Widget build(BuildContext context) {
@@ -255,10 +275,14 @@ class _AgeFilterChip extends StatelessWidget {
         duration: const Duration(milliseconds: 180),
         padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 7),
         decoration: BoxDecoration(
-          color: !isDefault ? AymaColors.accent.withValues(alpha: 0.14) : AymaColors.bgElev,
+          color: !isDefault
+              ? context.ac.accent.withValues(alpha: 0.14)
+              : context.ac.bgElev,
           borderRadius: BorderRadius.circular(99),
           border: Border.all(
-            color: !isDefault ? AymaColors.accent.withValues(alpha: 0.4) : AymaColors.lineSoft,
+            color: !isDefault
+                ? context.ac.accent.withValues(alpha: 0.4)
+                : context.ac.lineSoft,
             width: 0.5,
           ),
         ),
@@ -266,7 +290,7 @@ class _AgeFilterChip extends StatelessWidget {
           isDefault ? 'Any age' : '$ageMin–$ageMax yrs',
           style: TextStyle(
             fontSize: 12,
-            color: !isDefault ? AymaColors.accent : AymaColors.fgDim,
+            color: !isDefault ? context.ac.accent : context.ac.fgDim,
           ),
         ),
       ),
@@ -285,22 +309,31 @@ class _AgeFilterChip extends StatelessWidget {
             mainAxisSize: MainAxisSize.min,
             children: [
               Text('$min – $max',
-                  style: AymaFonts.serif(size: 28, color: AymaColors.fg)),
+                  style: AymaFonts.serif(size: 28, color: ctx.ac.fg)),
               const SizedBox(height: 12),
               RangeSlider(
                 values: RangeValues(min.toDouble(), max.toDouble()),
-                min: 0, max: 120,
+                min: 0,
+                max: 120,
                 divisions: 120,
-                activeColor: AymaColors.accent,
-                inactiveColor: AymaColors.lineSoft,
+                activeColor: ctx.ac.accent,
+                inactiveColor: ctx.ac.lineSoft,
                 onChanged: (v) {
                   final lo = v.start.round();
                   final hi = v.end.round();
-                  if (lo < hi) setS(() { min = lo; max = hi; });
+                  if (lo < hi) {
+                    setS(() {
+                      min = lo;
+                      max = hi;
+                    });
+                  }
                 },
               ),
               const SizedBox(height: 16),
-              _ApplyBtn(onTap: () { Navigator.pop(ctx); onChanged(min, max); }),
+              _ApplyBtn(onTap: () {
+                Navigator.pop(ctx);
+                onChanged(min, max);
+              }),
             ],
           ),
         ),
@@ -324,10 +357,14 @@ class _RadiusFilterChip extends StatelessWidget {
         duration: const Duration(milliseconds: 180),
         padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 7),
         decoration: BoxDecoration(
-          color: !isDefault ? AymaColors.accent.withValues(alpha: 0.14) : AymaColors.bgElev,
+          color: !isDefault
+              ? context.ac.accent.withValues(alpha: 0.14)
+              : context.ac.bgElev,
           borderRadius: BorderRadius.circular(99),
           border: Border.all(
-            color: !isDefault ? AymaColors.accent.withValues(alpha: 0.4) : AymaColors.lineSoft,
+            color: !isDefault
+                ? context.ac.accent.withValues(alpha: 0.4)
+                : context.ac.lineSoft,
             width: 0.5,
           ),
         ),
@@ -335,7 +372,7 @@ class _RadiusFilterChip extends StatelessWidget {
           '$radiusKm km',
           style: TextStyle(
             fontSize: 12,
-            color: !isDefault ? AymaColors.accent : AymaColors.fgDim,
+            color: !isDefault ? context.ac.accent : context.ac.fgDim,
           ),
         ),
       ),
@@ -354,18 +391,22 @@ class _RadiusFilterChip extends StatelessWidget {
             mainAxisSize: MainAxisSize.min,
             children: [
               Text('$r km',
-                  style: AymaFonts.serif(size: 28, color: AymaColors.fg)),
+                  style: AymaFonts.serif(size: 28, color: ctx.ac.fg)),
               const SizedBox(height: 12),
               Slider(
                 value: r.toDouble(),
-                min: 5, max: 200,
+                min: 5,
+                max: 200,
                 divisions: 39,
-                activeColor: AymaColors.accent,
-                inactiveColor: AymaColors.lineSoft,
+                activeColor: ctx.ac.accent,
+                inactiveColor: ctx.ac.lineSoft,
                 onChanged: (v) => setS(() => r = v.round()),
               ),
               const SizedBox(height: 16),
-              _ApplyBtn(onTap: () { Navigator.pop(ctx); onChanged(r); }),
+              _ApplyBtn(onTap: () {
+                Navigator.pop(ctx);
+                onChanged(r);
+              }),
             ],
           ),
         ),
@@ -385,15 +426,16 @@ class _FilterSheet extends StatelessWidget {
       margin: const EdgeInsets.all(12),
       padding: const EdgeInsets.fromLTRB(20, 20, 20, 32),
       decoration: BoxDecoration(
-        color: AymaColors.bgElev,
+        color: context.ac.bgElev,
         borderRadius: BorderRadius.circular(26),
-        border: Border.all(color: AymaColors.lineSoft, width: 0.5),
+        border: Border.all(color: context.ac.lineSoft, width: 0.5),
       ),
       child: Column(
         mainAxisSize: MainAxisSize.min,
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Text(title.toUpperCase(), style: AymaFonts.mono(size: 10, color: AymaColors.fgMute)),
+          Text(title.toUpperCase(),
+              style: AymaFonts.mono(size: 10, color: context.ac.fgMute)),
           const SizedBox(height: 16),
           child,
         ],
@@ -414,12 +456,15 @@ class _ApplyBtn extends StatelessWidget {
         width: double.infinity,
         padding: const EdgeInsets.symmetric(vertical: 15),
         decoration: BoxDecoration(
-          color: AymaColors.fg,
+          color: context.ac.fg,
           borderRadius: BorderRadius.circular(16),
         ),
         child: const Center(
-          child: Text('Apply', style: TextStyle(fontSize: 14,
-              fontWeight: FontWeight.w500, color: Colors.black)),
+          child: Text('Apply',
+              style: TextStyle(
+                  fontSize: 14,
+                  fontWeight: FontWeight.w500,
+                  color: Colors.black)),
         ),
       ),
     );
@@ -433,7 +478,8 @@ class _TabPill extends StatelessWidget {
   final bool active;
   final VoidCallback onTap;
 
-  const _TabPill({required this.label, required this.active, required this.onTap});
+  const _TabPill(
+      {required this.label, required this.active, required this.onTap});
 
   @override
   Widget build(BuildContext context) {
@@ -443,15 +489,17 @@ class _TabPill extends StatelessWidget {
         duration: const Duration(milliseconds: 180),
         padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 9),
         decoration: BoxDecoration(
-          color: active ? AymaColors.fg : Colors.transparent,
+          color: active ? context.ac.fg : Colors.transparent,
           borderRadius: BorderRadius.circular(99),
-          border: active ? null : Border.all(color: AymaColors.lineSoft, width: 0.5),
+          border: active
+              ? null
+              : Border.all(color: context.ac.lineSoft, width: 0.5),
         ),
         child: Text(
           label,
           style: TextStyle(
             fontSize: 13,
-            color: active ? Colors.black : AymaColors.fgDim,
+            color: active ? Colors.black : context.ac.fgDim,
             fontWeight: active ? FontWeight.w500 : FontWeight.w400,
           ),
         ),
@@ -479,11 +527,16 @@ class _PeopleGrid extends StatelessWidget {
       itemCount: people.length,
       itemBuilder: (_, i) {
         final p = people[i];
+        final rawLoc = (p['location_region'] as String?) ?? '';
+        final city = rawLoc.isNotEmpty ? rawLoc.split(',').first.trim() : '';
+        final photos = (p['photo_order'] as List?)?.whereType<String>().toList() ?? [];
         return _ProfileCard(
           profile: p,
           name: (p['display_name'] as String?) ?? 'Someone',
-          age:  p['age'] as int?,
-          job:  (p['job'] as String?) ?? '',
+          age: p['age'] as int?,
+          photoUrl: photos.isNotEmpty ? photos.first : null,
+          location: city,
+          isOnline: (p['is_online'] as bool?) ?? false,
           seed: p['id'].hashCode.abs() % 30 + 1,
           delay: i * 40,
         );
@@ -496,7 +549,9 @@ class _ProfileCard extends StatelessWidget {
   final Map<String, dynamic> profile;
   final String name;
   final int? age;
-  final String job;
+  final String? photoUrl;
+  final String location;
+  final bool isOnline;
   final int seed;
   final int delay;
 
@@ -504,8 +559,10 @@ class _ProfileCard extends StatelessWidget {
     required this.profile,
     required this.name,
     required this.age,
-    required this.job,
     required this.seed,
+    this.photoUrl,
+    this.location = '',
+    this.isOnline = false,
     this.delay = 0,
   });
 
@@ -523,63 +580,125 @@ class _ProfileCard extends StatelessWidget {
         );
       },
       child: Container(
-      decoration: BoxDecoration(
-        borderRadius: BorderRadius.circular(20),
-        color: AymaColors.bgElev,
-        border: Border.all(color: AymaColors.lineSoft, width: 0.5),
-      ),
-      clipBehavior: Clip.hardEdge,
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Expanded(
-            child: Container(
-              decoration: BoxDecoration(
-                gradient: LinearGradient(
-                  colors: [
-                    HSLColor.fromAHSL(1, h1.toDouble(), 0.3, 0.25).toColor(),
-                    HSLColor.fromAHSL(1, h2.toDouble(), 0.25, 0.18).toColor(),
-                  ],
-                  begin: Alignment.topLeft,
-                  end: Alignment.bottomRight,
+        decoration: BoxDecoration(
+          borderRadius: BorderRadius.circular(20),
+          color: context.ac.bgCard,
+        ),
+        clipBehavior: Clip.hardEdge,
+        child: Stack(
+          fit: StackFit.expand,
+          children: [
+            // Photo or gradient placeholder
+            if (photoUrl != null && photoUrl!.isNotEmpty)
+              Image.network(
+                photoUrl!,
+                fit: BoxFit.cover,
+                errorBuilder: (_, __, ___) => _CardPlaceholder(h1: h1, h2: h2),
+              )
+            else
+              _CardPlaceholder(h1: h1, h2: h2),
+            // Bottom gradient scrim
+            Positioned(
+              left: 0, right: 0, bottom: 0,
+              child: Container(
+                height: 110,
+                decoration: const BoxDecoration(
+                  gradient: LinearGradient(
+                    begin: Alignment.topCenter,
+                    end: Alignment.bottomCenter,
+                    colors: [Colors.transparent, Color(0xCC000000)],
+                  ),
                 ),
               ),
-              child: Center(
-                child: Icon(Icons.person_outline_rounded,
-                    size: 40, color: Colors.white.withValues(alpha: 0.15)),
-              ),
             ),
-          ),
-          Padding(
-            padding: const EdgeInsets.fromLTRB(12, 10, 12, 12),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Row(
-                  children: [
-                    Flexible(
-                      child: Text(name,
+            // Name / age / location / online
+            Positioned(
+              left: 12, right: 12, bottom: 12,
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Row(
+                    crossAxisAlignment: CrossAxisAlignment.baseline,
+                    textBaseline: TextBaseline.alphabetic,
+                    children: [
+                      Flexible(
+                        child: Text(
+                          name,
+                          style: AymaFonts.serif(size: 20, color: Colors.white),
                           overflow: TextOverflow.ellipsis,
-                          style: AymaFonts.serif(size: 18, color: AymaColors.fg)),
-                    ),
-                    if (age != null) ...[
-                      const SizedBox(width: 5),
-                      Text('· $age',
-                          style: const TextStyle(fontSize: 12, color: AymaColors.fgMute)),
+                        ),
+                      ),
+                      if (age != null) ...[
+                        const SizedBox(width: 5),
+                        Text(
+                          '· \$age',
+                          style: const TextStyle(
+                              color: Colors.white70, fontSize: 15),
+                        ),
+                      ],
                     ],
+                  ),
+                  if (location.isNotEmpty || isOnline) ...[
+                    const SizedBox(height: 3),
+                    Row(
+                      children: [
+                        if (isOnline) ...[
+                          Container(
+                            width: 6, height: 6,
+                            decoration: const BoxDecoration(
+                              color: Color(0xFF46D96A),
+                              shape: BoxShape.circle,
+                            ),
+                          ),
+                          const SizedBox(width: 5),
+                        ],
+                        if (location.isNotEmpty)
+                          Flexible(
+                            child: Text(
+                              location,
+                              style: const TextStyle(
+                                  color: Colors.white70, fontSize: 12),
+                              overflow: TextOverflow.ellipsis,
+                            ),
+                          ),
+                      ],
+                    ),
                   ],
-                ),
-                if (job.isNotEmpty) ...[
-                  const SizedBox(height: 2),
-                  Text(job, style: AymaFonts.mono(size: 9, color: AymaColors.fgMute)),
                 ],
-              ],
+              ),
             ),
-          ),
-        ],
+          ],
+        ),
       ),
-    )).animate(delay: Duration(milliseconds: delay)).fadeIn(duration: 300.ms).slideY(begin: 0.04, end: 0);
+    )
+        .animate(delay: Duration(milliseconds: delay))
+        .fadeIn(duration: 300.ms)
+        .slideY(begin: 0.04, end: 0);
   }
+}
+
+class _CardPlaceholder extends StatelessWidget {
+  final int h1, h2;
+  const _CardPlaceholder({required this.h1, required this.h2});
+
+  @override
+  Widget build(BuildContext context) => Container(
+    decoration: BoxDecoration(
+      gradient: LinearGradient(
+        colors: [
+          HSLColor.fromAHSL(1, h1.toDouble(), 0.3, 0.25).toColor(),
+          HSLColor.fromAHSL(1, h2.toDouble(), 0.25, 0.18).toColor(),
+        ],
+        begin: Alignment.topLeft,
+        end: Alignment.bottomRight,
+      ),
+    ),
+    child: Center(
+      child: Icon(Icons.person_outline_rounded,
+          size: 40, color: Colors.white.withValues(alpha: 0.15)),
+    ),
+  );
 }
 
 // ── Prompts list ──────────────────────────────────────────────────────────────
@@ -599,15 +718,19 @@ class _PromptsList extends StatelessWidget {
           margin: const EdgeInsets.only(bottom: 10),
           padding: const EdgeInsets.all(18),
           decoration: BoxDecoration(
-            color: AymaColors.bgElev,
+            color: context.ac.bgElev,
             borderRadius: BorderRadius.circular(18),
-            border: Border.all(color: AymaColors.lineSoft, width: 0.5),
+            border: Border.all(color: context.ac.lineSoft, width: 0.5),
           ),
           child: Text(
             text,
-            style: AymaFonts.serif(size: 18, italic: true, color: AymaColors.fg),
+            style:
+                AymaFonts.serif(size: 18, italic: true, color: context.ac.fg),
           ),
-        ).animate(delay: Duration(milliseconds: i * 50)).fadeIn(duration: 300.ms).slideY(begin: 0.04, end: 0);
+        )
+            .animate(delay: Duration(milliseconds: i * 50))
+            .fadeIn(duration: 300.ms)
+            .slideY(begin: 0.04, end: 0);
       },
     );
   }
@@ -628,16 +751,18 @@ class _EmptyState extends StatelessWidget {
           mainAxisSize: MainAxisSize.min,
           children: [
             Icon(
-              tab == 'people' ? Icons.people_outline_rounded : Icons.chat_bubble_outline_rounded,
+              tab == 'people'
+                  ? Icons.people_outline_rounded
+                  : Icons.chat_bubble_outline_rounded,
               size: 40,
-              color: AymaColors.fgMute,
+              color: context.ac.fgMute,
             ),
             const SizedBox(height: 16),
             Text(
               tab == 'people'
                   ? 'No profiles match your filters'
                   : 'No prompts available yet',
-              style: AymaFonts.serif(size: 20, color: AymaColors.fgDim),
+              style: AymaFonts.serif(size: 20, color: context.ac.fgDim),
               textAlign: TextAlign.center,
             ),
             const SizedBox(height: 8),
@@ -645,7 +770,8 @@ class _EmptyState extends StatelessWidget {
               tab == 'people'
                   ? 'Try widening your age range or distance.'
                   : 'Check back after your next conversation.',
-              style: const TextStyle(color: AymaColors.fgMute, fontSize: 13, height: 1.5),
+              style: TextStyle(
+                  color: context.ac.fgMute, fontSize: 13, height: 1.5),
               textAlign: TextAlign.center,
             ),
           ],
@@ -666,19 +792,19 @@ class _ErrorState extends StatelessWidget {
         mainAxisSize: MainAxisSize.min,
         children: [
           Text('Could not load profiles',
-              style: TextStyle(color: AymaColors.fgDim, fontSize: 14)),
+              style: TextStyle(color: context.ac.fgDim, fontSize: 14)),
           const SizedBox(height: 12),
           GestureDetector(
             onTap: onRetry,
             child: Container(
               padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 10),
               decoration: BoxDecoration(
-                color: AymaColors.bgElev,
+                color: context.ac.bgElev,
                 borderRadius: BorderRadius.circular(12),
-                border: Border.all(color: AymaColors.lineSoft, width: 0.5),
+                border: Border.all(color: context.ac.lineSoft, width: 0.5),
               ),
-              child: const Text('Retry',
-                  style: TextStyle(color: AymaColors.fg, fontSize: 13)),
+              child: Text('Retry',
+                  style: TextStyle(color: context.ac.fg, fontSize: 13)),
             ),
           ),
         ],
@@ -750,10 +876,10 @@ class _ExploreProfileScreenState extends State<_ExploreProfileScreen> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      backgroundColor: AymaColors.bg,
+      backgroundColor: context.ac.bg,
       appBar: AppBar(
-        backgroundColor: AymaColors.bg,
-        foregroundColor: AymaColors.fg,
+        backgroundColor: context.ac.bg,
+        foregroundColor: context.ac.fg,
         elevation: 0,
         title: const Text('Profile'),
       ),
@@ -761,8 +887,8 @@ class _ExploreProfileScreenState extends State<_ExploreProfileScreen> {
         future: _profileFuture,
         builder: (context, snap) {
           if (snap.connectionState == ConnectionState.waiting) {
-            return const Center(
-              child: CircularProgressIndicator(color: AymaColors.accent),
+            return Center(
+              child: CircularProgressIndicator(color: context.ac.accent),
             );
           }
           final p = (snap.data != null && snap.data!.isNotEmpty)
@@ -777,98 +903,55 @@ class _ExploreProfileScreenState extends State<_ExploreProfileScreen> {
                   ?.trim();
           final bio = (p['profile_public'] as String?)?.trim();
           final location = (p['location_region'] as String?)?.trim();
-          final photos = (p['photos'] as List?)?.cast<String>() ?? const <String>[];
+          final job = ((p['job'] as String?) ?? (p['occupation'] as String?) ?? '').trim();
+          final company = ((p['company'] as String?) ?? (p['employer'] as String?) ?? '').trim();
+          final jobPill = job.isNotEmpty ? (company.isNotEmpty ? '$job · $company' : job) : '';
+          final extraPills = <String>[
+            jobPill,
+            ((p['height_text'] as String?) ?? (p['height'] as String?) ?? '').trim(),
+            ((p['pronouns'] as String?) ?? '').trim(),
+            ((p['religion'] as String?) ?? '').trim(),
+            ((p['relationship_goal'] as String?) ?? '').trim(),
+          ].where((e) => e.isNotEmpty).toList();
+          final photos =
+              (p['photos'] as List?)?.cast<String>() ?? const <String>[];
 
-          return ListView(
-            padding: const EdgeInsets.fromLTRB(20, 12, 20, 28),
-            children: [
-              if (photos.isNotEmpty) ...[
-                SizedBox(
-                  height: 220,
-                  child: ListView.separated(
-                    scrollDirection: Axis.horizontal,
-                    itemCount: photos.length,
-                    separatorBuilder: (_, __) => const SizedBox(width: 10),
-                    itemBuilder: (_, i) => ClipRRect(
-                      borderRadius: BorderRadius.circular(16),
-                      child: Image.network(
-                        photos[i],
-                        width: 170,
-                        fit: BoxFit.cover,
-                        errorBuilder: (_, __, ___) => Container(
-                          width: 170,
-                          color: AymaColors.bgElev,
-                        ),
-                      ),
-                    ),
-                  ),
+          return PublicProfileView(
+            photos: photos,
+            name: name?.isNotEmpty == true ? name! : 'Someone',
+            age: age is int ? age : null,
+            gender: gender ?? '',
+            location: location ?? '',
+            interestedIn: interestedIn ?? '',
+            bio: bio ?? '',
+            extraPills: extraPills,
+            isOnline: true,
+            showEditControls: false,
+            bottom: Wrap(
+              spacing: 8,
+              runSpacing: 8,
+              children: [
+                _ActionBtn(
+                  label: _matchScore == null
+                      ? 'Generate Match Score'
+                      : 'Match ${(100 * _matchScore!).round()}%',
+                  onTap: _busy || userId.isEmpty
+                      ? null
+                      : () => _generateScore(userId),
                 ),
-                const SizedBox(height: 16),
+                _ActionBtn(
+                  label: 'Send Poke',
+                  onTap:
+                      _busy || userId.isEmpty ? null : () => _sendPoke(userId),
+                ),
+                _ActionBtn(
+                  label: 'Message',
+                  onTap: _busy || userId.isEmpty
+                      ? null
+                      : () => _sendMessage(userId),
+                ),
               ],
-              Container(
-                padding: const EdgeInsets.all(18),
-                decoration: BoxDecoration(
-                  color: AymaColors.bgElev,
-                  borderRadius: BorderRadius.circular(20),
-                  border: Border.all(color: AymaColors.lineSoft, width: 0.5),
-                ),
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(
-                      name?.isNotEmpty == true ? name! : 'Someone',
-                      style: AymaFonts.serif(size: 30, color: AymaColors.fg),
-                    ),
-                    const SizedBox(height: 8),
-                    Text(
-                      [
-                        if (age is int) '$age',
-                        if (gender != null && gender.isNotEmpty) gender,
-                        if (interestedIn != null && interestedIn.isNotEmpty)
-                          'Interested in $interestedIn',
-                        if (location != null && location.isNotEmpty) location,
-                      ].join(' · '),
-                      style: const TextStyle(color: AymaColors.fgMute, fontSize: 14),
-                    ),
-                    if (bio != null && bio.isNotEmpty) ...[
-                      const SizedBox(height: 18),
-                      Text(
-                        bio,
-                        style: AymaFonts.elegantSans(size: 15, color: AymaColors.fg)
-                            .copyWith(height: 1.6),
-                      ),
-                    ],
-                    const SizedBox(height: 18),
-                    Wrap(
-                      spacing: 8,
-                      runSpacing: 8,
-                      children: [
-                        _ActionBtn(
-                          label: _matchScore == null
-                              ? 'Generate Match Score'
-                              : 'Match ${(100 * _matchScore!).round()}%',
-                          onTap: _busy || userId.isEmpty
-                              ? null
-                              : () => _generateScore(userId),
-                        ),
-                        _ActionBtn(
-                          label: 'Send Poke',
-                          onTap: _busy || userId.isEmpty
-                              ? null
-                              : () => _sendPoke(userId),
-                        ),
-                        _ActionBtn(
-                          label: 'Message',
-                          onTap: _busy || userId.isEmpty
-                              ? null
-                              : () => _sendMessage(userId),
-                        ),
-                      ],
-                    ),
-                  ],
-                ),
-              ),
-            ],
+            ),
           );
         },
       ),
@@ -888,14 +971,14 @@ class _ActionBtn extends StatelessWidget {
       child: Container(
         padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 9),
         decoration: BoxDecoration(
-          color: AymaColors.bgCard,
+          color: context.ac.bgCard,
           borderRadius: BorderRadius.circular(12),
-          border: Border.all(color: AymaColors.lineSoft, width: 0.5),
+          border: Border.all(color: context.ac.lineSoft, width: 0.5),
         ),
         child: Text(
           label,
           style: TextStyle(
-            color: onTap == null ? AymaColors.fgMute : AymaColors.fg,
+            color: onTap == null ? context.ac.fgMute : context.ac.fg,
             fontSize: 13,
           ),
         ),

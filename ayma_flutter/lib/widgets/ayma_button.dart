@@ -28,7 +28,7 @@ class AymaButton extends StatelessWidget {
             height: 18,
             child: CircularProgressIndicator(
               strokeWidth: 2,
-              color: outlined ? AymaColors.accent : Colors.white,
+              color: outlined ? context.ac.accent : Colors.white,
             ),
           )
         : Row(
@@ -36,13 +36,13 @@ class AymaButton extends StatelessWidget {
             children: [
               if (icon != null) ...[
                 Icon(icon, size: 18,
-                    color: outlined ? AymaColors.accent : Colors.white),
+                    color: outlined ? context.ac.accent : Colors.white),
                 const SizedBox(width: 8),
               ],
               Text(
                 label,
                 style: TextStyle(
-                  color: outlined ? AymaColors.accent : Colors.white,
+                  color: outlined ? context.ac.accent : Colors.white,
                   fontWeight: FontWeight.w600,
                   fontSize: 15,
                 ),
@@ -57,7 +57,7 @@ class AymaButton extends StatelessWidget {
         child: OutlinedButton(
           onPressed: loading ? null : onPressed,
           style: OutlinedButton.styleFrom(
-            side: BorderSide(color: AymaColors.accent.withValues(alpha: 0.5)),
+            side: BorderSide(color: context.ac.accent.withValues(alpha: 0.5)),
             shape: RoundedRectangleBorder(
                 borderRadius: BorderRadius.circular(14)),
           ),
@@ -72,9 +72,9 @@ class AymaButton extends StatelessWidget {
       child: ElevatedButton(
         onPressed: loading ? null : onPressed,
         style: ElevatedButton.styleFrom(
-          backgroundColor: AymaColors.accent,
+          backgroundColor: context.ac.accent,
           foregroundColor: Colors.white,
-          disabledBackgroundColor: AymaColors.accent.withValues(alpha: 0.4),
+          disabledBackgroundColor: context.ac.accent.withValues(alpha: 0.4),
           shape: RoundedRectangleBorder(
               borderRadius: BorderRadius.circular(14)),
           elevation: 0,

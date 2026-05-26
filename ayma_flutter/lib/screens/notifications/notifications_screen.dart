@@ -17,7 +17,7 @@ class NotificationsScreen extends ConsumerWidget {
     final unread   = notifs.where((n) => !n.read).length;
 
     return Scaffold(
-      backgroundColor: AymaColors.bg,
+      backgroundColor: context.ac.bg,
       body: SafeArea(
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
@@ -31,7 +31,7 @@ class NotificationsScreen extends ConsumerWidget {
                     children: [
                       Text(
                         unread > 0 ? '$unread unread' : 'Up to date',
-                        style: AymaFonts.mono(size: 10, color: AymaColors.fgMute),
+                        style: AymaFonts.mono(size: 10, color: context.ac.fgMute),
                       ).animate().fadeIn(duration: 300.ms),
                       const Spacer(),
                       if (unread > 0)
@@ -39,7 +39,7 @@ class NotificationsScreen extends ConsumerWidget {
                           onTap: notifier.markAllRead,
                           child: Text(
                             'Mark all read',
-                            style: AymaFonts.mono(size: 9, color: AymaColors.accent),
+                            style: AymaFonts.mono(size: 9, color: context.ac.accent),
                           ),
                         ),
                     ],
@@ -47,7 +47,7 @@ class NotificationsScreen extends ConsumerWidget {
                   const SizedBox(height: 8),
                   Text(
                     'Signals',
-                    style: AymaFonts.serif(size: 36, color: AymaColors.fg),
+                    style: AymaFonts.serif(size: 36, color: context.ac.fg),
                   ).animate(delay: 60.ms).fadeIn(duration: 400.ms),
                   const SizedBox(height: 16),
                 ],
@@ -96,14 +96,14 @@ class _EmptyState extends StatelessWidget {
       mainAxisAlignment: MainAxisAlignment.center,
       children: [
         Icon(Icons.notifications_none_rounded,
-            size: 48, color: AymaColors.textTertiary),
+            size: 48, color: context.ac.fgMute),
         const SizedBox(height: 16),
         Text('All caught up',
-            style: TextStyle(color: AymaColors.textPrimary, fontSize: 16,
+            style: TextStyle(color: context.ac.fg, fontSize: 16,
                 fontWeight: FontWeight.w500)),
         const SizedBox(height: 8),
         Text('You have no notifications.',
-            style: TextStyle(color: AymaColors.textSecondary, fontSize: 13)),
+            style: TextStyle(color: context.ac.fgDim, fontSize: 13)),
       ],
     ).animate().fadeIn(duration: 400.ms),
   );
@@ -124,12 +124,12 @@ class _NotifCard extends StatelessWidget {
     }
   }
 
-  Color get _iconColor {
+  Color _iconColor(BuildContext context) {
     switch (notif.type) {
       case NotificationType.newMatch:         return Colors.pink.shade300;
-      case NotificationType.agentUpdate:      return AymaColors.accent;
+      case NotificationType.agentUpdate:      return context.ac.accent;
       case NotificationType.profileSuggestion: return Colors.green.shade400;
-      case NotificationType.system:           return AymaColors.textSecondary;
+      case NotificationType.system:           return context.ac.fgDim;
     }
   }
 
@@ -142,12 +142,12 @@ class _NotifCard extends StatelessWidget {
         margin: const EdgeInsets.only(bottom: 10),
         padding: const EdgeInsets.all(16),
         decoration: BoxDecoration(
-          color: AymaColors.bgElev,
+          color: context.ac.bgElev,
           borderRadius: BorderRadius.circular(18),
           border: Border.all(
             color: notif.read
-                ? AymaColors.lineSoft
-                : AymaColors.accent.withValues(alpha: 0.25),
+                ? context.ac.lineSoft
+                : context.ac.accent.withValues(alpha: 0.25),
             width: 0.5,
           ),
         ),
@@ -157,10 +157,10 @@ class _NotifCard extends StatelessWidget {
             Container(
               width: 36, height: 36,
               decoration: BoxDecoration(
-                color: _iconColor.withValues(alpha: 0.12),
+                color: _iconColor(context).withValues(alpha: 0.12),
                 shape: BoxShape.circle,
               ),
-              child: Icon(_icon, color: _iconColor, size: 18),
+              child: Icon(_icon, color: _iconColor(context), size: 18),
             ),
             const SizedBox(width: 12),
             Expanded(
@@ -172,7 +172,7 @@ class _NotifCard extends StatelessWidget {
                       Expanded(
                         child: Text(notif.title,
                             style: TextStyle(
-                                color: AymaColors.textPrimary,
+                                color: context.ac.fg,
                                 fontWeight: notif.read
                                     ? FontWeight.w400
                                     : FontWeight.w600,
@@ -183,19 +183,19 @@ class _NotifCard extends StatelessWidget {
                           width: 6, height: 6,
                           decoration: BoxDecoration(
                               shape: BoxShape.circle,
-                              color: AymaColors.accent),
+                              color: context.ac.accent),
                         ),
                     ],
                   ),
                   const SizedBox(height: 3),
                   Text(notif.body,
                       style: TextStyle(
-                          color: AymaColors.textSecondary, fontSize: 13,
+                          color: context.ac.fgDim, fontSize: 13,
                           height: 1.4)),
                   const SizedBox(height: 6),
                   Text(_timeAgo(notif.createdAt),
                       style: TextStyle(
-                          color: AymaColors.textTertiary, fontSize: 11)),
+                          color: context.ac.fgMute, fontSize: 11)),
                 ],
               ),
             ),

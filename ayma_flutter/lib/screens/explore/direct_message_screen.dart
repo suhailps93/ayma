@@ -44,10 +44,10 @@ class _DirectMessageScreenState extends State<DirectMessageScreen> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      backgroundColor: AymaColors.bg,
+      backgroundColor: context.ac.bg,
       appBar: AppBar(
-        backgroundColor: AymaColors.bg,
-        foregroundColor: AymaColors.fg,
+        backgroundColor: context.ac.bg,
+        foregroundColor: context.ac.fg,
         elevation: 0,
         title: Text(widget.targetName),
       ),
@@ -59,10 +59,10 @@ class _DirectMessageScreenState extends State<DirectMessageScreen> {
               builder: (context, snap) {
                 final items = snap.data ?? const <Map<String, dynamic>>[];
                 if (items.isEmpty) {
-                  return const Center(
+                  return Center(
                     child: Text(
                       'No messages yet. Start the conversation.',
-                      style: TextStyle(color: AymaColors.fgMute),
+                      style: TextStyle(color: context.ac.fgMute),
                     ),
                   );
                 }
@@ -83,14 +83,14 @@ class _DirectMessageScreenState extends State<DirectMessageScreen> {
                             horizontal: 12, vertical: 9),
                         constraints: const BoxConstraints(maxWidth: 280),
                         decoration: BoxDecoration(
-                          color: mine ? AymaColors.bgCard : AymaColors.bgElev,
+                          color: mine ? context.ac.bgCard : context.ac.bgElev,
                           borderRadius: BorderRadius.circular(12),
                           border:
-                              Border.all(color: AymaColors.lineSoft, width: 0.5),
+                              Border.all(color: context.ac.lineSoft, width: 0.5),
                         ),
                         child: Text(
                           text,
-                          style: const TextStyle(color: AymaColors.fg, height: 1.4),
+                          style: TextStyle(color: context.ac.fg, height: 1.4),
                         ),
                       ),
                     );
@@ -113,16 +113,16 @@ class _DirectMessageScreenState extends State<DirectMessageScreen> {
                       decoration: InputDecoration(
                         hintText: 'Type a message...',
                         filled: true,
-                        fillColor: AymaColors.bgElev,
+                        fillColor: context.ac.bgElev,
                         border: OutlineInputBorder(
                           borderRadius: BorderRadius.circular(12),
                           borderSide:
-                              const BorderSide(color: AymaColors.lineSoft),
+                              BorderSide(color: context.ac.lineSoft),
                         ),
                         enabledBorder: OutlineInputBorder(
                           borderRadius: BorderRadius.circular(12),
                           borderSide:
-                              const BorderSide(color: AymaColors.lineSoft),
+                              BorderSide(color: context.ac.lineSoft),
                         ),
                       ),
                     ),
@@ -130,7 +130,7 @@ class _DirectMessageScreenState extends State<DirectMessageScreen> {
                   const SizedBox(width: 8),
                   IconButton(
                     onPressed: _sending ? null : _send,
-                    icon: const Icon(Icons.send_rounded, color: AymaColors.accent),
+                    icon: Icon(Icons.send_rounded, color: context.ac.accent),
                   ),
                 ],
               ),

@@ -60,6 +60,7 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
   late final AymaAudioService _audioService;
 
   int _lastTranscriptCount = 0;
+  String _lastTranscriptTailKey = '';
   final List<_DraftAttachment> _drafts = [];
 
   Timer? _sessionTimer;
@@ -73,6 +74,9 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
     super.initState();
     _audioService = ref.read(audioServiceProvider);
     _textCtrl.addListener(() => setState(() {}));
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      unawaited(_ensureAlwaysOnline());
+    });
   }
 
   void _startTimer() {
@@ -85,11 +89,6 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
     });
   }
 
-  void _stopTimer() {
-    _sessionTimer?.cancel();
-    _sessionTimer = null;
-  }
-
   Future<bool> _autoConnect() async {
     if (_audioService.state != SessionState.disconnected) return true;
     try {
@@ -100,24 +99,32 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
     return false;
   }
 
-  Future<void> _toggleVoice() async {
+  Future<void> _ensureAlwaysOnline() async {
     if (_voiceActionInFlight) return;
     _voiceActionInFlight = true;
-    if (_audioService.state == SessionState.disconnected) {
-      final started = await _autoConnect();
-      if (!started && mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-            content: Text('Could not start voice session. Please try again.'),
-          ),
-        );
-      }
-    } else {
-      _audioService.disconnect();
-      _stopTimer();
-      setState(() => _sessionDuration = Duration.zero);
+    final started = await _autoConnect();
+    if (!started && mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Could not start voice session. Please try again.'),
+        ),
+      );
+      _voiceActionInFlight = false;
+      return;
     }
+    // Keep session connected but block mic audio until user presses mic.
+    if (!_audioService.muted) _audioService.toggleMute();
     _voiceActionInFlight = false;
+  }
+
+  Future<void> _onMicPress() async {
+    final started = await _autoConnect();
+    if (!started) return;
+    if (_audioService.muted) _audioService.toggleMute();
+  }
+
+  void _onMicRelease() {
+    if (!_audioService.muted) _audioService.toggleMute();
   }
 
   Future<void> _sendText() async {
@@ -320,9 +327,16 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
     final userTalking =
         ref.watch(audioServiceProvider.select((a) => a.userTalking));
     final transcript = _audioService.transcript;
+    final tailKey = transcript.isEmpty
+        ? ''
+        : '${transcript.last.isUser ? 'u' : 'a'}:${transcript.last.text.length}:${transcript.last.text.hashCode}';
 
     if (transcriptN != _lastTranscriptCount) {
       _lastTranscriptCount = transcriptN;
+      _scrollToBottom();
+    }
+    if (tailKey != _lastTranscriptTailKey) {
+      _lastTranscriptTailKey = tailKey;
       _scrollToBottom();
     }
     if (!_initialScrollDone && transcript.isNotEmpty) {
@@ -332,7 +346,7 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
 
     final connected = state != SessionState.disconnected;
     return Scaffold(
-      backgroundColor: AymaColors.bg,
+      backgroundColor: context.ac.bg,
       resizeToAvoidBottomInset: true,
       body: SafeArea(
         bottom: false,
@@ -349,6 +363,7 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
               child: _TranscriptArea(
                 transcript: transcript,
                 scrollCtrl: _scrollCtrl,
+                aiStreaming: state == SessionState.speaking,
               ),
             ),
 
@@ -364,7 +379,8 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
               userTalking: userTalking,
               hasAttachment: _drafts.isNotEmpty,
               drafts: _drafts,
-              onMicTap: _toggleVoice,
+              onMicPress: _onMicPress,
+              onMicRelease: _onMicRelease,
               onSend: _sendText,
               onAttach: _showMediaSheet,
               onRemoveDraft: _removeDraft,
@@ -398,12 +414,12 @@ class _TopBar extends StatelessWidget {
                 decoration: BoxDecoration(
                     shape: BoxShape.circle,
                     color: connected
-                        ? AymaColors.accent
-                        : AymaColors.fgMute.withValues(alpha: 0.7))),
+                        ? context.ac.accent
+                        : context.ac.fgMute.withValues(alpha: 0.7))),
             const SizedBox(width: 10),
             Text(timerLabel.toUpperCase(),
                 style: AymaFonts.mono(
-                    size: 10, color: AymaColors.fgDim, letterSpacing: 0.18)),
+                    size: 10, color: context.ac.fgDim, letterSpacing: 0.18)),
           ],
         ),
       );
@@ -414,8 +430,13 @@ class _TopBar extends StatelessWidget {
 class _TranscriptArea extends StatelessWidget {
   final List<TranscriptLine> transcript;
   final ScrollController scrollCtrl;
+  final bool aiStreaming;
 
-  const _TranscriptArea({required this.transcript, required this.scrollCtrl});
+  const _TranscriptArea({
+    required this.transcript,
+    required this.scrollCtrl,
+    required this.aiStreaming,
+  });
 
   @override
   Widget build(BuildContext context) {
@@ -428,15 +449,15 @@ class _TranscriptArea extends StatelessWidget {
             children: [
               Container(
                   height: 0.5,
-                  color: AymaColors.lineSoft.withValues(alpha: 0.75)),
+                  color: context.ac.lineSoft.withValues(alpha: 0.75)),
               const SizedBox(height: 20),
               Text("Tonight's conversation",
-                  style: AymaFonts.mono(size: 10, color: AymaColors.fgMute)),
+                  style: AymaFonts.mono(size: 10, color: context.ac.fgMute)),
               const SizedBox(height: 20),
               Text('Your conversation begins when you start speaking.',
                   textAlign: TextAlign.center,
                   style: AymaFonts.serif(
-                      size: 18, italic: true, color: AymaColors.fgDim)),
+                      size: 18, italic: true, color: context.ac.fgDim)),
             ],
           ),
         ),
@@ -450,7 +471,9 @@ class _TranscriptArea extends StatelessWidget {
       itemBuilder: (_, i) {
         final line = transcript[i];
         return _TranscriptEntry(
-                line: line, isLatest: i == transcript.length - 1)
+                line: line,
+                isLatest: i == transcript.length - 1,
+                aiStreaming: aiStreaming)
             .animate()
             .fadeIn(duration: 220.ms)
             .slideY(begin: 0.03, end: 0);
@@ -462,11 +485,17 @@ class _TranscriptArea extends StatelessWidget {
 class _TranscriptEntry extends StatelessWidget {
   final TranscriptLine line;
   final bool isLatest;
-  const _TranscriptEntry({required this.line, required this.isLatest});
+  final bool aiStreaming;
+  const _TranscriptEntry({
+    required this.line,
+    required this.isLatest,
+    required this.aiStreaming,
+  });
 
   @override
   Widget build(BuildContext context) {
     final isAyma = !line.isUser;
+    final renderPlainStreaming = isAyma && isLatest && aiStreaming;
     final hasAttachments =
         line.attachments != null && line.attachments!.isNotEmpty;
 
@@ -482,7 +511,7 @@ class _TranscriptEntry extends StatelessWidget {
               isAyma ? 'AYMA' : 'YOU',
               style: AymaFonts.mono(
                 size: 9,
-                color: isAyma ? AymaColors.accent : AymaColors.fgMute,
+                color: isAyma ? context.ac.accent : context.ac.fgMute,
                 letterSpacing: 0.2,
               ),
             ),
@@ -494,15 +523,20 @@ class _TranscriptEntry extends StatelessWidget {
                   child: _MediaBubble(attachment: att),
                 ),
             ],
-            if (isAyma)
+            if (isAyma && renderPlainStreaming)
+              Text(
+                line.text,
+                style: AymaFonts.serif(size: 20, italic: true, color: context.ac.fg),
+              )
+            else if (isAyma)
               MarkdownBody(
                 data: line.text,
                 styleSheet: MarkdownStyleSheet(
-                  p: AymaFonts.serif(size: 20, italic: true, color: AymaColors.fg),
-                  strong: AymaFonts.serif(size: 20, italic: false, color: AymaColors.fg)
+                  p: AymaFonts.serif(size: 20, italic: true, color: context.ac.fg),
+                  strong: AymaFonts.serif(size: 20, italic: false, color: context.ac.fg)
                       .copyWith(fontWeight: FontWeight.w700),
-                  em: AymaFonts.serif(size: 20, italic: true, color: AymaColors.fg),
-                  listBullet: AymaFonts.serif(size: 20, italic: true, color: AymaColors.fg),
+                  em: AymaFonts.serif(size: 20, italic: true, color: context.ac.fg),
+                  listBullet: AymaFonts.serif(size: 20, italic: true, color: context.ac.fg),
                   blockSpacing: 8,
                   listIndent: 16,
                 ),
@@ -513,17 +547,17 @@ class _TranscriptEntry extends StatelessWidget {
                 padding:
                     const EdgeInsets.symmetric(horizontal: 14, vertical: 9),
                 decoration: BoxDecoration(
-                  color: AymaColors.bgCard,
+                  color: context.ac.bgCard,
                   borderRadius: BorderRadius.circular(16),
                   border: Border.all(
-                    color: AymaColors.lineSoft.withValues(alpha: 0.6),
+                    color: context.ac.lineSoft.withValues(alpha: 0.6),
                     width: 0.5,
                   ),
                 ),
                 child: Text(
                   line.text,
                   textAlign: TextAlign.right,
-                  style: AymaFonts.elegantSans(size: 15, color: AymaColors.fg)
+                  style: AymaFonts.elegantSans(size: 15, color: context.ac.fg)
                       .copyWith(height: 1.5),
                 ),
               ),
@@ -550,17 +584,17 @@ class _MediaBubble extends StatelessWidget {
         url,
         fit: BoxFit.cover,
         errorBuilder: (_, __, ___) => Container(
-          color: AymaColors.bgElev,
-          child: const Center(
-              child: Icon(Icons.broken_image_rounded, color: AymaColors.fgDim)),
+          color: context.ac.bgElev,
+          child: Center(
+              child: Icon(Icons.broken_image_rounded, color: context.ac.fgDim)),
         ),
       );
     } else if (url.startsWith('gs://')) {
       // For now show placeholder for GCS since direct loading needs auth
       content = Container(
-        color: AymaColors.bgElev,
-        child: const Center(
-          child: Icon(Icons.cloud_done_rounded, color: AymaColors.fgDim),
+        color: context.ac.bgElev,
+        child: Center(
+          child: Icon(Icons.cloud_done_rounded, color: context.ac.fgDim),
         ),
       );
     } else {
@@ -569,7 +603,7 @@ class _MediaBubble extends StatelessWidget {
       if (file.existsSync()) {
         content = Image.file(file, fit: BoxFit.cover);
       } else {
-        content = Container(color: AymaColors.bgElev);
+        content = Container(color: context.ac.bgElev);
       }
     }
 
@@ -578,7 +612,7 @@ class _MediaBubble extends StatelessWidget {
       child: Container(
         width: 200,
         height: 150,
-        color: AymaColors.bgCard,
+        color: context.ac.bgCard,
         child: Stack(
           children: [
             Positioned.fill(child: content),
@@ -608,7 +642,8 @@ class _InputBar extends StatefulWidget {
   final bool hasAttachment;
   final List<_DraftAttachment> drafts;
   final bool userTalking;
-  final VoidCallback onMicTap;
+  final Future<void> Function() onMicPress;
+  final VoidCallback onMicRelease;
   final Future<void> Function() onSend;
   final VoidCallback onAttach;
   final ValueChanged<String> onRemoveDraft;
@@ -624,7 +659,8 @@ class _InputBar extends StatefulWidget {
     required this.userTalking,
     required this.hasAttachment,
     required this.drafts,
-    required this.onMicTap,
+    required this.onMicPress,
+    required this.onMicRelease,
     required this.onSend,
     required this.onAttach,
     required this.onRemoveDraft,
@@ -675,6 +711,7 @@ class _InputBarState extends State<_InputBar>
   bool get _canSend =>
       _hasText ||
       (widget.hasAttachment && widget.drafts.every((d) => d.remoteUrl != null));
+  bool get _micLive => _voiceActive && !widget.muted;
 
   double get _volume => widget.state == SessionState.speaking
       ? widget.outputVolume
@@ -725,12 +762,13 @@ class _InputBarState extends State<_InputBar>
                     active: _aymaActive,
                     isAiTalking: widget.state == SessionState.speaking,
                     isUserTalking: widget.userTalking,
+                    accentColor: context.ac.accent,
                     glowStrength: g,
                   ),
                   child: ClipRRect(
                     borderRadius: BorderRadius.circular(_kShellR),
                     child: ColoredBox(
-                      color: AymaColors.bg,
+                      color: context.ac.bg,
                       child: SizedBox(
                         height: _kShellH,
                         child: Padding(
@@ -753,9 +791,9 @@ class _InputBarState extends State<_InputBar>
                                               focusNode: widget.focusNode,
                                               style: AymaFonts.elegantSans(
                                                 size: 14.5,
-                                                color: AymaColors.fg,
+                                                color: context.ac.fg,
                                               ).copyWith(height: 1.1),
-                                              cursorColor: AymaColors.accent,
+                                              cursorColor: context.ac.accent,
                                               keyboardType:
                                                   TextInputType.multiline,
                                               textInputAction: _canSend
@@ -780,7 +818,7 @@ class _InputBarState extends State<_InputBar>
                                                     : 'Speak or type to Ayma',
                                                 hintStyle: AymaFonts.elegantSans(
                                                   size: 14.5,
-                                                  color: AymaColors.fgMute,
+                                                  color: context.ac.fgMute,
                                                 ).copyWith(
                                                   fontStyle: _voiceActive
                                                       ? FontStyle.italic
@@ -790,19 +828,19 @@ class _InputBarState extends State<_InputBar>
                                             ),
                                     ),
                                     const SizedBox(width: 12),
+                                    _PressToTalkOrb(
+                                      live: _micLive,
+                                      onPress: widget.onMicPress,
+                                      onRelease: widget.onMicRelease,
+                                    ),
+                                    const SizedBox(width: 12),
                                     _DockActionCircle(
                                       icon: _canSend
                                           ? Icons.arrow_upward_rounded
-                                          : widget.state == SessionState.connecting
-                                              ? Icons.more_horiz_rounded
-                                              : _voiceActive
-                                                  ? Icons.mic_rounded
-                                                  : Icons.mic_none_rounded,
-                                      onTap: _canSend
-                                          ? () => widget.onSend()
-                                          : widget.onMicTap,
-                                      active: _canSend || _voiceActive,
-                                      live: !_canSend && _voiceActive,
+                                          : Icons.more_horiz_rounded,
+                                      onTap: _canSend ? () => widget.onSend() : null,
+                                      active: _canSend,
+                                      live: false,
                                       send: _canSend,
                                     ),
                                   ],
@@ -841,7 +879,7 @@ class _DraftDockStrip extends StatelessWidget {
           color: const Color(0xFF17130F),
           borderRadius: const BorderRadius.vertical(top: Radius.circular(18)),
           border: Border.all(
-            color: AymaColors.lineSoft.withValues(alpha: 0.9),
+            color: context.ac.lineSoft.withValues(alpha: 0.9),
             width: 0.8,
           ),
         ),
@@ -860,11 +898,11 @@ class _DraftDockStrip extends StatelessWidget {
                     width: 54,
                     decoration: BoxDecoration(
                       borderRadius: BorderRadius.circular(12),
-                      color: AymaColors.bgElev,
+                      color: context.ac.bgElev,
                       border: Border.all(
                         color: ready
-                            ? AymaColors.accent.withValues(alpha: 0.35)
-                            : AymaColors.lineSoft,
+                            ? context.ac.accent.withValues(alpha: 0.35)
+                            : context.ac.lineSoft,
                         width: 0.7,
                       ),
                     ),
@@ -874,8 +912,8 @@ class _DraftDockStrip extends StatelessWidget {
                             child: Image.memory(d.previewBytes!,
                                 fit: BoxFit.cover),
                           )
-                        : const Icon(Icons.videocam_rounded,
-                            color: AymaColors.accent),
+                        : Icon(Icons.videocam_rounded,
+                            color: context.ac.accent),
                   ),
                   Positioned(
                     left: 6,
@@ -886,7 +924,7 @@ class _DraftDockStrip extends StatelessWidget {
                       textAlign: TextAlign.center,
                       style: AymaFonts.mono(
                         size: 6.5,
-                        color: ready ? AymaColors.accent : AymaColors.fgMute,
+                        color: ready ? context.ac.accent : context.ac.fgMute,
                         letterSpacing: 0.08,
                       ),
                     ),
@@ -916,9 +954,61 @@ class _DraftDockStrip extends StatelessWidget {
       );
 }
 
+class _PressToTalkOrb extends StatelessWidget {
+  final bool live;
+  final Future<void> Function() onPress;
+  final VoidCallback onRelease;
+
+  const _PressToTalkOrb({
+    required this.live,
+    required this.onPress,
+    required this.onRelease,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return GestureDetector(
+      onTapDown: (_) => onPress(),
+      onTapUp: (_) => onRelease(),
+      onTapCancel: onRelease,
+      child: AnimatedContainer(
+        duration: const Duration(milliseconds: 160),
+        width: 40,
+        height: 40,
+        decoration: BoxDecoration(
+          shape: BoxShape.circle,
+          gradient: RadialGradient(
+            colors: live
+                ? const [Color(0xFFF4D9C6), Color(0xFFD6936D), Color(0xFF2A1713)]
+                : const [Color(0xFFECCBB2), Color(0xFFB67858), Color(0xFF1B120F)],
+            stops: const [0.08, 0.52, 1.0],
+          ),
+          boxShadow: [
+            BoxShadow(
+              color: (live ? const Color(0xFFDC8F67) : const Color(0xFF7E4A34))
+                  .withValues(alpha: live ? 0.44 : 0.24),
+              blurRadius: live ? 16 : 8,
+              spreadRadius: live ? 1.2 : 0.1,
+            ),
+          ],
+          border: Border.all(
+            color: context.ac.lineSoft.withValues(alpha: 0.7),
+            width: 0.7,
+          ),
+        ),
+        child: Icon(
+          Icons.mic_rounded,
+          size: 17,
+          color: live ? const Color(0xFF2A1713) : const Color(0xFFF4EDE7),
+        ),
+      ),
+    );
+  }
+}
+
 class _DockActionCircle extends StatelessWidget {
   final IconData icon;
-  final VoidCallback onTap;
+  final VoidCallback? onTap;
   final bool active;
   final bool live;
   final bool send;
@@ -934,18 +1024,18 @@ class _DockActionCircle extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final ringColor = send
-        ? AymaColors.accent
+        ? context.ac.accent
         : live
-            ? AymaColors.accent
+            ? context.ac.accent
             : active
-                ? AymaColors.accent.withValues(alpha: 0.65)
-                : AymaColors.lineSoft.withValues(alpha: 0.85);
+                ? context.ac.accent.withValues(alpha: 0.65)
+                : context.ac.lineSoft.withValues(alpha: 0.85);
 
     final iconColor = live
         ? const Color(0xFF1A1208)
         : active
-            ? AymaColors.accent
-            : AymaColors.fgDim;
+            ? context.ac.accent
+            : context.ac.fgDim;
 
     final outerSize = live ? 42.0 : 36.0;
     final iconSize = live ? 18.0 : 15.0;
@@ -959,10 +1049,10 @@ class _DockActionCircle extends StatelessWidget {
         decoration: BoxDecoration(
           shape: BoxShape.circle,
           color: live
-              ? AymaColors.accent
+              ? context.ac.accent
               : active
-                  ? AymaColors.accent.withValues(alpha: 0.15)
-                  : AymaColors.bg,
+                  ? context.ac.accent.withValues(alpha: 0.15)
+                  : context.ac.bg,
           border: Border.all(
             color: ringColor,
             width: live ? 1.2 : 0.85,
@@ -990,16 +1080,16 @@ class _PillAttachButton extends StatelessWidget {
           alignment: Alignment.center,
           decoration: BoxDecoration(
             shape: BoxShape.circle,
-            color: AymaColors.bg,
+            color: context.ac.bg,
             border: Border.all(
-              color: AymaColors.lineSoft.withValues(alpha: 0.9),
+              color: context.ac.lineSoft.withValues(alpha: 0.9),
               width: 0.8,
             ),
           ),
-          child: const Icon(
+          child: Icon(
             Icons.attach_file_rounded,
             size: 18,
-            color: AymaColors.fgMute,
+            color: context.ac.fgMute,
           ),
         ),
       );
@@ -1012,6 +1102,7 @@ class _ComposerOutlinePainter extends CustomPainter {
   final bool isAiTalking;
   final bool isUserTalking;
   final double glowStrength; // 0–1, drives outer glow replacing box shadow
+  final Color accentColor;
 
   const _ComposerOutlinePainter({
     required this.phase,
@@ -1019,6 +1110,7 @@ class _ComposerOutlinePainter extends CustomPainter {
     required this.active,
     required this.isAiTalking,
     required this.isUserTalking,
+    required this.accentColor,
     this.glowStrength = 0.0,
   });
 
@@ -1052,6 +1144,7 @@ class _ComposerOutlinePainter extends CustomPainter {
 
       void drawWave(double a, double phaseShift, double freq, double detailFreq,
           [double opacity = 1.0]) {
+        final bool staticIdle = a <= 0.01;
         final path = _buildBorderPath(
           size,
           amplitude: a,
@@ -1061,7 +1154,8 @@ class _ComposerOutlinePainter extends CustomPainter {
           atBottom: atBottom,
         );
         final paint = Paint()
-          ..shader = goldShader
+          ..color = staticIdle ? accentColor : Colors.white
+          ..shader = staticIdle ? null : goldShader
           ..style = PaintingStyle.stroke
           ..strokeWidth = 1.0
           ..strokeCap = StrokeCap.round
@@ -1211,8 +1305,8 @@ class _WaveHintText extends StatelessWidget {
   @override
   Widget build(BuildContext context) => Text(
         state == SessionState.thinking ? 'Thinking...' : 'Ayma is speaking...',
-        style: const TextStyle(
-            color: AymaColors.fgMute,
+        style: TextStyle(
+            color: context.ac.fgMute,
             fontSize: 14,
             fontStyle: FontStyle.italic),
         maxLines: 1,
@@ -1240,9 +1334,9 @@ class _MediaSheet extends StatelessWidget {
         margin: const EdgeInsets.all(12),
         padding: const EdgeInsets.fromLTRB(20, 16, 20, 32),
         decoration: BoxDecoration(
-          color: AymaColors.bgElev,
+          color: context.ac.bgElev,
           borderRadius: BorderRadius.circular(26),
-          border: Border.all(color: AymaColors.lineSoft, width: 0.5),
+          border: Border.all(color: context.ac.lineSoft, width: 0.5),
         ),
         child: Column(
           mainAxisSize: MainAxisSize.min,
@@ -1253,11 +1347,11 @@ class _MediaSheet extends StatelessWidget {
                     width: 36,
                     height: 4,
                     decoration: BoxDecoration(
-                        color: AymaColors.fgMute,
+                        color: context.ac.fgMute,
                         borderRadius: BorderRadius.circular(4)))),
             const SizedBox(height: 20),
             Text('SHARE WITH AYMA',
-                style: AymaFonts.mono(size: 10, color: AymaColors.fgMute)),
+                style: AymaFonts.mono(size: 10, color: context.ac.fgMute)),
             const SizedBox(height: 12),
             Text('What are you showing me?', style: AymaFonts.serif(size: 26)),
             const SizedBox(height: 20),
@@ -1306,17 +1400,17 @@ class _MediaTile extends StatelessWidget {
         child: Container(
           padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 18),
           decoration: BoxDecoration(
-            color: AymaColors.bgCard,
+            color: context.ac.bgCard,
             borderRadius: BorderRadius.circular(18),
-            border: Border.all(color: AymaColors.lineSoft, width: 0.5),
+            border: Border.all(color: context.ac.lineSoft, width: 0.5),
           ),
           child: Column(children: [
-            Icon(icon, size: 24, color: AymaColors.accent),
+            Icon(icon, size: 24, color: context.ac.accent),
             const SizedBox(height: 10),
             Text(title,
                 textAlign: TextAlign.center,
-                style: const TextStyle(
-                    color: AymaColors.fg,
+                style: TextStyle(
+                    color: context.ac.fg,
                     fontSize: 12,
                     fontWeight: FontWeight.w500)),
           ]),

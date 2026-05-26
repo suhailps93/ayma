@@ -31,7 +31,7 @@ class _MatchesScreenState extends ConsumerState<MatchesScreen> {
                   ? 'No new matches this time — check back later.'
                   : 'Found $created new match${created != 1 ? 'es' : ''}!',
             ),
-            backgroundColor: AymaColors.bgElev,
+            backgroundColor: context.ac.bgElev,
             behavior: SnackBarBehavior.floating,
           ),
         );
@@ -41,7 +41,7 @@ class _MatchesScreenState extends ConsumerState<MatchesScreen> {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
             content: Text('Matching failed: $e'),
-            backgroundColor: AymaColors.bgElev,
+            backgroundColor: context.ac.bgElev,
             behavior: SnackBarBehavior.floating,
           ),
         );
@@ -56,20 +56,20 @@ class _MatchesScreenState extends ConsumerState<MatchesScreen> {
     final matchesAsync = ref.watch(matchesProvider);
 
     return Scaffold(
-      backgroundColor: AymaColors.bg,
+      backgroundColor: context.ac.bg,
       body: SafeArea(
         bottom: false,
         child: matchesAsync.when(
-          loading: () => const Center(
+          loading: () => Center(
             child: CircularProgressIndicator(
               strokeWidth: 1.5,
-              color: AymaColors.accent,
+              color: context.ac.accent,
             ),
           ),
           error: (e, _) => Center(
             child: Text(
               'Could not load matches',
-              style: TextStyle(color: AymaColors.fgDim, fontSize: 14),
+              style: TextStyle(color: context.ac.fgDim, fontSize: 14),
             ),
           ),
           data: (matches) => Column(
@@ -88,26 +88,23 @@ class _MatchesScreenState extends ConsumerState<MatchesScreen> {
                             matches.isEmpty
                                 ? 'No introductions yet'
                                 : '${matches.length} introduction${matches.length != 1 ? 's' : ''} · curated today',
-                            style: AymaFonts.mono(size: 10, color: AymaColors.fgMute),
+                            style: AymaFonts.mono(size: 10, color: context.ac.fgMute),
                           ).animate().fadeIn(duration: 300.ms),
                         ),
-                        _RunMatchingButton(
-                          running: _running,
-                          onTap: _running ? null : _triggerMatching,
-                        ),
+
                       ],
                     ),
                     const SizedBox(height: 8),
                     Text(
                       'People Ayma picked',
-                      style: AymaFonts.serif(size: 36, color: AymaColors.fg),
+                      style: AymaFonts.serif(size: 36, color: context.ac.fg),
                     ).animate(delay: 60.ms).fadeIn(duration: 400.ms),
                     const SizedBox(height: 8),
                     Text(
                       'Your photos are only shared when you say yes.',
                       style: TextStyle(
                         fontSize: 13,
-                        color: AymaColors.fgDim,
+                        color: context.ac.fgDim,
                         height: 1.5,
                       ),
                     ).animate(delay: 120.ms).fadeIn(),
@@ -140,56 +137,6 @@ class _MatchesScreenState extends ConsumerState<MatchesScreen> {
   }
 }
 
-class _RunMatchingButton extends StatelessWidget {
-  final bool running;
-  final VoidCallback? onTap;
-
-  const _RunMatchingButton({required this.running, this.onTap});
-
-  @override
-  Widget build(BuildContext context) {
-    return GestureDetector(
-      onTap: onTap,
-      child: Container(
-        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 7),
-        decoration: BoxDecoration(
-          color: AymaColors.bgElev,
-          borderRadius: BorderRadius.circular(99),
-          border: Border.all(color: AymaColors.lineSoft, width: 0.5),
-        ),
-        child: Row(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            if (running)
-              const SizedBox(
-                width: 10, height: 10,
-                child: CircularProgressIndicator(
-                  strokeWidth: 1.5,
-                  color: AymaColors.accent,
-                ),
-              )
-            else
-              Container(
-                width: 6, height: 6,
-                decoration: const BoxDecoration(
-                  shape: BoxShape.circle,
-                  color: AymaColors.accent,
-                ),
-              ),
-            const SizedBox(width: 6),
-            Text(
-              running ? 'Finding…' : 'Find matches',
-              style: const TextStyle(
-                fontSize: 12,
-                color: AymaColors.fgDim,
-              ),
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-}
 
 class _EmptyMatches extends StatelessWidget {
   final bool running;
@@ -211,24 +158,24 @@ class _EmptyMatches extends StatelessWidget {
                 shape: BoxShape.circle,
                 gradient: RadialGradient(
                   colors: [
-                    AymaColors.accent.withValues(alpha: 0.3),
-                    AymaColors.accent.withValues(alpha: 0.05),
+                    context.ac.accent.withValues(alpha: 0.3),
+                    context.ac.accent.withValues(alpha: 0.05),
                   ],
                 ),
               ),
-              child: const Icon(Icons.auto_awesome_rounded, color: AymaColors.accent, size: 28),
+              child: Icon(Icons.auto_awesome_rounded, color: context.ac.accent, size: 28),
             ),
             const SizedBox(height: 20),
             Text(
               'Ayma is still getting to know you',
-              style: AymaFonts.serif(size: 22, color: AymaColors.fg),
+              style: AymaFonts.serif(size: 22, color: context.ac.fg),
               textAlign: TextAlign.center,
             ),
             const SizedBox(height: 12),
             Text(
               'Keep talking — matches appear as you share more about yourself.',
               textAlign: TextAlign.center,
-              style: TextStyle(color: AymaColors.fgDim, fontSize: 13, height: 1.55),
+              style: TextStyle(color: context.ac.fgDim, fontSize: 13, height: 1.55),
             ),
             const SizedBox(height: 28),
             GestureDetector(
@@ -236,35 +183,35 @@ class _EmptyMatches extends StatelessWidget {
               child: Container(
                 padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 14),
                 decoration: BoxDecoration(
-                  color: AymaColors.bgElev,
+                  color: context.ac.bgElev,
                   borderRadius: BorderRadius.circular(99),
-                  border: Border.all(color: AymaColors.lineSoft, width: 0.5),
+                  border: Border.all(color: context.ac.lineSoft, width: 0.5),
                 ),
                 child: Row(
                   mainAxisSize: MainAxisSize.min,
                   children: [
                     if (running)
-                      const SizedBox(
+                      SizedBox(
                         width: 12, height: 12,
                         child: CircularProgressIndicator(
                           strokeWidth: 1.5,
-                          color: AymaColors.accent,
+                          color: context.ac.accent,
                         ),
                       )
                     else
                       Container(
                         width: 6, height: 6,
-                        decoration: const BoxDecoration(
+                        decoration: BoxDecoration(
                           shape: BoxShape.circle,
-                          color: AymaColors.accent,
+                          color: context.ac.accent,
                         ),
                       ),
                     const SizedBox(width: 8),
                     Text(
                       running ? 'Finding matches…' : 'Find matches now',
-                      style: const TextStyle(
+                      style: TextStyle(
                         fontSize: 14,
-                        color: AymaColors.fg,
+                        color: context.ac.fg,
                       ),
                     ),
                   ],
@@ -348,8 +295,8 @@ class _MatchCardState extends ConsumerState<MatchCard> {
       child: Container(
         decoration: BoxDecoration(
           borderRadius: BorderRadius.circular(20),
-          color: AymaColors.bgElev,
-          border: Border.all(color: AymaColors.lineSoft, width: 0.5),
+          color: context.ac.bgElev,
+          border: Border.all(color: context.ac.lineSoft, width: 0.5),
         ),
         clipBehavior: Clip.hardEdge,
         child: Column(
@@ -395,12 +342,12 @@ class _MatchCardState extends ConsumerState<MatchCard> {
                             children: [
                               Text(
                                 displayFirst,
-                                style: AymaFonts.serif(size: 24, color: AymaColors.fg),
+                                style: AymaFonts.serif(size: 24, color: context.ac.fg),
                               ),
                               const SizedBox(height: 2),
                               Text(
                                 _timeAgo(m.createdAt),
-                                style: AymaFonts.mono(size: 9, color: AymaColors.fgMute),
+                                style: AymaFonts.mono(size: 9, color: context.ac.fgMute),
                               ),
                             ],
                           ),
@@ -410,14 +357,14 @@ class _MatchCardState extends ConsumerState<MatchCard> {
                               const SizedBox(width: 8),
                               Text(
                                 '${m.scorePercent}%',
-                                style: AymaFonts.mono(size: 9, color: AymaColors.fgMute),
+                                style: AymaFonts.mono(size: 9, color: context.ac.fgMute),
                               ),
                               const Spacer(),
                               if (effectiveStatus != 'pending')
                                 _StatusPill(status: effectiveStatus)
                               else
-                                const Icon(Icons.chevron_right_rounded,
-                                    size: 16, color: AymaColors.fgMute),
+                                Icon(Icons.chevron_right_rounded,
+                                    size: 16, color: context.ac.fgMute),
                             ],
                           ),
                         ],
@@ -433,9 +380,9 @@ class _MatchCardState extends ConsumerState<MatchCard> {
               Container(
                 width: double.infinity,
                 padding: const EdgeInsets.fromLTRB(16, 14, 16, 16),
-                decoration: const BoxDecoration(
+                decoration: BoxDecoration(
                   border: Border(
-                    top: BorderSide(color: AymaColors.lineSoft, width: 0.5),
+                    top: BorderSide(color: context.ac.lineSoft, width: 0.5),
                   ),
                 ),
                 child: Column(
@@ -446,13 +393,13 @@ class _MatchCardState extends ConsumerState<MatchCard> {
                         _MiniOrb(),
                         const SizedBox(width: 8),
                         Text('WHY I CHOSE THEM',
-                            style: AymaFonts.mono(size: 9, color: AymaColors.fgMute)),
+                            style: AymaFonts.mono(size: 9, color: context.ac.fgMute)),
                       ],
                     ),
                     const SizedBox(height: 10),
                     Text(
                       '"${m.summary}"',
-                      style: AymaFonts.serif(size: 17, italic: true, color: AymaColors.fg),
+                      style: AymaFonts.serif(size: 17, italic: true, color: context.ac.fg),
                     ),
                     if (m.rationale != null && m.rationale != m.summary) ...[
                       const SizedBox(height: 12),
@@ -462,16 +409,16 @@ class _MatchCardState extends ConsumerState<MatchCard> {
                           Container(
                             width: 4, height: 4,
                             margin: const EdgeInsets.only(top: 8, right: 10),
-                            decoration: const BoxDecoration(
+                            decoration: BoxDecoration(
                               shape: BoxShape.circle,
-                              color: AymaColors.accent,
+                              color: context.ac.accent,
                             ),
                           ),
                           Expanded(
                             child: Text(
                               m.rationale!,
-                              style: const TextStyle(
-                                  fontSize: 13, color: AymaColors.fgDim, height: 1.5),
+                              style: TextStyle(
+                                  fontSize: 13, color: context.ac.fgDim, height: 1.5),
                             ),
                           ),
                         ],
@@ -527,7 +474,7 @@ class _StatusPill extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final isAccepted = status == 'accepted';
-    final color = isAccepted ? Colors.green.shade400 : AymaColors.fgMute;
+    final color = isAccepted ? Colors.green.shade400 : context.ac.fgMute;
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
       decoration: BoxDecoration(
@@ -550,15 +497,15 @@ class _ActedRow extends StatelessWidget {
     final isAccepted = status == 'accepted';
     return Container(
       padding: const EdgeInsets.symmetric(vertical: 14),
-      decoration: const BoxDecoration(
-        border: Border(top: BorderSide(color: AymaColors.lineSoft, width: 0.5)),
+      decoration: BoxDecoration(
+        border: Border(top: BorderSide(color: context.ac.lineSoft, width: 0.5)),
       ),
       child: Center(
         child: Text(
           isAccepted ? 'Hello sent ✓' : 'Dismissed',
           style: TextStyle(
             fontSize: 13,
-            color: isAccepted ? Colors.green.shade400 : AymaColors.fgMute,
+            color: isAccepted ? Colors.green.shade400 : context.ac.fgMute,
           ),
         ),
       ),
@@ -589,9 +536,9 @@ class _MatchAction extends StatelessWidget {
         padding: const EdgeInsets.symmetric(vertical: 15),
         decoration: BoxDecoration(
           border: Border(
-            top: const BorderSide(color: AymaColors.lineSoft, width: 0.5),
+            top: BorderSide(color: context.ac.lineSoft, width: 0.5),
             right: hasBorder
-                ? const BorderSide(color: AymaColors.lineSoft, width: 0.5)
+                ? BorderSide(color: context.ac.lineSoft, width: 0.5)
                 : BorderSide.none,
           ),
         ),
@@ -601,9 +548,9 @@ class _MatchAction extends StatelessWidget {
             if (accent) ...[
               Container(
                 width: 6, height: 6,
-                decoration: const BoxDecoration(
+                decoration: BoxDecoration(
                   shape: BoxShape.circle,
-                  color: AymaColors.accent,
+                  color: context.ac.accent,
                 ),
               ),
               const SizedBox(width: 6),
@@ -612,7 +559,7 @@ class _MatchAction extends StatelessWidget {
               label,
               style: TextStyle(
                 fontSize: 14,
-                color: dim ? AymaColors.fgDim : AymaColors.fg,
+                color: dim ? context.ac.fgDim : context.ac.fg,
                 fontWeight: accent ? FontWeight.w500 : FontWeight.w400,
               ),
             ),
@@ -641,7 +588,7 @@ class _ConfidenceBar extends StatelessWidget {
         alignment: Alignment.centerLeft,
         child: Container(
           decoration: BoxDecoration(
-            color: AymaColors.accent,
+            color: context.ac.accent,
             borderRadius: BorderRadius.circular(2),
           ),
         ),

@@ -163,20 +163,20 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
     showDialog(
       context: context,
       builder: (_) => AlertDialog(
-        backgroundColor: AymaColors.bgCard,
+        backgroundColor: context.ac.bgCard,
         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
         title: Text(
           'Clear Ayma memory',
-          style: TextStyle(color: AymaColors.fg, fontSize: 18),
+          style: TextStyle(color: context.ac.fg, fontSize: 18),
         ),
         content: Text(
           'This deletes everything Ayma learned from conversations and resets follow-up questions. Your account stays active.',
-          style: TextStyle(color: AymaColors.fgDim, fontSize: 13, height: 1.5),
+          style: TextStyle(color: context.ac.fgDim, fontSize: 13, height: 1.5),
         ),
         actions: [
           TextButton(
             onPressed: () => Navigator.pop(context),
-            child: Text('Cancel', style: TextStyle(color: AymaColors.fgDim)),
+            child: Text('Cancel', style: TextStyle(color: context.ac.fgDim)),
           ),
           TextButton(
             onPressed: () {
@@ -195,20 +195,20 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
     showDialog(
       context: context,
       builder: (_) => AlertDialog(
-        backgroundColor: AymaColors.bgCard,
+        backgroundColor: context.ac.bgCard,
         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
         title: Text(
           'Delete account',
-          style: TextStyle(color: AymaColors.fg, fontSize: 18),
+          style: TextStyle(color: context.ac.fg, fontSize: 18),
         ),
         content: Text(
           'This permanently deletes your profile, matches, and all data. This cannot be undone.',
-          style: TextStyle(color: AymaColors.fgDim, fontSize: 13, height: 1.5),
+          style: TextStyle(color: context.ac.fgDim, fontSize: 13, height: 1.5),
         ),
         actions: [
           TextButton(
             onPressed: () => Navigator.pop(context),
-            child: Text('Cancel', style: TextStyle(color: AymaColors.fgDim)),
+            child: Text('Cancel', style: TextStyle(color: context.ac.fgDim)),
           ),
           TextButton(
             onPressed: () {
@@ -241,7 +241,7 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
     }
 
     return Scaffold(
-      backgroundColor: AymaColors.bg,
+      backgroundColor: context.ac.bg,
       body: SafeArea(
         bottom: false,
         child: ListView(
@@ -250,9 +250,14 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
             // Header
             Text(
               'Settings',
-              style: AymaFonts.serif(size: 36, color: AymaColors.fg),
+              style: AymaFonts.serif(size: 36, color: context.ac.fg),
             ).animate().fadeIn(duration: 400.ms),
             const SizedBox(height: 28),
+
+            // Appearance section
+            _SectionLabel('Appearance'),
+            _AppearanceTile(),
+            const SizedBox(height: 20),
 
             // Account section
             _SectionLabel('Account'),
@@ -286,22 +291,22 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
                   padding:
                       const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
                   decoration: BoxDecoration(
-                    color: AymaColors.bgElev,
+                    color: context.ac.bgElev,
                     borderRadius: BorderRadius.circular(16),
-                    border: Border.all(color: AymaColors.lineSoft, width: 0.5),
+                    border: Border.all(color: context.ac.lineSoft, width: 0.5),
                   ),
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
                       Row(
                         children: [
-                          const Icon(Icons.record_voice_over_rounded,
-                              size: 18, color: AymaColors.fgDim),
+                          Icon(Icons.record_voice_over_rounded,
+                              size: 18, color: context.ac.fgDim),
                           const SizedBox(width: 14),
                           Text(
                             'Voice & accent',
                             style:
-                                TextStyle(color: AymaColors.fg, fontSize: 14),
+                                TextStyle(color: context.ac.fg, fontSize: 14),
                           ),
                         ],
                       ),
@@ -357,12 +362,12 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
                                   ? null
                                   : _saveAymaVoiceSettings,
                               child: _savingVoice || _previewingVoice
-                                  ? const SizedBox(
+                                  ? SizedBox(
                                       width: 16,
                                       height: 16,
                                       child: CircularProgressIndicator(
                                         strokeWidth: 2,
-                                        color: AymaColors.accent,
+                                        color: context.ac.accent,
                                       ),
                                     )
                                   : const Text('Save Ayma settings'),
@@ -385,12 +390,12 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
               subtitle: 'Clear Ayma memory and reset learned profile',
               titleColor: Colors.redAccent.shade100,
               trailing: _clearingMemory
-                  ? const SizedBox(
+                  ? SizedBox(
                       width: 18,
                       height: 18,
                       child: CircularProgressIndicator(
                         strokeWidth: 2,
-                        color: AymaColors.accent,
+                        color: context.ac.accent,
                       ),
                     )
                   : null,
@@ -409,18 +414,18 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
                   ? 'Your profile is hidden'
                   : 'Temporarily hide your profile',
               trailing: _pauseLoading
-                  ? const SizedBox(
+                  ? SizedBox(
                       width: 20,
                       height: 20,
                       child: CircularProgressIndicator(
-                          strokeWidth: 2, color: AymaColors.accent),
+                          strokeWidth: 2, color: context.ac.accent),
                     )
                   : Switch(
                       value: matchingPaused,
                       onChanged: _togglePause,
-                      activeColor: AymaColors.accent,
-                      inactiveThumbColor: AymaColors.fgMute,
-                      inactiveTrackColor: AymaColors.lineSoft,
+                      activeColor: context.ac.accent,
+                      inactiveThumbColor: context.ac.fgMute,
+                      inactiveTrackColor: context.ac.lineSoft,
                     ),
               delay: 260,
             ),
@@ -476,23 +481,23 @@ class _InlineDropdown<T> extends StatelessWidget {
       children: [
         Text(
           label,
-          style: TextStyle(color: AymaColors.fgMute, fontSize: 12),
+          style: TextStyle(color: context.ac.fgMute, fontSize: 12),
         ),
         const SizedBox(height: 6),
         Container(
           padding: const EdgeInsets.symmetric(horizontal: 10),
           decoration: BoxDecoration(
-            color: AymaColors.bgCard,
+            color: context.ac.bgCard,
             borderRadius: BorderRadius.circular(12),
-            border: Border.all(color: AymaColors.lineSoft, width: 0.5),
+            border: Border.all(color: context.ac.lineSoft, width: 0.5),
           ),
           child: DropdownButtonHideUnderline(
             child: DropdownButton<T>(
               value: value,
               isExpanded: true,
-              dropdownColor: AymaColors.bgCard,
-              iconEnabledColor: AymaColors.fgDim,
-              style: const TextStyle(color: AymaColors.fg, fontSize: 13),
+              dropdownColor: context.ac.bgCard,
+              iconEnabledColor: context.ac.fgDim,
+              style: TextStyle(color: context.ac.fg, fontSize: 13),
               items: items
                   .map(
                     (item) => DropdownMenuItem<T>(
@@ -530,24 +535,24 @@ class _InlineTextInput extends StatelessWidget {
       children: [
         Text(
           label,
-          style: const TextStyle(color: AymaColors.fgMute, fontSize: 12),
+          style: TextStyle(color: context.ac.fgMute, fontSize: 12),
         ),
         const SizedBox(height: 6),
         Container(
           padding: const EdgeInsets.symmetric(horizontal: 10),
           decoration: BoxDecoration(
-            color: AymaColors.bgCard,
+            color: context.ac.bgCard,
             borderRadius: BorderRadius.circular(12),
-            border: Border.all(color: AymaColors.lineSoft, width: 0.5),
+            border: Border.all(color: context.ac.lineSoft, width: 0.5),
           ),
           child: TextField(
             controller: controller,
             onSubmitted: onSubmitted,
-            style: const TextStyle(color: AymaColors.fg, fontSize: 13),
+            style: TextStyle(color: context.ac.fg, fontSize: 13),
             decoration: InputDecoration(
               hintText: hintText,
               hintStyle:
-                  const TextStyle(color: AymaColors.fgMute, fontSize: 12),
+                  TextStyle(color: context.ac.fgMute, fontSize: 12),
               border: InputBorder.none,
               isDense: true,
             ),
@@ -568,7 +573,7 @@ class _SectionLabel extends StatelessWidget {
         padding: const EdgeInsets.only(bottom: 10),
         child: Text(
           text.toUpperCase(),
-          style: AymaFonts.mono(size: 9, color: AymaColors.fgMute),
+          style: AymaFonts.mono(size: 9, color: context.ac.fgMute),
         ),
       );
 }
@@ -600,13 +605,13 @@ class _Tile extends StatelessWidget {
         margin: const EdgeInsets.only(bottom: 2),
         padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
         decoration: BoxDecoration(
-          color: AymaColors.bgElev,
+          color: context.ac.bgElev,
           borderRadius: BorderRadius.circular(16),
-          border: Border.all(color: AymaColors.lineSoft, width: 0.5),
+          border: Border.all(color: context.ac.lineSoft, width: 0.5),
         ),
         child: Row(
           children: [
-            Icon(icon, size: 18, color: titleColor ?? AymaColors.fgDim),
+            Icon(icon, size: 18, color: titleColor ?? context.ac.fgDim),
             const SizedBox(width: 14),
             Expanded(
               child: Column(
@@ -615,7 +620,7 @@ class _Tile extends StatelessWidget {
                   Text(
                     title,
                     style: TextStyle(
-                      color: titleColor ?? AymaColors.fg,
+                      color: titleColor ?? context.ac.fg,
                       fontSize: 14,
                     ),
                   ),
@@ -623,7 +628,7 @@ class _Tile extends StatelessWidget {
                     const SizedBox(height: 2),
                     Text(
                       subtitle!,
-                      style: TextStyle(color: AymaColors.fgMute, fontSize: 12),
+                      style: TextStyle(color: context.ac.fgMute, fontSize: 12),
                     ),
                   ],
                 ],
@@ -633,7 +638,7 @@ class _Tile extends StatelessWidget {
               trailing!
             else if (onTap != null)
               Icon(Icons.chevron_right_rounded,
-                  size: 16, color: AymaColors.fgMute),
+                  size: 16, color: context.ac.fgMute),
           ],
         ),
       ),
@@ -641,6 +646,51 @@ class _Tile extends StatelessWidget {
         .animate(delay: Duration(milliseconds: delay))
         .fadeIn(duration: 300.ms)
         .slideX(begin: 0.03, end: 0);
+  }
+}
+
+class _AppearanceTile extends ConsumerWidget {
+  const _AppearanceTile();
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final mode = ref.watch(themeModeProvider);
+    final isDark = mode == ThemeMode.dark;
+    return GestureDetector(
+      onTap: () => ref.read(themeModeProvider.notifier).toggle(),
+      child: Container(
+        margin: const EdgeInsets.only(bottom: 2),
+        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
+        decoration: BoxDecoration(
+          color: context.ac.bgElev,
+          borderRadius: BorderRadius.circular(16),
+          border: Border.all(color: context.ac.lineSoft, width: 0.5),
+        ),
+        child: Row(
+          children: [
+            Icon(
+              isDark ? Icons.dark_mode_outlined : Icons.light_mode_outlined,
+              size: 18,
+              color: context.ac.fgDim,
+            ),
+            const SizedBox(width: 14),
+            Expanded(
+              child: Text(
+                isDark ? 'Dark' : 'Light',
+                style: TextStyle(color: context.ac.fg, fontSize: 14),
+              ),
+            ),
+            Switch(
+              value: isDark,
+              onChanged: (_) => ref.read(themeModeProvider.notifier).toggle(),
+              activeColor: context.ac.accent,
+              inactiveThumbColor: context.ac.fgMute,
+              inactiveTrackColor: context.ac.lineSoft,
+            ),
+          ],
+        ),
+      ),
+    );
   }
 }
 
@@ -658,9 +708,9 @@ class _SignOutTile extends ConsumerWidget {
       child: Container(
         padding: const EdgeInsets.symmetric(vertical: 16),
         decoration: BoxDecoration(
-          color: AymaColors.bgElev,
+          color: context.ac.bgElev,
           borderRadius: BorderRadius.circular(16),
-          border: Border.all(color: AymaColors.lineSoft, width: 0.5),
+          border: Border.all(color: context.ac.lineSoft, width: 0.5),
         ),
         child: Row(
           mainAxisAlignment: MainAxisAlignment.center,
