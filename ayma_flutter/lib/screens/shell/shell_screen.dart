@@ -19,6 +19,7 @@ class _ShellScreenState extends ConsumerState<ShellScreen>
     with SingleTickerProviderStateMixin, WidgetsBindingObserver {
   late final AnimationController _pulseCtrl;
   late final Animation<double> _pulse;
+  bool _pendingOverlayPermissionNeeded = false;
 
   @override
   void initState() {
@@ -43,14 +44,57 @@ class _ShellScreenState extends ConsumerState<ShellScreen>
 
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
-    final connected = ref.read(audioServiceProvider.select(
-        (a) => a.state != SessionState.disconnected));
+    final connected =
+        ref.read(audioServiceProvider).state != SessionState.disconnected;
     if ((state == AppLifecycleState.hidden ||
          state == AppLifecycleState.paused) && connected) {
-      OverlayService.showOverlay();
+      OverlayService.showOverlay().then((shown) {
+        if (!shown && mounted) {
+          _pendingOverlayPermissionNeeded = true;
+        }
+      });
     } else if (state == AppLifecycleState.resumed) {
       OverlayService.hideOverlay();
+      if (_pendingOverlayPermissionNeeded && mounted) {
+        _pendingOverlayPermissionNeeded = false;
+        _showOverlayPermissionDialog();
+      }
     }
+  }
+
+  void _showOverlayPermissionDialog() {
+    // Only show once per session
+    showDialog<void>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: const Color(0xFF1A110D),
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
+        title: const Text(
+          'See Ayma while multitasking',
+          style: TextStyle(color: Colors.white, fontSize: 16),
+        ),
+        content: const Text(
+          'Grant "Display over other apps" permission so the Ayma sphere stays visible when you switch apps.',
+          style: TextStyle(color: Color(0xFF9E8E7E), fontSize: 13, height: 1.5),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx),
+            child: const Text('Later', style: TextStyle(color: Color(0xFF9E8E7E))),
+          ),
+          TextButton(
+            onPressed: () {
+              Navigator.pop(ctx);
+              OverlayService.requestPermission();
+            },
+            child: const Text(
+              'Grant permission',
+              style: TextStyle(color: Color(0xFFC48312), fontWeight: FontWeight.w600),
+            ),
+          ),
+        ],
+      ),
+    );
   }
 
   @override
@@ -63,6 +107,8 @@ class _ShellScreenState extends ConsumerState<ShellScreen>
         a.state == SessionState.ready ||
         a.state == SessionState.speaking ||
         a.state == SessionState.thinking));
+    final networkAsync = ref.watch(networkConnectedProvider);
+    final isOffline = networkAsync.whenOrNull(data: (v) => !v) ?? false;
 
     final mq = MediaQuery.of(context);
     final bottomInset = mq.padding.bottom;
@@ -74,9 +120,16 @@ class _ShellScreenState extends ConsumerState<ShellScreen>
     return Scaffold(
       backgroundColor: context.ac.bg,
       extendBody: true,
-      body: Padding(
-        padding: EdgeInsets.only(bottom: bottomNavH),
-        child: widget.child,
+      body: Column(
+        children: [
+          if (isOffline) const _OfflineBanner(),
+          Expanded(
+            child: Padding(
+              padding: EdgeInsets.only(bottom: bottomNavH),
+              child: widget.child,
+            ),
+          ),
+        ],
       ),
       bottomNavigationBar: AnimatedBuilder(
         animation: _pulse,
@@ -87,7 +140,8 @@ class _ShellScreenState extends ConsumerState<ShellScreen>
           connected: connected,
           pulseValue: _pulse.value,
           onTap: (i) {
-            if (i == 0 && connected) {
+            final onChatTab = location.startsWith('/chat');
+            if (i == 0 && connected && onChatTab) {
               ref.read(audioServiceProvider).disconnect();
             } else {
               context.go(_tabs[i].path);
@@ -350,4 +404,41 @@ class _TabIconPainter extends CustomPainter {
   @override
   bool shouldRepaint(_TabIconPainter o) =>
       o.kind != kind || o.color != color || o.accentColor != accentColor;
+}
+
+class _OfflineBanner extends StatelessWidget {
+  const _OfflineBanner();
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.symmetric(vertical: 8, horizontal: 16),
+      color: const Color(0xFF3A1F00),
+      child: SafeArea(
+        bottom: false,
+        child: Row(
+          children: [
+            const Icon(
+              Icons.wifi_off_rounded,
+              size: 14,
+              color: Color(0xFFE8A455),
+            ),
+            const SizedBox(width: 8),
+            const Expanded(
+              child: Text(
+                'No internet connection — some features may not work',
+                style: TextStyle(
+                  color: Color(0xFFE8A455),
+                  fontSize: 11,
+                  height: 1.3,
+                  fontFamily: 'Geist',
+                ),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
 }

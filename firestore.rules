@@ -7,7 +7,8 @@ service cloud.firestore {
 
       match /memories/{memId} {
         allow read: if request.auth != null && request.auth.uid == uid;
-        allow write: if false;
+        allow delete: if request.auth != null && request.auth.uid == uid;
+        allow create, update: if false;
       }
       match /skills/{skillId} {
         allow read, write: if request.auth != null && request.auth.uid == uid;

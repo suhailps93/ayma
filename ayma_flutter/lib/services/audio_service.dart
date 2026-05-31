@@ -7,6 +7,7 @@ import 'package:flutter/foundation.dart';
 import 'package:http/http.dart' as http;
 import 'package:permission_handler/permission_handler.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'package:speech_to_text/speech_to_text.dart' as stt;
 
 import 'audio_recorder_service.dart';
 import 'audio_streamer_service.dart';
@@ -73,6 +74,8 @@ class AymaAudioService extends ChangeNotifier {
   double _inputVolume = 0;
   double _outputVolume = 0;
   double _rawInputVolume = 0;
+  double _smoothedInputVol = 0;
+  Timer? _talkHoldoffTimer;
   double get inputVolume => _inputVolume;
   double get outputVolume => _outputVolume;
   double get rawInputVolume => _rawInputVolume;
@@ -94,11 +97,17 @@ class AymaAudioService extends ChangeNotifier {
   String _pendingTurnUser = '';
   String _pendingTurnModel = '';
   Timer? _persistDebounce;
+  Timer? _outputDecayTimer;
+  int _audioBytesPerTurn = 0;
   static const int _maxTranscriptLines = 180;
 
   String? _geminiApiKey;
   String? _systemPrompt;
   String _sessionId = DateTime.now().millisecondsSinceEpoch.toString();
+
+  final _speechToText = stt.SpeechToText();
+  bool _sttAvailable = false;
+  bool _wakeWordListening = false;
 
   Future<void>? _connectFuture;
 
@@ -121,20 +130,20 @@ class AymaAudioService extends ChangeNotifier {
 
   // ── Playback drain helper ─────────────────────────────────────────────────────
 
-  void _awaitPlaybackEnd() {
-    int ticks = 0;
-    Timer.periodic(const Duration(milliseconds: 80), (t) {
-      ticks++;
-      final drained = _outputVolume < 0.004;
-      final timeout = ticks > 50; // 4 second max
-      if (drained || timeout) {
-        t.cancel();
-        if (_state == SessionState.speaking || _state == SessionState.thinking) {
-          _setState(SessionState.listening);
-          _outputVolume = 0;
-          _notifyMetersThrottled();
-        }
+  void _schedulePlaybackEnd() {
+    _outputDecayTimer?.cancel();
+    // PCM 16-bit mono @ 24 kHz → 48 000 bytes per second
+    const bytesPerMs = 48.0;
+    final bufferedMs = (_audioBytesPerTurn / bytesPerMs).clamp(200.0, 8000.0);
+    _audioBytesPerTurn = 0;
+    // Let the wave stay alive for the estimated playback duration + 250 ms buffer
+    _outputDecayTimer = Timer(Duration(milliseconds: bufferedMs.toInt() + 250), () {
+      _outputDecayTimer = null;
+      if (_state == SessionState.speaking || _state == SessionState.thinking) {
+        _setState(SessionState.listening);
       }
+      _outputVolume = 0;
+      _notifyMetersThrottled();
     });
   }
 
@@ -153,12 +162,16 @@ class AymaAudioService extends ChangeNotifier {
       if (_speakerMuted) return;
       _setState(SessionState.speaking);
       _outputVolume = _pcmRms(chunk.data);
+      _audioBytesPerTurn += chunk.data.lengthInBytes;
       unawaited(_streamer.addPcm16(chunk.data, mimeType: chunk.mimeType));
       _notifyMetersThrottled();
     }));
 
     // interrupted → stop streamer (mirrors stopAudioStreamer in useLiveAPI)
     _subs.add(_client.interruptedStream.listen((_) {
+      _outputDecayTimer?.cancel();
+      _outputDecayTimer = null;
+      _audioBytesPerTurn = 0;
       _streamer.stop();
       _outputVolume = 0;
       final userText = _pendingTurnUser.trim();
@@ -180,6 +193,18 @@ class AymaAudioService extends ChangeNotifier {
 
     _subs.add(_client.inputTranscriptStream.listen((text) {
       _pendingTurnUser = _mergeTurnText(_pendingTurnUser, text);
+      _checkGoodbyeWakeWord(_pendingTurnUser);
+      // Transcript arrival = Gemini confirmed speech → activate user wave
+      if (!_userTalking) {
+        _userTalking = true;
+        _notifyMetersThrottled();
+      }
+      _lastUserVoiceAt = DateTime.now();
+      _talkHoldoffTimer?.cancel();
+      _talkHoldoffTimer = Timer(const Duration(milliseconds: 1200), () {
+        _userTalking = false;
+        _notifyMetersThrottled();
+      });
     }));
 
     _subs.add(_client.turnCompleteStream.listen((_) {
@@ -192,7 +217,7 @@ class AymaAudioService extends ChangeNotifier {
         _addTranscript(modelText, isUser: false, allowRecentDuplicate: true);
       }
       unawaited(_commitTurnToBackend());
-      _awaitPlaybackEnd();
+      _schedulePlaybackEnd();
     }));
 
     _subs.add(_client.toolCallStream.listen((calls) {
@@ -218,9 +243,10 @@ class AymaAudioService extends ChangeNotifier {
 
     _subs.add(_recorder.volumeStream.listen((vol) {
       _inputVolume = vol;
-      // Web emits raw PCM RMS (threshold 0.03); native emits normalised dB (0.20)
-      _userTalking = kIsWeb ? vol > 0.03 : vol > 0.20;
-      if (_userTalking) _lastUserVoiceAt = DateTime.now();
+      // EMA smoothing for visual amplitude only — VAD is driven by transcript events
+      final alpha = vol > _smoothedInputVol ? 0.35 : 0.15;
+      _smoothedInputVol = _smoothedInputVol * (1 - alpha) + vol * alpha;
+      _rawInputVolume = _smoothedInputVol;
       _notifyMetersThrottled();
     }));
   }
@@ -265,6 +291,55 @@ class AymaAudioService extends ChangeNotifier {
     _client.sendRealtimeAudio(pcm);
   }
 
+  // ── Wake word detection ──────────────────────────────────────────────────────
+
+  Future<void> startWakeWordListening() async {
+    if (_state != SessionState.disconnected || _wakeWordListening) return;
+    _sttAvailable = await _speechToText.initialize(onError: (_) {});
+    if (!_sttAvailable) return;
+    _wakeWordListening = true;
+    notifyListeners();
+    _listenForWakeWord();
+  }
+
+  void _listenForWakeWord() {
+    if (!_wakeWordListening || _state != SessionState.disconnected) return;
+    _speechToText.listen(
+      onResult: (result) {
+        final words = result.recognizedWords.toLowerCase();
+        if (words.contains('hey ayma') ||
+            words.contains('hi ayma') ||
+            words.contains('okay ayma') ||
+            words.contains('ok ayma')) {
+          stopWakeWordListening();
+          unawaited(connect(userInitiated: true));
+        }
+      },
+      listenFor: const Duration(seconds: 8),
+      pauseFor: const Duration(seconds: 3),
+      partialResults: true,
+      onSoundLevelChange: null,
+      cancelOnError: false,
+      listenMode: stt.ListenMode.dictation,
+    );
+    _speechToText.statusListener = (status) {
+      if (status == 'done' || status == 'notListening') {
+        if (_wakeWordListening && _state == SessionState.disconnected) {
+          Future.delayed(const Duration(milliseconds: 300), _listenForWakeWord);
+        }
+      }
+    };
+  }
+
+  void stopWakeWordListening() {
+    if (!_wakeWordListening) return;
+    _wakeWordListening = false;
+    _speechToText.stop();
+    notifyListeners();
+  }
+
+  bool get wakeWordListening => _wakeWordListening;
+
   // ── Connection lifecycle ─────────────────────────────────────────────────────
 
   Future<void> connect({bool userInitiated = false}) async {
@@ -281,6 +356,7 @@ class AymaAudioService extends ChangeNotifier {
   }
 
   Future<void> _connect() async {
+    stopWakeWordListening();
     if (_state != SessionState.disconnected) {
       _disconnectTransport();
       _setState(SessionState.disconnected);
@@ -333,6 +409,13 @@ class AymaAudioService extends ChangeNotifier {
     _client.disconnect();
     _recorder.stop();
     _streamer.stop();
+    _talkHoldoffTimer?.cancel();
+    _talkHoldoffTimer = null;
+    _userTalking = false;
+    _smoothedInputVol = 0;
+    _outputDecayTimer?.cancel();
+    _outputDecayTimer = null;
+    _audioBytesPerTurn = 0;
   }
 
   // ── Transcript persistence ────────────────────────────────────────────────────
@@ -719,6 +802,20 @@ class AymaAudioService extends ChangeNotifier {
     return math.sqrt(sum / count).clamp(0.0, 1.0);
   }
 
+  void _checkGoodbyeWakeWord(String transcript) {
+    final lower = transcript.toLowerCase();
+    if (lower.contains('goodbye ayma') ||
+        lower.contains('bye ayma') ||
+        lower.contains('goodbye, ayma') ||
+        lower.contains('bye, ayma') ||
+        lower.contains('stop ayma')) {
+      // Small delay so the transcript is committed first
+      Future.delayed(const Duration(milliseconds: 400), () {
+        if (_state != SessionState.disconnected) disconnect();
+      });
+    }
+  }
+
   void _addAssistantFallbackMessage() {
     _addTranscript(
       'I could not generate a reply right now. Please check your connection and try again.',
@@ -728,8 +825,12 @@ class AymaAudioService extends ChangeNotifier {
 
   @override
   void dispose() {
+    stopWakeWordListening();
+    _speechToText.stop();
     _micFlushTimer?.cancel();
     _persistDebounce?.cancel();
+    _talkHoldoffTimer?.cancel();
+    _outputDecayTimer?.cancel();
     for (final sub in _subs) {
       sub.cancel();
     }

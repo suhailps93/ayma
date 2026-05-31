@@ -66,6 +66,7 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
   Timer? _sessionTimer;
   Duration _sessionDuration = Duration.zero;
   bool _voiceActionInFlight = false;
+  bool _wakeWordActive = false;
   bool _sendingText = false;
   bool _initialScrollDone = false;
 
@@ -107,6 +108,16 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
       _voiceActionInFlight = false;
     } else {
       _audioService.setMuted(!_audioService.muted);
+    }
+  }
+
+  void _toggleWakeWord() {
+    if (_wakeWordActive) {
+      _audioService.stopWakeWordListening();
+      setState(() => _wakeWordActive = false);
+    } else {
+      _audioService.startWakeWordListening();
+      setState(() => _wakeWordActive = true);
     }
   }
 
@@ -328,6 +339,7 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
     }
 
     final connected = state != SessionState.disconnected;
+    final wakeWordOn = _wakeWordActive;
     return Scaffold(
       backgroundColor: context.ac.bg,
       resizeToAvoidBottomInset: true,
@@ -339,7 +351,19 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
             _TopBar(
               connected: connected,
               timerLabel: connected ? 'Session · $_timerLabel' : 'Offline',
+              onDisconnect: connected ? () {
+                _audioService.disconnect();
+                _sessionTimer?.cancel();
+                setState(() => _sessionDuration = Duration.zero);
+              } : null,
             ),
+
+            // ── Wake word ───────────────────────────────────────────
+            if (!connected)
+              _WakeWordBanner(
+                active: wakeWordOn,
+                onToggle: _toggleWakeWord,
+              ),
 
             // ── Transcript ──────────────────────────────────────────
             Expanded(
@@ -379,10 +403,12 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
 class _TopBar extends StatelessWidget {
   final bool connected;
   final String timerLabel;
+  final VoidCallback? onDisconnect;
 
   const _TopBar({
     required this.connected,
     required this.timerLabel,
+    this.onDisconnect,
   });
 
   @override
@@ -402,6 +428,26 @@ class _TopBar extends StatelessWidget {
             Text(timerLabel.toUpperCase(),
                 style: AymaFonts.mono(
                     size: 10, color: context.ac.fgDim, letterSpacing: 0.18)),
+            const Spacer(),
+            if (connected && onDisconnect != null)
+              GestureDetector(
+                onTap: onDisconnect,
+                child: Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 5),
+                  decoration: BoxDecoration(
+                    color: context.ac.bgCard,
+                    borderRadius: BorderRadius.circular(99),
+                    border: Border.all(
+                      color: context.ac.lineSoft.withValues(alpha: 0.7),
+                      width: 0.5,
+                    ),
+                  ),
+                  child: Text(
+                    'End',
+                    style: AymaFonts.mono(size: 9, color: context.ac.fgMute),
+                  ),
+                ),
+              ),
           ],
         ),
       );
@@ -1100,6 +1146,55 @@ class _PillAttachButton extends StatelessWidget {
           ),
         ),
       );
+}
+
+class _WakeWordBanner extends StatelessWidget {
+  final bool active;
+  final VoidCallback onToggle;
+  const _WakeWordBanner({required this.active, required this.onToggle});
+
+  @override
+  Widget build(BuildContext context) {
+    return GestureDetector(
+      onTap: onToggle,
+      child: AnimatedContainer(
+        duration: const Duration(milliseconds: 200),
+        margin: const EdgeInsets.fromLTRB(20, 0, 20, 8),
+        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
+        decoration: BoxDecoration(
+          color: active
+              ? context.ac.accent.withValues(alpha: 0.10)
+              : context.ac.bgElev,
+          borderRadius: BorderRadius.circular(99),
+          border: Border.all(
+            color: active
+                ? context.ac.accent.withValues(alpha: 0.35)
+                : context.ac.lineSoft,
+            width: 0.5,
+          ),
+        ),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            Icon(
+              active ? Icons.hearing_rounded : Icons.hearing_disabled_rounded,
+              size: 14,
+              color: active ? context.ac.accent : context.ac.fgMute,
+            ),
+            const SizedBox(width: 8),
+            Text(
+              active ? 'Listening for "Hey Ayma"' : 'Say "Hey Ayma" to start',
+              style: AymaFonts.mono(
+                size: 9,
+                color: active ? context.ac.accent : context.ac.fgMute,
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
 }
 
 class _ComposerOutlinePainter extends CustomPainter {
