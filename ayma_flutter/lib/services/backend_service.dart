@@ -40,9 +40,9 @@ class BackendService {
     required List<Map<String, String>> messages,
   }) async {
     final token = await _idToken();
-    if (token == null) return;
+    if (token == null) throw Exception('Not authenticated');
 
-    await http
+    final response = await http
         .post(
           Uri.parse('${Env.bootstrapUrl}/post-turn'),
           headers: {
@@ -52,6 +52,10 @@ class BackendService {
           body: jsonEncode({'session_id': sessionId, 'messages': messages}),
         )
         .timeout(const Duration(seconds: 15));
+
+    if (response.statusCode != 200) {
+      throw Exception('post-turn failed: ${response.statusCode} ${response.body}');
+    }
   }
 
   static Future<Map<String, dynamic>> runMatching() async {

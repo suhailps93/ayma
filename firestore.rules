@@ -2,43 +2,44 @@ rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
     match /users/{uid} {
-      // Own profile: full read/write
       allow read, write: if request.auth != null && request.auth.uid == uid;
-      // Other users' public profiles: readable for explore/matching
       allow read: if request.auth != null && resource.data.onboarding_complete == true;
 
-      // User's subcollections
       match /memories/{memId} {
         allow read: if request.auth != null && request.auth.uid == uid;
-        allow write: if false; // only written by Cloud Run
+        allow write: if false;
       }
-match /skills/{skillId} {
+      match /skills/{skillId} {
         allow read, write: if request.auth != null && request.auth.uid == uid;
       }
       match /questions/{questionId} {
         allow read, write: if request.auth != null && request.auth.uid == uid;
       }
     }
-    
-    // Matches: participants can read, no client writes
+
     match /matches/{matchId} {
-      allow read: if request.auth != null && 
+      allow read: if request.auth != null &&
         (resource.data.user_a == request.auth.uid || resource.data.user_b == request.auth.uid);
       allow write: if false;
     }
-    
-    // Notifications: user can read their own, mark as read
+
     match /notifications/{notifId} {
       allow read: if request.auth != null && resource.data.user_id == request.auth.uid;
+      allow create: if request.auth != null;
       allow update: if request.auth != null && resource.data.user_id == request.auth.uid
         && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['read']);
-      allow write: if false;
     }
-    
-    // Media: user can read/write their own
+
     match /media/{mediaId} {
       allow read: if request.auth != null;
       allow write: if request.auth != null && request.resource.data.user_id == request.auth.uid;
+    }
+
+    match /messages/{msgId} {
+      allow read: if request.auth != null &&
+        (resource.data.from_user_id == request.auth.uid || resource.data.to_user_id == request.auth.uid);
+      allow create: if request.auth != null &&
+        request.resource.data.from_user_id == request.auth.uid;
     }
   }
 }

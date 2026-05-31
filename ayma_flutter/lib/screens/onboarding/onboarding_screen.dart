@@ -9,6 +9,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../providers/providers.dart';
 import '../../services/firestore_service.dart';
 import '../../theme.dart';
+import '../../utils/distance_units.dart';
 import '../../widgets/ayma_button.dart';
 
 // ── Orb painter (same as auth screen) ────────────────────────────────────────
@@ -455,6 +456,7 @@ class _OnboardingScreenState extends ConsumerState<OnboardingScreen> {
             _locationExpanded = false;
           }),
           onDetect: _detectLocation,
+          countryCode: Localizations.localeOf(context).countryCode,
         );
       default:
         return const SizedBox();
@@ -695,6 +697,7 @@ class _PreferencesStep extends StatelessWidget {
   final ValueChanged<String> onLocationChanged;
   final ValueChanged<String> onSuggestionTap;
   final VoidCallback onDetect;
+  final String? countryCode;
 
   const _PreferencesStep({
     required this.interestedIn,
@@ -711,6 +714,7 @@ class _PreferencesStep extends StatelessWidget {
     required this.onLocationChanged,
     required this.onSuggestionTap,
     required this.onDetect,
+    required this.countryCode,
   });
 
   @override
@@ -790,6 +794,7 @@ class _PreferencesStep extends StatelessWidget {
             onChanged: onLocationChanged,
             onSuggestionTap: onSuggestionTap,
             onDetect: onDetect,
+            countryCode: countryCode,
           ),
           const SizedBox(height: 24),
         ],
@@ -949,6 +954,7 @@ class _LocationCard extends StatelessWidget {
   final VoidCallback onTap, onDetect;
   final ValueChanged<String> onChanged;
   final ValueChanged<String> onSuggestionTap;
+  final String? countryCode;
 
   const _LocationCard({
     required this.locationText,
@@ -960,10 +966,15 @@ class _LocationCard extends StatelessWidget {
     required this.onChanged,
     required this.onSuggestionTap,
     required this.onDetect,
+    required this.countryCode,
   });
 
   @override
   Widget build(BuildContext context) {
+    final unit = DistanceUnits.shortUnit(
+      locationRegion: locationText,
+      countryCode: countryCode,
+    );
     return Column(
       children: [
         GestureDetector(
@@ -1014,7 +1025,7 @@ class _LocationCard extends StatelessWidget {
                               ),
                             ),
                             if (locationText.isNotEmpty)
-                              Text('Within 25 miles',
+                              Text('Within 25 $unit',
                                   style: TextStyle(
                                       color: AymaColors.fgMute, fontSize: 12)),
                           ],

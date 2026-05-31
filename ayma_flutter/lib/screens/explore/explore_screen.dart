@@ -7,6 +7,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../providers/providers.dart';
 import '../../services/firestore_service.dart';
 import '../../theme.dart';
+import '../../utils/distance_units.dart';
 import '../../widgets/public_profile_view.dart';
 import 'direct_message_screen.dart';
 
@@ -43,6 +44,9 @@ class _ExploreScreenState extends ConsumerState<ExploreScreen> {
   @override
   Widget build(BuildContext context) {
     final filters = ref.watch(exploreFiltersProvider);
+    final myProfile = ref.watch(profileProvider).value;
+    final countryCode = DistanceUnits.countryCodeFromContext(context);
+    final locationRegion = myProfile?.locationRegion;
     final resultAsync = ref.watch(exploreProvider);
 
     return Scaffold(
@@ -152,6 +156,8 @@ class _ExploreScreenState extends ConsumerState<ExploreScreen> {
                           radiusKm: filters.radiusKm,
                           onChanged: (r) =>
                               _setFilter((f) => f.copyWith(radiusKm: r)),
+                          countryCode: countryCode,
+                          locationRegion: locationRegion,
                         ),
                       ],
                     ),
@@ -345,12 +351,24 @@ class _AgeFilterChip extends StatelessWidget {
 class _RadiusFilterChip extends StatelessWidget {
   final int radiusKm;
   final ValueChanged<int> onChanged;
+  final String? countryCode;
+  final String? locationRegion;
 
-  const _RadiusFilterChip({required this.radiusKm, required this.onChanged});
+  const _RadiusFilterChip({
+    required this.radiusKm,
+    required this.onChanged,
+    required this.countryCode,
+    required this.locationRegion,
+  });
 
   @override
   Widget build(BuildContext context) {
     final isDefault = radiusKm == 50;
+    final formatted = DistanceUnits.formatFromKm(
+      radiusKm,
+      countryCode: countryCode,
+      locationRegion: locationRegion,
+    );
     return GestureDetector(
       onTap: () => _showRadiusSheet(context),
       child: AnimatedContainer(
@@ -369,7 +387,7 @@ class _RadiusFilterChip extends StatelessWidget {
           ),
         ),
         child: Text(
-          '$radiusKm km',
+          formatted,
           style: TextStyle(
             fontSize: 12,
             color: !isDefault ? context.ac.accent : context.ac.fgDim,
@@ -380,7 +398,27 @@ class _RadiusFilterChip extends StatelessWidget {
   }
 
   void _showRadiusSheet(BuildContext context) {
-    int r = radiusKm;
+    const minKm = 5;
+    const maxKm = 200;
+    final displayMin = DistanceUnits.fromKm(
+      minKm,
+      countryCode: countryCode,
+      locationRegion: locationRegion,
+    );
+    final displayMax = DistanceUnits.fromKm(
+      maxKm,
+      countryCode: countryCode,
+      locationRegion: locationRegion,
+    );
+    final unit = DistanceUnits.shortUnit(
+      countryCode: countryCode,
+      locationRegion: locationRegion,
+    );
+    int displayRadius = DistanceUnits.fromKm(
+      radiusKm,
+      countryCode: countryCode,
+      locationRegion: locationRegion,
+    );
     showModalBottomSheet<void>(
       context: context,
       backgroundColor: Colors.transparent,
@@ -390,22 +428,28 @@ class _RadiusFilterChip extends StatelessWidget {
           child: Column(
             mainAxisSize: MainAxisSize.min,
             children: [
-              Text('$r km',
+              Text('$displayRadius $unit',
                   style: AymaFonts.serif(size: 28, color: ctx.ac.fg)),
               const SizedBox(height: 12),
               Slider(
-                value: r.toDouble(),
-                min: 5,
-                max: 200,
-                divisions: 39,
+                value: displayRadius.toDouble(),
+                min: displayMin.toDouble(),
+                max: displayMax.toDouble(),
+                divisions: (displayMax - displayMin).clamp(1, 500),
                 activeColor: ctx.ac.accent,
                 inactiveColor: ctx.ac.lineSoft,
-                onChanged: (v) => setS(() => r = v.round()),
+                onChanged: (v) => setS(() => displayRadius = v.round()),
               ),
               const SizedBox(height: 16),
               _ApplyBtn(onTap: () {
                 Navigator.pop(ctx);
-                onChanged(r);
+                onChanged(
+                  DistanceUnits.toKm(
+                    displayRadius,
+                    countryCode: countryCode,
+                    locationRegion: locationRegion,
+                  ),
+                );
               }),
             ],
           ),
@@ -825,6 +869,7 @@ class _ExploreProfileScreenState extends State<_ExploreProfileScreen> {
   late Future<Map<String, dynamic>?> _profileFuture;
   double? _matchScore;
   bool _busy = false;
+  bool _connected = false;
 
   @override
   void initState() {
@@ -846,16 +891,20 @@ class _ExploreProfileScreenState extends State<_ExploreProfileScreen> {
     }
   }
 
-  Future<void> _sendPoke(String userId) async {
-    setState(() => _busy = true);
-    try {
-      await FirestoreService.sendPoke(userId);
-      if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Poke sent')),
-      );
-    } finally {
-      if (mounted) setState(() => _busy = false);
+  Future<void> _connect(
+      String userId, String name, String? photoUrl) async {
+    final sent = await showModalBottomSheet<bool>(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: Colors.transparent,
+      builder: (_) => _ConnectSheet(
+        targetUserId: userId,
+        targetName: name,
+        photoUrl: photoUrl,
+      ),
+    );
+    if (sent == true && mounted) {
+      setState(() => _connected = true);
     }
   }
 
@@ -927,28 +976,99 @@ class _ExploreProfileScreenState extends State<_ExploreProfileScreen> {
             extraPills: extraPills,
             isOnline: true,
             showEditControls: false,
-            bottom: Wrap(
-              spacing: 8,
-              runSpacing: 8,
+            bottom: Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
               children: [
-                _ActionBtn(
-                  label: _matchScore == null
-                      ? 'Generate Match Score'
-                      : 'Match ${(100 * _matchScore!).round()}%',
-                  onTap: _busy || userId.isEmpty
+                // ── Primary: Connect ──────────────────────────────────
+                GestureDetector(
+                  onTap: _busy || userId.isEmpty || _connected
                       ? null
-                      : () => _generateScore(userId),
+                      : () => _connect(
+                            userId,
+                            name?.isNotEmpty == true ? name! : 'Someone',
+                            photos.isNotEmpty ? photos.first : null,
+                          ),
+                  child: AnimatedContainer(
+                    duration: const Duration(milliseconds: 250),
+                    padding: const EdgeInsets.symmetric(vertical: 16),
+                    decoration: BoxDecoration(
+                      color: _connected
+                          ? const Color(0xFF1E2A1A)
+                          : context.ac.accent,
+                      borderRadius: BorderRadius.circular(18),
+                      border: _connected
+                          ? Border.all(
+                              color: const Color(0xFF46D96A).withValues(alpha: 0.4),
+                              width: 0.5,
+                            )
+                          : null,
+                    ),
+                    child: Row(
+                      mainAxisAlignment: MainAxisAlignment.center,
+                      children: [
+                        if (_busy && !_connected)
+                          const SizedBox(
+                            width: 16,
+                            height: 16,
+                            child: CircularProgressIndicator(
+                              strokeWidth: 2,
+                              color: Colors.black,
+                            ),
+                          )
+                        else if (_connected) ...[
+                          const Icon(
+                            Icons.check_circle_rounded,
+                            size: 16,
+                            color: Color(0xFF46D96A),
+                          ),
+                          const SizedBox(width: 8),
+                          const Text(
+                            'Connected',
+                            style: TextStyle(
+                              color: Color(0xFF46D96A),
+                              fontSize: 15,
+                              fontWeight: FontWeight.w600,
+                            ),
+                          ),
+                        ] else
+                          const Text(
+                            'Connect',
+                            style: TextStyle(
+                              color: Colors.black,
+                              fontSize: 15,
+                              fontWeight: FontWeight.w600,
+                            ),
+                          ),
+                      ],
+                    ),
+                  ),
                 ),
-                _ActionBtn(
-                  label: 'Send Poke',
-                  onTap:
-                      _busy || userId.isEmpty ? null : () => _sendPoke(userId),
-                ),
-                _ActionBtn(
-                  label: 'Message',
-                  onTap: _busy || userId.isEmpty
-                      ? null
-                      : () => _sendMessage(userId),
+                const SizedBox(height: 10),
+                // ── Secondary: Match Score + Message ──────────────────
+                Row(
+                  children: [
+                    Expanded(
+                      child: _ActionBtn(
+                        label: _matchScore == null
+                            ? 'Match Score'
+                            : '${(100 * _matchScore!).round()}% Match',
+                        icon: Icons.favorite_border_rounded,
+                        onTap: _busy || userId.isEmpty
+                            ? null
+                            : () => _generateScore(userId),
+                      ),
+                    ),
+                    const SizedBox(width: 8),
+                    Expanded(
+                      child: _ActionBtn(
+                        label: 'Message',
+                        icon: Icons.chat_bubble_outline_rounded,
+                        onTap: _busy || userId.isEmpty
+                            ? null
+                            : () => _sendMessage(userId),
+                      ),
+                    ),
+                  ],
                 ),
               ],
             ),
@@ -962,26 +1082,270 @@ class _ExploreProfileScreenState extends State<_ExploreProfileScreen> {
 class _ActionBtn extends StatelessWidget {
   final String label;
   final VoidCallback? onTap;
-  const _ActionBtn({required this.label, this.onTap});
+  final IconData? icon;
+  const _ActionBtn({required this.label, this.onTap, this.icon});
 
   @override
   Widget build(BuildContext context) {
+    final enabled = onTap != null;
     return GestureDetector(
       onTap: onTap,
       child: Container(
-        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 9),
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 12),
         decoration: BoxDecoration(
           color: context.ac.bgCard,
-          borderRadius: BorderRadius.circular(12),
+          borderRadius: BorderRadius.circular(14),
           border: Border.all(color: context.ac.lineSoft, width: 0.5),
         ),
-        child: Text(
-          label,
-          style: TextStyle(
-            color: onTap == null ? context.ac.fgMute : context.ac.fg,
-            fontSize: 13,
-          ),
+        child: Row(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            if (icon != null) ...[
+              Icon(
+                icon,
+                size: 15,
+                color: enabled ? context.ac.fgDim : context.ac.fgMute,
+              ),
+              const SizedBox(width: 6),
+            ],
+            Text(
+              label,
+              style: TextStyle(
+                color: enabled ? context.ac.fg : context.ac.fgMute,
+                fontSize: 13,
+              ),
+            ),
+          ],
         ),
+      ),
+    );
+  }
+}
+
+// ── Connect sheet ─────────────────────────────────────────────────────────────
+
+class _ConnectSheet extends StatefulWidget {
+  final String targetUserId;
+  final String targetName;
+  final String? photoUrl;
+
+  const _ConnectSheet({
+    required this.targetUserId,
+    required this.targetName,
+    this.photoUrl,
+  });
+
+  @override
+  State<_ConnectSheet> createState() => _ConnectSheetState();
+}
+
+class _ConnectSheetState extends State<_ConnectSheet> {
+  final _ctrl = TextEditingController();
+  bool _sending = false;
+  bool _sent = false;
+
+  @override
+  void dispose() {
+    _ctrl.dispose();
+    super.dispose();
+  }
+
+  Future<void> _send() async {
+    final text = _ctrl.text.trim();
+    setState(() => _sending = true);
+    try {
+      if (text.isNotEmpty) {
+        await FirestoreService.sendDirectMessage(
+          targetUserId: widget.targetUserId,
+          text: text,
+        );
+      } else {
+        await FirestoreService.sendPoke(widget.targetUserId);
+      }
+      if (!mounted) return;
+      setState(() {
+        _sent = true;
+        _sending = false;
+      });
+      await Future<void>.delayed(const Duration(milliseconds: 900));
+      if (mounted) Navigator.of(context).pop(true);
+    } catch (_) {
+      if (mounted) setState(() => _sending = false);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final bottomPad = MediaQuery.viewInsetsOf(context).bottom;
+    return Container(
+      margin: const EdgeInsets.fromLTRB(12, 0, 12, 12),
+      padding: EdgeInsets.fromLTRB(20, 24, 20, 20 + bottomPad),
+      decoration: BoxDecoration(
+        color: context.ac.bgElev,
+        borderRadius: BorderRadius.circular(28),
+        border: Border.all(color: context.ac.lineSoft, width: 0.5),
+      ),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Container(
+            width: 36,
+            height: 4,
+            margin: const EdgeInsets.only(bottom: 20),
+            decoration: BoxDecoration(
+              color: context.ac.lineSoft,
+              borderRadius: BorderRadius.circular(2),
+            ),
+          ),
+          Row(
+            children: [
+              Container(
+                width: 52,
+                height: 52,
+                decoration: BoxDecoration(
+                  shape: BoxShape.circle,
+                  color: context.ac.bgCard,
+                  border: Border.all(
+                    color: context.ac.accent.withValues(alpha: 0.3),
+                    width: 1,
+                  ),
+                  image: widget.photoUrl != null && widget.photoUrl!.isNotEmpty
+                      ? DecorationImage(
+                          image: NetworkImage(widget.photoUrl!),
+                          fit: BoxFit.cover,
+                        )
+                      : null,
+                ),
+                child: widget.photoUrl == null || widget.photoUrl!.isEmpty
+                    ? Icon(Icons.person_outline_rounded,
+                        color: context.ac.fgMute, size: 24)
+                    : null,
+              ),
+              const SizedBox(width: 14),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      _sent
+                          ? 'Connected!'
+                          : 'Connect with ${widget.targetName}',
+                      style: AymaFonts.serif(size: 20, color: context.ac.fg),
+                    ),
+                    const SizedBox(height: 3),
+                    Text(
+                      _sent
+                          ? 'Your message is on its way'
+                          : 'Send an intro or connect silently',
+                      style: TextStyle(
+                          color: context.ac.fgMute, fontSize: 13),
+                    ),
+                  ],
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 20),
+          if (!_sent) ...[
+            Container(
+              decoration: BoxDecoration(
+                color: context.ac.bg,
+                borderRadius: BorderRadius.circular(14),
+                border: Border.all(color: context.ac.lineSoft, width: 0.5),
+              ),
+              child: TextField(
+                controller: _ctrl,
+                maxLines: 3,
+                minLines: 1,
+                autofocus: true,
+                style: TextStyle(color: context.ac.fg, fontSize: 14),
+                decoration: InputDecoration(
+                  hintText: 'Write a short intro… (optional)',
+                  hintStyle:
+                      TextStyle(color: context.ac.fgMute, fontSize: 14),
+                  border: InputBorder.none,
+                  contentPadding: const EdgeInsets.symmetric(
+                      horizontal: 14, vertical: 12),
+                ),
+              ),
+            ),
+            const SizedBox(height: 14),
+            GestureDetector(
+              onTap: _sending ? null : _send,
+              child: Container(
+                width: double.infinity,
+                padding: const EdgeInsets.symmetric(vertical: 15),
+                decoration: BoxDecoration(
+                  color: context.ac.accent,
+                  borderRadius: BorderRadius.circular(16),
+                ),
+                child: Center(
+                  child: _sending
+                      ? const SizedBox(
+                          width: 18,
+                          height: 18,
+                          child: CircularProgressIndicator(
+                              strokeWidth: 2, color: Colors.black),
+                        )
+                      : const Text(
+                          'Connect',
+                          style: TextStyle(
+                            color: Colors.black,
+                            fontSize: 15,
+                            fontWeight: FontWeight.w600,
+                          ),
+                        ),
+                ),
+              ),
+            ),
+            const SizedBox(height: 10),
+            GestureDetector(
+              onTap: () => Navigator.of(context).pop(false),
+              child: Container(
+                width: double.infinity,
+                padding: const EdgeInsets.symmetric(vertical: 13),
+                decoration: BoxDecoration(
+                  color: Colors.transparent,
+                  borderRadius: BorderRadius.circular(16),
+                  border: Border.all(color: context.ac.lineSoft, width: 0.5),
+                ),
+                child: Center(
+                  child: Text(
+                    'Cancel',
+                    style:
+                        TextStyle(color: context.ac.fgDim, fontSize: 14),
+                  ),
+                ),
+              ),
+            ),
+          ] else ...[
+            Container(
+              padding: const EdgeInsets.all(16),
+              decoration: BoxDecoration(
+                color: const Color(0xFF1E2A1A),
+                borderRadius: BorderRadius.circular(16),
+                border: Border.all(
+                    color: const Color(0xFF46D96A).withValues(alpha: 0.3),
+                    width: 0.5),
+              ),
+              child: Row(
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: [
+                  const Icon(Icons.check_circle_rounded,
+                      color: Color(0xFF46D96A), size: 20),
+                  const SizedBox(width: 10),
+                  Text(
+                    'Sent to ${widget.targetName}',
+                    style: const TextStyle(
+                        color: Color(0xFF46D96A),
+                        fontSize: 15,
+                        fontWeight: FontWeight.w500),
+                  ),
+                ],
+              ),
+            ),
+          ],
+        ],
       ),
     );
   }

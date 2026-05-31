@@ -421,12 +421,15 @@ class AymaAudioService extends ChangeNotifier {
       if (userText.isNotEmpty) {'role': 'user', 'text': userText},
       if (modelText.isNotEmpty) {'role': 'model', 'text': modelText},
     ];
-    _pendingTurnUser = '';
-    _pendingTurnModel = '';
 
     try {
       await BackendService.postTurn(sessionId: _sessionId, messages: messages);
-    } catch (_) {}
+      // Clear only after confirmed write, so transient failures can retry.
+      if (_pendingTurnUser.trim() == userText) _pendingTurnUser = '';
+      if (_pendingTurnModel.trim() == modelText) _pendingTurnModel = '';
+    } catch (e) {
+      debugPrint('post-turn memory sync failed: $e');
+    }
   }
 
   // ── Tool call handling ────────────────────────────────────────────────────────
@@ -639,6 +642,15 @@ class AymaAudioService extends ChangeNotifier {
 
   void toggleMute() {
     _muted = !_muted;
+    notifyListeners();
+  }
+
+  void setMuted(bool muted) {
+    if (_muted == muted) return;
+    _muted = muted;
+    if (_muted) {
+      _clearPendingMicAudio();
+    }
     notifyListeners();
   }
 

@@ -22,11 +22,17 @@ class _AuthScreenState extends ConsumerState<AuthScreen> {
   bool _loading    = false;
   String? _error;
   bool _emailSent  = false;
+  bool _showPhone  = false;
+  String? _verificationId;
+  final _phoneCtrl = TextEditingController();
+  final _otpCtrl   = TextEditingController();
 
   @override
   void dispose() {
     _emailCtrl.dispose();
     _passCtrl.dispose();
+    _phoneCtrl.dispose();
+    _otpCtrl.dispose();
     super.dispose();
   }
 
@@ -72,6 +78,54 @@ class _AuthScreenState extends ConsumerState<AuthScreen> {
         behavior: SnackBarBehavior.floating,
       ),
     );
+  }
+
+  Future<void> _signInWithGoogle() async {
+    setState(() { _loading = true; _error = null; });
+    try {
+      final ok = await ref.read(authControllerProvider).signInWithGoogle();
+      if (ok) {
+        await _goToChat();
+      } else if (mounted) {
+        setState(() { _error = 'Sign-in cancelled.'; });
+      }
+    } catch (e) {
+      if (mounted) setState(() { _error = e.toString().replaceFirst('Exception: ', ''); });
+    }
+    if (mounted) setState(() => _loading = false);
+  }
+
+  Future<void> _sendPhoneOtp() async {
+    final phone = _phoneCtrl.text.trim();
+    if (phone.isEmpty) return;
+    setState(() { _loading = true; _error = null; });
+    try {
+      final vid = await ref.read(authControllerProvider).sendPhoneOtp(phone);
+      if (mounted) setState(() { _verificationId = vid; });
+    } catch (e) {
+      if (mounted) setState(() { _error = e.toString().replaceFirst('Exception: ', ''); });
+    }
+    if (mounted) setState(() => _loading = false);
+  }
+
+  Future<void> _verifyPhoneOtp() async {
+    final vid = _verificationId;
+    if (vid == null) return;
+    setState(() { _loading = true; _error = null; });
+    try {
+      final ok = await ref.read(authControllerProvider).verifyPhoneOtp(
+        verificationId: vid,
+        smsCode: _otpCtrl.text.trim(),
+      );
+      if (ok) {
+        await _goToChat();
+      } else if (mounted) {
+        setState(() { _error = 'Verification failed.'; });
+      }
+    } catch (e) {
+      if (mounted) setState(() { _error = e.toString().replaceFirst('Exception: ', ''); });
+    }
+    if (mounted) setState(() => _loading = false);
   }
 
   @override
@@ -166,13 +220,31 @@ class _AuthScreenState extends ConsumerState<AuthScreen> {
                                     _error = null;
                                   }),
                                 )
-                              : _LandingButtons(
-                                  key: const ValueKey('landing'),
-                                  onApple: () => _comingSoon('Apple'),
-                                  onGoogle: () => _comingSoon('Google'),
-                                  onEmail: () => setState(() => _showEmail = true),
-                                  onPhone: () => _comingSoon('Phone'),
-                                ),
+                              : _showPhone && _verificationId != null
+                                  ? _OtpForm(
+                                      key: const ValueKey('otp-form'),
+                                      otpCtrl: _otpCtrl,
+                                      loading: _loading,
+                                      error: _error,
+                                      onSubmit: _verifyPhoneOtp,
+                                      onBack: () => setState(() { _verificationId = null; _error = null; }),
+                                    )
+                                  : _showPhone
+                                      ? _PhoneForm(
+                                          key: const ValueKey('phone-form'),
+                                          phoneCtrl: _phoneCtrl,
+                                          loading: _loading,
+                                          error: _error,
+                                          onSubmit: _sendPhoneOtp,
+                                          onBack: () => setState(() { _showPhone = false; _error = null; }),
+                                        )
+                                      : _LandingButtons(
+                                          key: const ValueKey('landing'),
+                                          onApple: () => _comingSoon('Apple'),
+                                          onGoogle: _loading ? () {} : _signInWithGoogle,
+                                          onEmail: () => setState(() => _showEmail = true),
+                                          onPhone: () => setState(() { _showPhone = true; _error = null; }),
+                                        ),
                     ),
                   ),
 
@@ -589,6 +661,151 @@ class _OrbPainter extends CustomPainter {
 
   @override
   bool shouldRepaint(_OrbPainter old) => old.breathe != breathe;
+}
+
+// ── Phone form ────────────────────────────────────────────────────────────────
+
+class _PhoneForm extends StatelessWidget {
+  final TextEditingController phoneCtrl;
+  final bool loading;
+  final String? error;
+  final VoidCallback onSubmit, onBack;
+
+  const _PhoneForm({
+    super.key,
+    required this.phoneCtrl,
+    required this.loading,
+    required this.error,
+    required this.onSubmit,
+    required this.onBack,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        GestureDetector(
+          onTap: onBack,
+          child: Row(
+            children: [
+              Icon(Icons.arrow_back_rounded, size: 18, color: context.ac.fgMute),
+              const SizedBox(width: 6),
+              Text('Sign in with phone', style: AymaFonts.mono(size: 10, color: context.ac.fgMute)),
+            ],
+          ),
+        ),
+        const SizedBox(height: 18),
+        _AuthField(
+          controller: phoneCtrl,
+          label: '+1 555 000 0000',
+          keyboardType: TextInputType.phone,
+        ),
+        if (error != null) ...[
+          const SizedBox(height: 10),
+          Text(
+            error!,
+            style: TextStyle(color: Colors.redAccent.shade100, fontSize: 13),
+          ).animate().fadeIn(),
+        ],
+        const SizedBox(height: 16),
+        GestureDetector(
+          onTap: loading ? null : onSubmit,
+          child: Container(
+            padding: const EdgeInsets.symmetric(vertical: 17),
+            decoration: BoxDecoration(
+              color: context.ac.fg,
+              borderRadius: BorderRadius.circular(50),
+            ),
+            child: Center(
+              child: loading
+                  ? const SizedBox(
+                      width: 18, height: 18,
+                      child: CircularProgressIndicator(strokeWidth: 2, color: Colors.black),
+                    )
+                  : const Text(
+                      'Send code',
+                      style: TextStyle(color: Colors.black, fontWeight: FontWeight.w600, fontSize: 15),
+                    ),
+            ),
+          ),
+        ),
+      ],
+    );
+  }
+}
+
+// ── OTP form ──────────────────────────────────────────────────────────────────
+
+class _OtpForm extends StatelessWidget {
+  final TextEditingController otpCtrl;
+  final bool loading;
+  final String? error;
+  final VoidCallback onSubmit, onBack;
+
+  const _OtpForm({
+    super.key,
+    required this.otpCtrl,
+    required this.loading,
+    required this.error,
+    required this.onSubmit,
+    required this.onBack,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        GestureDetector(
+          onTap: onBack,
+          child: Row(
+            children: [
+              Icon(Icons.arrow_back_rounded, size: 18, color: context.ac.fgMute),
+              const SizedBox(width: 6),
+              Text('Enter verification code', style: AymaFonts.mono(size: 10, color: context.ac.fgMute)),
+            ],
+          ),
+        ),
+        const SizedBox(height: 18),
+        _AuthField(
+          controller: otpCtrl,
+          label: '6-digit code',
+          keyboardType: TextInputType.number,
+          onSubmitted: (_) => onSubmit(),
+        ),
+        if (error != null) ...[
+          const SizedBox(height: 10),
+          Text(
+            error!,
+            style: TextStyle(color: Colors.redAccent.shade100, fontSize: 13),
+          ).animate().fadeIn(),
+        ],
+        const SizedBox(height: 16),
+        GestureDetector(
+          onTap: loading ? null : onSubmit,
+          child: Container(
+            padding: const EdgeInsets.symmetric(vertical: 17),
+            decoration: BoxDecoration(
+              color: context.ac.fg,
+              borderRadius: BorderRadius.circular(50),
+            ),
+            child: Center(
+              child: loading
+                  ? const SizedBox(
+                      width: 18, height: 18,
+                      child: CircularProgressIndicator(strokeWidth: 2, color: Colors.black),
+                    )
+                  : const Text(
+                      'Verify',
+                      style: TextStyle(color: Colors.black, fontWeight: FontWeight.w600, fontSize: 15),
+                    ),
+            ),
+          ),
+        ),
+      ],
+    );
+  }
 }
 
 // ── Google icon (coloured G) ──────────────────────────────────────────────────

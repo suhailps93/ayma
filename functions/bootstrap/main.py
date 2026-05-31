@@ -11,6 +11,7 @@ import asyncio
 import json
 import os
 from datetime import datetime, timezone
+from pathlib import Path
 
 import firebase_admin
 import google.generativeai as genai
@@ -85,6 +86,36 @@ Match the user's communication style naturally:
 - Mirror their punctuation and capitalization habits loosely
 - Never be more enthusiastic than they are"""
 
+PROFILE_COMPLETION_SKILL = """## Core Objective: Complete Match Profile Fast (Without Sounding Like A Form)
+
+Your primary objective is to collect complete matching data across all profile fields as quickly as possible through natural conversation.
+
+Rules:
+- Do not run a rigid questionnaire.
+- Extract facts from free-flow conversation whenever possible.
+- Ask only 1 focused follow-up at a time to fill high-priority gaps.
+- Prioritize unanswered required fields first, then preferences, then deeper context.
+- If the user gives partial info, confirm briefly and continue.
+- Keep momentum: every turn should either deepen rapport or close a missing profile field.
+- For sensitive topics, ask gently and make it clear they can keep it private or skip."""
+
+
+def _load_profile_schema() -> dict:
+    base = Path(__file__).resolve().parents[2]  # repo root
+    p = base / "docs" / "ayma_profile_questions.json"
+    try:
+        return json.loads(p.read_text())
+    except Exception:
+        return {"questions": [], "profile_storage_policy": {}}
+
+
+PROFILE_SCHEMA = _load_profile_schema()
+PROFILE_QUESTIONS = PROFILE_SCHEMA.get("questions", [])
+PROFILE_FIELD_META = {q.get("id"): q for q in PROFILE_QUESTIONS if q.get("id")}
+PUBLIC_PAYLOAD_ORDER = (
+    PROFILE_SCHEMA.get("profile_storage_policy", {}).get("public_profile_payload_order", [])
+)
+
 
 def _build_system_prompt(
     profile: dict, skills: list[dict], pending_questions: list[dict]
@@ -96,6 +127,7 @@ def _build_system_prompt(
         MATCHMAKER_SKILL.replace("{agent_name}", agent_name),
         DEEP_RECALL_SKILL,
         TONE_MIRROR_SKILL,
+        PROFILE_COMPLETION_SKILL,
     ]
 
     # Demographics
@@ -128,6 +160,21 @@ def _build_system_prompt(
     if profile.get("matching_prefs"):
         parts.append(
             f"## Matching Preferences\n{json.dumps(profile['matching_prefs'], indent=2)}"
+        )
+
+    if profile.get("wiki_profile_structured"):
+        parts.append(f"## Structured Match Profile\n{profile['wiki_profile_structured']}")
+
+    answered = profile.get("profile_answers", {}) or {}
+    missing_required = [
+        q["id"]
+        for q in PROFILE_QUESTIONS
+        if q.get("required") and q.get("id") and q["id"] not in answered
+    ]
+    if missing_required:
+        parts.append(
+            "## Highest Priority Missing Fields\n"
+            + "\n".join(f"- {fid}" for fid in missing_required[:20])
         )
 
     # Custom skills
@@ -353,6 +400,63 @@ Only include a key if the answer is present — do not include keys where the an
 Example: ["relationship_goal", "career", "location"]
 Return [] if nothing is clearly answered."""
 
+EXTRACT_PROFILE_FIELDS_PROMPT = """You extract structured profile answers from a conversation for a matchmaking app.
+
+Conversation:
+{conversation}
+
+Allowed fields (id, question):
+{field_catalog}
+
+Return STRICT JSON with this shape:
+{{
+  "answers": [
+    {{"id": "field_id", "value": <string|number|boolean|array|object>, "confidence": "high|medium"}}
+  ],
+  "sensitive_public_opt_in": ["field_id"],
+  "public_summary": "1-3 sentences for a public profile summary, only if conversation has enough non-sensitive detail; else empty string"
+}}
+
+Rules:
+- Only include answers explicitly stated in the conversation.
+- Do not invent values.
+- Use only allowed field ids.
+- If user explicitly says a sensitive item can be public, include its id in sensitive_public_opt_in.
+- If not explicitly public, sensitive stays private by default.
+- If nothing extractable, return empty arrays and empty summary."""
+
+
+def _safe_key(field_id: str) -> str:
+    return "".join(c if (c.isalnum() or c == "_") else "_" for c in field_id)
+
+
+def _render_structured_wiki(profile_answers: dict) -> str:
+    by_section: dict[str, list[tuple[str, object]]] = {}
+    for field_id, value in profile_answers.items():
+        meta = PROFILE_FIELD_META.get(field_id, {})
+        section = meta.get("section", "uncategorized")
+        by_section.setdefault(section, []).append((field_id, value))
+
+    # Keep schema order for sections/fields
+    section_order = PUBLIC_PAYLOAD_ORDER or list(by_section.keys())
+    q_order = [q.get("id") for q in PROFILE_QUESTIONS]
+
+    parts: list[str] = []
+    for section in section_order:
+        rows = by_section.get(section, [])
+        if not rows:
+            continue
+        parts.append(f"## {section}")
+        rows = sorted(rows, key=lambda kv: q_order.index(kv[0]) if kv[0] in q_order else 9999)
+        for fid, val in rows:
+            if isinstance(val, (dict, list)):
+                vtxt = json.dumps(val, ensure_ascii=False)
+            else:
+                vtxt = str(val)
+            parts.append(f"- {fid}: {vtxt}")
+        parts.append("")
+    return "\n".join(parts).strip()
+
 
 async def _upsert_wiki_field(
     model: genai.GenerativeModel,
@@ -414,6 +518,83 @@ async def post_turn(body: PostTurnRequest, uid: str = Depends(verify_token)):
         wiki_updates[f"wiki_{field}_session_id"] = body.session_id
     user_ref.update(wiki_updates)
 
+    # Schema-driven extraction into ordered/categorized answers
+    field_catalog = "\n".join(
+        f"- {q.get('id')}: {q.get('question_text')}" for q in PROFILE_QUESTIONS if q.get("id")
+    )
+    extract_prompt = EXTRACT_PROFILE_FIELDS_PROMPT.format(
+        conversation=conversation,
+        field_catalog=field_catalog,
+    )
+    extracted_answers: list[dict] = []
+    sensitive_public_opt_in: set[str] = set()
+    extracted_summary = ""
+    try:
+        ext = await model.generate_content_async(
+            extract_prompt,
+            generation_config={"response_mime_type": "application/json"},
+        )
+        payload = json.loads(ext.text)
+        if isinstance(payload.get("answers"), list):
+            extracted_answers = payload["answers"]
+        if isinstance(payload.get("sensitive_public_opt_in"), list):
+            sensitive_public_opt_in = {
+                str(x) for x in payload["sensitive_public_opt_in"] if isinstance(x, str)
+            }
+        if isinstance(payload.get("public_summary"), str):
+            extracted_summary = payload["public_summary"].strip()
+    except Exception:
+        pass
+
+    existing_answers = profile.get("profile_answers", {}) or {}
+    public_map = profile.get("profile_answers_public", {}) or {}
+    private_map = profile.get("profile_answers_private", {}) or {}
+    sensitive_map = profile.get("profile_answers_sensitive", {}) or {}
+    visibility_map = profile.get("profile_field_visibility", {}) or {}
+
+    updated_any_answer = False
+    now_iso = datetime.now(timezone.utc).isoformat()
+    for item in extracted_answers:
+        field_id = item.get("id")
+        if not field_id or field_id not in PROFILE_FIELD_META:
+            continue
+        if "value" not in item:
+            continue
+        value = item["value"]
+        meta = PROFILE_FIELD_META.get(field_id, {})
+        sensitive = bool(meta.get("sensitive_flag"))
+
+        existing_answers[field_id] = value
+        updated_any_answer = True
+        if sensitive:
+            sensitive_map[field_id] = value
+            public_allowed = field_id in sensitive_public_opt_in
+            visibility_map[field_id] = "public" if public_allowed else "private"
+            if public_allowed:
+                public_map[field_id] = value
+            else:
+                public_map.pop(field_id, None)
+                private_map[field_id] = value
+        else:
+            visibility_map[field_id] = "public"
+            public_map[field_id] = value
+            private_map.pop(field_id, None)
+
+    structured_wiki = _render_structured_wiki(existing_answers)
+    profile_update = {
+        "profile_answers": existing_answers,
+        "profile_answers_public": public_map,
+        "profile_answers_private": private_map,
+        "profile_answers_sensitive": sensitive_map,
+        "profile_field_visibility": visibility_map,
+        "wiki_profile_structured": structured_wiki,
+        "profile_answers_updated_at": now_iso,
+    }
+    if extracted_summary:
+        profile_update["profile_ai_observations"] = extracted_summary
+        profile_update["profile_public"] = extracted_summary
+    user_ref.update(profile_update)
+
     # Check which questions are now answered
     questions_snap = (
         user_ref.collection("questions")
@@ -443,6 +624,7 @@ async def post_turn(body: PostTurnRequest, uid: str = Depends(verify_token)):
             answered_keys: list[str] = json.loads(resp.text)
             if isinstance(answered_keys, list):
                 now = datetime.now(timezone.utc)
+                answered_keys = set(answered_keys) | set(existing_answers.keys())
                 for doc_id, q in pending.items():
                     if q.get("key") in answered_keys:
                         user_ref.collection("questions").document(doc_id).update({

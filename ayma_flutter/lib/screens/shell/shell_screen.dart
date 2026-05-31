@@ -3,37 +3,173 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
 import '../../providers/providers.dart';
+import '../../services/audio_service.dart';
 import '../../theme.dart';
 
-class ShellScreen extends ConsumerWidget {
+class ShellScreen extends ConsumerStatefulWidget {
   final Widget child;
   const ShellScreen({super.key, required this.child});
 
-  static const _tabs = [
-    (path: '/chat', kind: 'talk', label: 'Talk'),
-    (path: '/matches', kind: 'matches', label: 'Matches'),
-    (path: '/explore', kind: 'explore', label: 'Explore'),
-    (path: '/notifications', kind: 'notifications', label: 'Signals'),
-    (path: '/profile', kind: 'profile', label: 'You'),
-  ];
+  @override
+  ConsumerState<ShellScreen> createState() => _ShellScreenState();
+}
+
+class _ShellScreenState extends ConsumerState<ShellScreen>
+    with SingleTickerProviderStateMixin {
+  static const double _orbSize = 52.0;
+  static const double _orbPad = 14.0;
+
+  Offset _orbPos = const Offset(-1, -1);
+  bool _orbPosInit = false;
+  bool _orbSnapping = false;
+  bool _orbDragging = false;
+  double _orbDragTotal = 0;
+
+  late final AnimationController _pulseCtrl;
+  late final Animation<double> _pulse;
 
   @override
-  Widget build(BuildContext context, WidgetRef ref) {
+  void initState() {
+    super.initState();
+    _pulseCtrl = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 2400),
+    )..repeat(reverse: true);
+    _pulse = CurvedAnimation(parent: _pulseCtrl, curve: Curves.easeInOut);
+  }
+
+  @override
+  void dispose() {
+    _pulseCtrl.dispose();
+    super.dispose();
+  }
+
+  void _initOrbPos(Size screen, double topPad) {
+    if (_orbPosInit) return;
+    _orbPosInit = true;
+    _orbPos = Offset(screen.width - _orbSize - _orbPad, topPad + 8);
+  }
+
+  void _snapOrbToEdge(Size screen, double topPad, double bottomPad) {
+    final cx = _orbPos.dx + _orbSize / 2;
+    final tx = cx < screen.width / 2 ? _orbPad : screen.width - _orbSize - _orbPad;
+    final ty = _orbPos.dy.clamp(topPad + 4, screen.height - _orbSize - bottomPad - 20);
+    setState(() {
+      _orbSnapping = true;
+      _orbPos = Offset(tx, ty.toDouble());
+    });
+    Future<void>.delayed(const Duration(milliseconds: 350), () {
+      if (mounted) setState(() => _orbSnapping = false);
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) {
     final location = GoRouterState.of(context).matchedLocation;
     final unread = ref.watch(
         notificationsProvider.select((ns) => ns.where((n) => !n.read).length));
-    final bottomInset = MediaQuery.paddingOf(context).bottom;
+    final connected = ref.watch(
+        audioServiceProvider.select((a) => a.state != SessionState.disconnected));
+
+    final mq = MediaQuery.of(context);
+    final bottomInset = mq.padding.bottom;
+    final topPad = mq.padding.top;
+    final bottomNavH = 56.0 + bottomInset;
+
+    _initOrbPos(mq.size, topPad);
 
     int selectedIndex = _tabs.indexWhere((t) => location.startsWith(t.path));
     if (selectedIndex == -1) selectedIndex = 0;
 
     return Scaffold(
       backgroundColor: context.ac.bg,
-      body: Padding(
-        padding: EdgeInsets.only(bottom: 56 + bottomInset),
-        child: child,
-      ),
       extendBody: true,
+      body: Stack(
+        children: [
+          Padding(
+            padding: EdgeInsets.only(bottom: bottomNavH),
+            child: widget.child,
+          ),
+          // Floating session orb — visible on all pages while session is active
+          AnimatedOpacity(
+            opacity: connected ? 1.0 : 0.0,
+            duration: const Duration(milliseconds: 350),
+            curve: Curves.easeInOut,
+            child: IgnorePointer(
+              ignoring: !connected,
+              child: AnimatedPositioned(
+                duration: _orbSnapping && !_orbDragging
+                    ? const Duration(milliseconds: 320)
+                    : Duration.zero,
+                curve: Curves.easeOutCubic,
+                left: _orbPos.dx,
+                top: _orbPos.dy,
+                width: _orbSize,
+                height: _orbSize,
+                child: GestureDetector(
+                  onPanStart: (_) {
+                    _orbDragging = false;
+                    _orbDragTotal = 0;
+                  },
+                  onPanUpdate: (d) {
+                    _orbDragTotal += d.delta.distance;
+                    if (_orbDragTotal > 6) _orbDragging = true;
+                    final nx = (_orbPos.dx + d.delta.dx)
+                        .clamp(_orbPad, mq.size.width - _orbSize - _orbPad);
+                    final ny = (_orbPos.dy + d.delta.dy).clamp(
+                      topPad + 4,
+                      mq.size.height - _orbSize - bottomNavH - 12,
+                    );
+                    setState(() => _orbPos = Offset(nx, ny));
+                  },
+                  onPanEnd: (_) {
+                    if (!_orbDragging) {
+                      ref.read(audioServiceProvider).disconnect();
+                    } else {
+                      _snapOrbToEdge(mq.size, topPad, bottomNavH);
+                    }
+                    _orbDragging = false;
+                  },
+                  child: AnimatedBuilder(
+                    animation: _pulse,
+                    builder: (_, __) {
+                      final glow = 0.22 + _pulse.value * 0.28;
+                      return Container(
+                        decoration: BoxDecoration(
+                          shape: BoxShape.circle,
+                          gradient: const RadialGradient(
+                            center: Alignment(-0.30, -0.38),
+                            radius: 0.82,
+                            colors: [
+                              Color(0xFFFFF6EF), // specular highlight
+                              Color(0xFFEA9858), // warm mid
+                              Color(0xFFB86228), // deep orange
+                              Color(0xFF5A2408), // shadow
+                            ],
+                            stops: [0.0, 0.32, 0.68, 1.0],
+                          ),
+                          boxShadow: [
+                            BoxShadow(
+                              color: Color(0xFFCF7628).withValues(alpha: glow),
+                              blurRadius: 20,
+                              spreadRadius: 4,
+                            ),
+                            BoxShadow(
+                              color: Colors.black.withValues(alpha: 0.35),
+                              blurRadius: 8,
+                              offset: const Offset(0, 4),
+                            ),
+                          ],
+                        ),
+                      );
+                    },
+                  ),
+                ),
+              ),
+            ),
+          ),
+        ],
+      ),
       bottomNavigationBar: _AymaTabBar(
         tabs: _tabs,
         selectedIndex: selectedIndex,
@@ -42,6 +178,14 @@ class ShellScreen extends ConsumerWidget {
       ),
     );
   }
+
+  static const _tabs = [
+    (path: '/chat', kind: 'talk', label: 'Talk'),
+    (path: '/matches', kind: 'matches', label: 'Matches'),
+    (path: '/explore', kind: 'explore', label: 'Explore'),
+    (path: '/notifications', kind: 'notifications', label: 'Signals'),
+    (path: '/profile', kind: 'profile', label: 'You'),
+  ];
 }
 
 class _AymaTabBar extends StatelessWidget {

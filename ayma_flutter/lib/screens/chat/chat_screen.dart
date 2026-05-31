@@ -74,9 +74,6 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
     super.initState();
     _audioService = ref.read(audioServiceProvider);
     _textCtrl.addListener(() => setState(() {}));
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      unawaited(_ensureAlwaysOnline());
-    });
   }
 
   void _startTimer() {
@@ -99,32 +96,32 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
     return false;
   }
 
-  Future<void> _ensureAlwaysOnline() async {
-    if (_voiceActionInFlight) return;
-    _voiceActionInFlight = true;
-    final started = await _autoConnect();
-    if (!started && mounted) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text('Could not start voice session. Please try again.'),
-        ),
-      );
+  Future<void> _onMicTap() async {
+    if (_audioService.state == SessionState.disconnected) {
+      if (_voiceActionInFlight) return;
+      _voiceActionInFlight = true;
+      final started = await _autoConnect();
+      if (started) _audioService.setMuted(false);
       _voiceActionInFlight = false;
-      return;
+    } else {
+      _audioService.setMuted(!_audioService.muted);
     }
-    // Keep session connected but block mic audio until user presses mic.
-    if (!_audioService.muted) _audioService.toggleMute();
-    _voiceActionInFlight = false;
   }
 
-  Future<void> _onMicPress() async {
-    final started = await _autoConnect();
-    if (!started) return;
-    if (_audioService.muted) _audioService.toggleMute();
-  }
-
-  void _onMicRelease() {
-    if (!_audioService.muted) _audioService.toggleMute();
+  Future<void> _onSphereTap() async {
+    if (_audioService.state == SessionState.disconnected) {
+      if (_voiceActionInFlight) return;
+      _voiceActionInFlight = true;
+      await _autoConnect();
+      if (_audioService.state != SessionState.disconnected) {
+        _audioService.setMuted(true);
+      }
+      _voiceActionInFlight = false;
+    } else {
+      _audioService.disconnect();
+      _sessionTimer?.cancel();
+      setState(() => _sessionDuration = Duration.zero);
+    }
   }
 
   Future<void> _sendText() async {
@@ -379,8 +376,8 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
               userTalking: userTalking,
               hasAttachment: _drafts.isNotEmpty,
               drafts: _drafts,
-              onMicPress: _onMicPress,
-              onMicRelease: _onMicRelease,
+              onMicTap: _onMicTap,
+              onSphereTap: _onSphereTap,
               onSend: _sendText,
               onAttach: _showMediaSheet,
               onRemoveDraft: _removeDraft,
@@ -642,8 +639,8 @@ class _InputBar extends StatefulWidget {
   final bool hasAttachment;
   final List<_DraftAttachment> drafts;
   final bool userTalking;
-  final Future<void> Function() onMicPress;
-  final VoidCallback onMicRelease;
+  final Future<void> Function() onMicTap;
+  final Future<void> Function() onSphereTap;
   final Future<void> Function() onSend;
   final VoidCallback onAttach;
   final ValueChanged<String> onRemoveDraft;
@@ -659,8 +656,8 @@ class _InputBar extends StatefulWidget {
     required this.userTalking,
     required this.hasAttachment,
     required this.drafts,
-    required this.onMicPress,
-    required this.onMicRelease,
+    required this.onMicTap,
+    required this.onSphereTap,
     required this.onSend,
     required this.onAttach,
     required this.onRemoveDraft,
@@ -701,17 +698,28 @@ class _InputBarState extends State<_InputBar>
 
   bool get _aymaActive =>
       widget.state == SessionState.speaking || widget.userTalking;
-  bool get _voiceActive =>
-      widget.state == SessionState.connecting ||
-      widget.state == SessionState.listening ||
-      widget.state == SessionState.speaking ||
-      widget.state == SessionState.thinking ||
-      widget.state == SessionState.ready;
+  bool get _voiceActive => widget.state != SessionState.disconnected;
   bool get _hasText => widget.textCtrl.text.trim().isNotEmpty;
   bool get _canSend =>
       _hasText ||
       (widget.hasAttachment && widget.drafts.every((d) => d.remoteUrl != null));
-  bool get _micLive => _voiceActive && !widget.muted;
+  bool get _micOn => _voiceActive && !widget.muted;
+
+  String get _hintText {
+    switch (widget.state) {
+      case SessionState.connecting:
+        return 'Connecting...';
+      case SessionState.speaking:
+        return 'Ayma is speaking...';
+      case SessionState.thinking:
+        return 'Thinking...';
+      case SessionState.listening:
+      case SessionState.ready:
+        return widget.muted ? 'Mic off' : 'Listening...';
+      case SessionState.disconnected:
+        return 'Speak or type to Ayma';
+    }
+  }
 
   double get _volume => widget.state == SessionState.speaking
       ? widget.outputVolume
@@ -784,65 +792,58 @@ class _InputBarState extends State<_InputBar>
                                     _PillAttachButton(onTap: widget.onAttach),
                                     const SizedBox(width: 12),
                                     Expanded(
-                                      child: _aymaActive && !_hasText
-                                          ? _WaveHintText(state: widget.state)
-                                          : TextField(
-                                              controller: widget.textCtrl,
-                                              focusNode: widget.focusNode,
-                                              style: AymaFonts.elegantSans(
-                                                size: 14.5,
-                                                color: context.ac.fg,
-                                              ).copyWith(height: 1.1),
-                                              cursorColor: context.ac.accent,
-                                              keyboardType:
-                                                  TextInputType.multiline,
-                                              textInputAction: _canSend
-                                                  ? TextInputAction.send
-                                                  : TextInputAction.newline,
-                                              minLines: 1,
-                                              maxLines: 4,
-                                              onSubmitted: (_) {
-                                                if (_canSend) widget.onSend();
-                                              },
-                                              decoration: InputDecoration(
-                                                isCollapsed: true,
-                                                border: InputBorder.none,
-                                                enabledBorder: InputBorder.none,
-                                                focusedBorder: InputBorder.none,
-                                                filled:
-                                                    true, // must be true to apply fillColor
-                                                fillColor: Colors.transparent,
-                                                contentPadding: EdgeInsets.zero,
-                                                hintText: _voiceActive
-                                                    ? 'Listening...'
-                                                    : 'Speak or type to Ayma',
-                                                hintStyle: AymaFonts.elegantSans(
-                                                  size: 14.5,
-                                                  color: context.ac.fgMute,
-                                                ).copyWith(
-                                                  fontStyle: _voiceActive
-                                                      ? FontStyle.italic
-                                                      : FontStyle.normal,
-                                                ),
-                                              ),
-                                            ),
+                                      child: TextField(
+                                        controller: widget.textCtrl,
+                                        focusNode: widget.focusNode,
+                                        style: AymaFonts.elegantSans(
+                                          size: 14.5,
+                                          color: context.ac.fg,
+                                        ).copyWith(height: 1.1),
+                                        cursorColor: context.ac.accent,
+                                        keyboardType: TextInputType.multiline,
+                                        textInputAction: _canSend
+                                            ? TextInputAction.send
+                                            : TextInputAction.newline,
+                                        minLines: 1,
+                                        maxLines: 4,
+                                        onSubmitted: (_) {
+                                          if (_canSend) widget.onSend();
+                                        },
+                                        decoration: InputDecoration(
+                                          isCollapsed: true,
+                                          border: InputBorder.none,
+                                          enabledBorder: InputBorder.none,
+                                          focusedBorder: InputBorder.none,
+                                          filled: true,
+                                          fillColor: Colors.transparent,
+                                          contentPadding: EdgeInsets.zero,
+                                          hintText: _hintText,
+                                          hintStyle: AymaFonts.elegantSans(
+                                            size: 14.5,
+                                            color: context.ac.fgMute,
+                                          ).copyWith(
+                                            fontStyle: widget.state != SessionState.disconnected
+                                                ? FontStyle.italic
+                                                : FontStyle.normal,
+                                          ),
+                                        ),
+                                      ),
                                     ),
-                                    const SizedBox(width: 12),
-                                    _PressToTalkOrb(
-                                      live: _micLive,
-                                      onPress: widget.onMicPress,
-                                      onRelease: widget.onMicRelease,
+                                    const SizedBox(width: 10),
+                                    _MicOrSendButton(
+                                      canSend: _canSend,
+                                      micOn: _micOn,
+                                      onMicTap: widget.onMicTap,
+                                      onSend: widget.onSend,
                                     ),
-                                    const SizedBox(width: 12),
-                                    _DockActionCircle(
-                                      icon: _canSend
-                                          ? Icons.arrow_upward_rounded
-                                          : Icons.more_horiz_rounded,
-                                      onTap: _canSend ? () => widget.onSend() : null,
-                                      active: _canSend,
-                                      live: false,
-                                      send: _canSend,
-                                    ),
+                                    if (!_voiceActive) ...[
+                                      const SizedBox(width: 10),
+                                      _ConnectionSphere(
+                                        connected: false,
+                                        state: widget.state,
+                                        onTap: widget.onSphereTap,
+                                      ),
+                                    ],
                                   ],
                                 ),
                               ),
@@ -954,112 +955,143 @@ class _DraftDockStrip extends StatelessWidget {
       );
 }
 
-class _PressToTalkOrb extends StatelessWidget {
-  final bool live;
-  final Future<void> Function() onPress;
-  final VoidCallback onRelease;
+class _MicOrSendButton extends StatelessWidget {
+  final bool canSend;
+  final bool micOn;
+  final Future<void> Function() onMicTap;
+  final Future<void> Function() onSend;
 
-  const _PressToTalkOrb({
-    required this.live,
-    required this.onPress,
-    required this.onRelease,
+  const _MicOrSendButton({
+    required this.canSend,
+    required this.micOn,
+    required this.onMicTap,
+    required this.onSend,
   });
 
   @override
   Widget build(BuildContext context) {
+    final isSend = canSend;
     return GestureDetector(
-      onTapDown: (_) => onPress(),
-      onTapUp: (_) => onRelease(),
-      onTapCancel: onRelease,
+      onTap: isSend ? () => onSend() : () => onMicTap(),
       child: AnimatedContainer(
-        duration: const Duration(milliseconds: 160),
+        duration: const Duration(milliseconds: 180),
         width: 40,
         height: 40,
         decoration: BoxDecoration(
           shape: BoxShape.circle,
-          gradient: RadialGradient(
-            colors: live
-                ? const [Color(0xFFF4D9C6), Color(0xFFD6936D), Color(0xFF2A1713)]
-                : const [Color(0xFFECCBB2), Color(0xFFB67858), Color(0xFF1B120F)],
-            stops: const [0.08, 0.52, 1.0],
-          ),
-          boxShadow: [
-            BoxShadow(
-              color: (live ? const Color(0xFFDC8F67) : const Color(0xFF7E4A34))
-                  .withValues(alpha: live ? 0.44 : 0.24),
-              blurRadius: live ? 16 : 8,
-              spreadRadius: live ? 1.2 : 0.1,
-            ),
-          ],
+          color: isSend
+              ? context.ac.accent.withValues(alpha: 0.15)
+              : Colors.transparent,
           border: Border.all(
-            color: context.ac.lineSoft.withValues(alpha: 0.7),
-            width: 0.7,
+            color: isSend
+                ? context.ac.accent
+                : micOn
+                    ? context.ac.accent.withValues(alpha: 0.7)
+                    : context.ac.fgMute.withValues(alpha: 0.35),
+            width: 0.85,
           ),
         ),
         child: Icon(
-          Icons.mic_rounded,
+          isSend ? Icons.arrow_upward_rounded : Icons.mic_rounded,
           size: 17,
-          color: live ? const Color(0xFF2A1713) : const Color(0xFFF4EDE7),
+          color: isSend
+              ? context.ac.accent
+              : micOn
+                  ? context.ac.accent
+                  : context.ac.fgMute.withValues(alpha: 0.5),
         ),
       ),
     );
   }
 }
 
-class _DockActionCircle extends StatelessWidget {
-  final IconData icon;
-  final VoidCallback? onTap;
-  final bool active;
-  final bool live;
-  final bool send;
+class _ConnectionSphere extends StatefulWidget {
+  final bool connected;
+  final SessionState state;
+  final Future<void> Function() onTap;
 
-  const _DockActionCircle({
-    required this.icon,
+  const _ConnectionSphere({
+    required this.connected,
+    required this.state,
     required this.onTap,
-    required this.active,
-    this.live = false,
-    this.send = false,
   });
 
   @override
+  State<_ConnectionSphere> createState() => _ConnectionSphereState();
+}
+
+class _ConnectionSphereState extends State<_ConnectionSphere>
+    with SingleTickerProviderStateMixin {
+  late final AnimationController _pulseCtrl;
+  late final Animation<double> _pulse;
+
+  @override
+  void initState() {
+    super.initState();
+    _pulseCtrl = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 2200),
+    )..repeat(reverse: true);
+    _pulse = CurvedAnimation(parent: _pulseCtrl, curve: Curves.easeInOut);
+  }
+
+  @override
+  void dispose() {
+    _pulseCtrl.dispose();
+    super.dispose();
+  }
+
+  @override
   Widget build(BuildContext context) {
-    final ringColor = send
-        ? context.ac.accent
-        : live
-            ? context.ac.accent
-            : active
-                ? context.ac.accent.withValues(alpha: 0.65)
-                : context.ac.lineSoft.withValues(alpha: 0.85);
-
-    final iconColor = live
-        ? const Color(0xFF1A1208)
-        : active
-            ? context.ac.accent
-            : context.ac.fgDim;
-
-    final outerSize = live ? 42.0 : 36.0;
-    final iconSize = live ? 18.0 : 15.0;
-
-    return GestureDetector(
-      onTap: onTap,
-      child: AnimatedContainer(
-        duration: const Duration(milliseconds: 200),
-        width: outerSize,
-        height: outerSize,
-        decoration: BoxDecoration(
-          shape: BoxShape.circle,
-          color: live
-              ? context.ac.accent
-              : active
-                  ? context.ac.accent.withValues(alpha: 0.15)
-                  : context.ac.bg,
-          border: Border.all(
-            color: ringColor,
-            width: live ? 1.2 : 0.85,
+    return AnimatedBuilder(
+      animation: _pulse,
+      builder: (_, __) {
+        final glow = widget.connected ? (0.4 + _pulse.value * 0.35) : 0.0;
+        return GestureDetector(
+          onTap: () => widget.onTap(),
+          child: AnimatedContainer(
+            duration: const Duration(milliseconds: 300),
+            width: 44,
+            height: 44,
+            decoration: BoxDecoration(
+              shape: BoxShape.circle,
+              gradient: RadialGradient(
+                center: const Alignment(-0.3, -0.4),
+                radius: 0.85,
+                colors: widget.connected
+                    ? const [
+                        Color(0xFFFFF4EC),
+                        Color(0xFFE89450),
+                        Color(0xFFB05A20),
+                        Color(0xFF5C2308),
+                      ]
+                    : const [
+                        Color(0xFF888888),
+                        Color(0xFF444444),
+                        Color(0xFF252525),
+                        Color(0xFF111111),
+                      ],
+                stops: const [0.0, 0.35, 0.70, 1.0],
+              ),
+              boxShadow: widget.connected
+                  ? [
+                      BoxShadow(
+                        color: const Color(0xFFD07830).withValues(alpha: glow),
+                        blurRadius: 14,
+                        spreadRadius: 1,
+                      ),
+                    ]
+                  : [
+                      BoxShadow(
+                        color: Colors.black.withValues(alpha: 0.4),
+                        blurRadius: 6,
+                        offset: const Offset(0, 3),
+                      ),
+                    ],
+            ),
           ),
-        ),
-        child: Icon(icon, size: iconSize, color: iconColor),
-      ),
+        );
+      },
     );
   }
 }
@@ -1295,23 +1327,6 @@ class _ComposerOutlinePainter extends CustomPainter {
       old.isAiTalking != isAiTalking ||
       old.isUserTalking != isUserTalking ||
       old.glowStrength != glowStrength;
-}
-
-// Subtle hint text shown in the field when Ayma is speaking & no user text
-class _WaveHintText extends StatelessWidget {
-  final SessionState state;
-  const _WaveHintText({required this.state});
-
-  @override
-  Widget build(BuildContext context) => Text(
-        state == SessionState.thinking ? 'Thinking...' : 'Ayma is speaking...',
-        style: TextStyle(
-            color: context.ac.fgMute,
-            fontSize: 14,
-            fontStyle: FontStyle.italic),
-        maxLines: 1,
-        overflow: TextOverflow.ellipsis,
-      );
 }
 
 // ── Media sheet ───────────────────────────────────────────────────────────────
