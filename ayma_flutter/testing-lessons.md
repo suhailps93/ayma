@@ -50,3 +50,21 @@ Each entry:
 - Root cause (if fail): prior service had accumulated reconnect/filter/history variants that made behavior harder to reason about for live duplex
 - Fix: rewrote `audio_service.dart` to minimal architecture preserving UI API while keeping only core live websocket, shared history across live/text, and tool-call response path
 - Lesson: lock service surface first (UI contract), then keep live socket logic minimal and explicit
+### 2026-05-31 OpenAI Realtime 2 provider switch
+- Tested: `flutter analyze`; direct OpenAI Realtime WebSocket session handshake; launched Chrome web run with `AYMA_LIVE_PROVIDER=openai`; captured auth-screen screenshot and accessibility tree through CDP after Flutter MCP transport closed
+- Outcome: pass for static analysis, OpenAI `session.created`/`session.updated`, and startup render; Flutter MCP hot_reload/take_screenshot/get_accessibility_tree unavailable due transport closed; `flutter run` hot restart later stuck and was stopped
+- Root cause (if fail): Flutter MCP server transport unavailable; web hot restart reported disposed service connection after manual stop
+- Fix: Codex implemented OpenAI Realtime client, provider switch, OpenAI text fallback, 16 kHz to 24 kHz mic PCM resampling, and Realtime event compatibility aliases
+- Lesson: when migrating live audio providers, verify sample-rate expectations and keep CDP fallback available if Flutter MCP transport is down
+### 2026-05-31 Pixel phone OpenAI Realtime install
+- Tested: wireless ADB install/run on Pixel 10 Pro Fold; real device screenshot; `uiautomator` accessibility tree; mic tap; hot reload/restart; OpenAI credential validation with `/v1/models/gpt-realtime-2`
+- Outcome: app installed and authenticated chat rendered; mic path reached OpenAI but returned `invalid_api_key`; UI now returns to offline instead of staying stuck on `Connecting...`
+- Root cause (if fail): supplied OpenAI key was rejected by OpenAI with HTTP 401 / `invalid_api_key`; native client also initially used an `https` URI for WebSocket before patch
+- Fix: Codex changed Realtime URI to `wss`, added native Realtime headers/subprotocol, made OpenAI bootstrap optional when a local OpenAI key is supplied, and disconnects cleanly on Realtime error events
+- Lesson: verify supplied OpenAI keys against a simple REST endpoint before live audio testing; Realtime auth errors must stop the mic recorder and reset UI state
+### 2026-05-31 Pixel phone gpt-realtime-2 live voice
+- Tested: validated OpenAI key against `/v1/models/gpt-realtime-2`; rebuilt Pixel 10 Pro Fold app with corrected dart-define JSON; mic-driven live voice session; screenshot; `flutter analyze`
+- Outcome: pass; live session connected to `gpt-realtime-2`, user speech transcribed, Ayma spoke back through realtime audio, and hot reload worked
+- Root cause (if fail): temp dart-define JSON had literal quote characters around the key, and OpenAI path was incorrectly using bootstrap `model` value `gemini-3.1-flash-live-preview`
+- Fix: regenerated temp define JSON without extra quotes, stripped accidental quote wrappers in `Env.openAiApiKey`, ignored Gemini bootstrap model for OpenAI, and suppressed duplicate final transcript events
+- Lesson: for provider-switch code, never reuse a provider-specific bootstrap model field across providers; verify compiled dart-defines for hidden quote characters before debugging auth

@@ -9,11 +9,13 @@ import 'package:permission_handler/permission_handler.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:speech_to_text/speech_to_text.dart' as stt;
 
+import '../env.dart';
 import 'audio_recorder_service.dart';
 import 'audio_streamer_service.dart';
 import 'backend_service.dart';
 import 'firestore_service.dart';
 import 'gemini_live_client.dart';
+import 'openai_realtime_client.dart';
 
 // ignore_for_file: deprecated_member_use
 
@@ -57,12 +59,13 @@ class TranscriptLine {
   }
 }
 
-// Orchestrates GeminiLiveClient + AudioRecorderService + AudioStreamerService,
-// mirroring how useLiveAPI hook + ControlTray wire together in the React reference.
+// Orchestrates the selected live client + recorder + streamer while preserving
+// the UI contract used by ChatScreen.
 class AymaAudioService extends ChangeNotifier {
   static const _transcriptStorageKey = 'ayma.chat.transcript';
 
-  final _client = GeminiLiveClient();
+  late final dynamic _client =
+      Env.liveProvider == 'gemini' ? GeminiLiveClient() : OpenAiRealtimeClient();
   final _recorder = AudioRecorderService();
   final _streamer = AudioStreamerService();
 
@@ -101,7 +104,7 @@ class AymaAudioService extends ChangeNotifier {
   int _audioBytesPerTurn = 0;
   static const int _maxTranscriptLines = 180;
 
-  String? _geminiApiKey;
+  String? _providerApiKey;
   String? _systemPrompt;
   String _sessionId = DateTime.now().millisecondsSinceEpoch.toString();
 
@@ -147,7 +150,7 @@ class AymaAudioService extends ChangeNotifier {
     });
   }
 
-  // ── Wire GeminiLiveClient events → session state (mirrors use-live-api.ts) ──
+  // ── Wire live-client events → session state ────────────────────────────────
 
   void _wireClientStreams() {
     // setupComplete → start mic (mirrors ControlTray useEffect on `connected`)
@@ -158,7 +161,8 @@ class AymaAudioService extends ChangeNotifier {
     }));
 
     // audio → streamer (mirrors onAudio → audioStreamer.addPCM16 in useLiveAPI)
-    _subs.add(_client.audioStream.listen((chunk) {
+    _subs.add(_client.audioStream.listen((event) {
+      final chunk = event as LiveAudioChunk;
       if (_speakerMuted) return;
       _setState(SessionState.speaking);
       _outputVolume = _pcmRms(chunk.data);
@@ -176,7 +180,7 @@ class AymaAudioService extends ChangeNotifier {
       _outputVolume = 0;
       final userText = _pendingTurnUser.trim();
       if (userText.isNotEmpty) {
-        _addTranscript(userText, isUser: true, allowRecentDuplicate: true);
+        _addTranscript(userText, isUser: true);
       }
       final partialModel = _pendingTurnModel.trim();
       if (partialModel.isNotEmpty) {
@@ -194,7 +198,7 @@ class AymaAudioService extends ChangeNotifier {
     _subs.add(_client.inputTranscriptStream.listen((text) {
       _pendingTurnUser = _mergeTurnText(_pendingTurnUser, text);
       _checkGoodbyeWakeWord(_pendingTurnUser);
-      // Transcript arrival = Gemini confirmed speech → activate user wave
+      // Transcript arrival = provider-confirmed speech → activate user wave.
       if (!_userTalking) {
         _userTalking = true;
         _notifyMetersThrottled();
@@ -210,11 +214,11 @@ class AymaAudioService extends ChangeNotifier {
     _subs.add(_client.turnCompleteStream.listen((_) {
       final userText = _pendingTurnUser.trim();
       if (userText.isNotEmpty) {
-        _addTranscript(userText, isUser: true, allowRecentDuplicate: true);
+        _addTranscript(userText, isUser: true);
       }
       final modelText = _pendingTurnModel.trim();
       if (modelText.isNotEmpty) {
-        _addTranscript(modelText, isUser: false, allowRecentDuplicate: true);
+        _addTranscript(modelText, isUser: false);
       }
       unawaited(_commitTurnToBackend());
       _schedulePlaybackEnd();
@@ -226,6 +230,9 @@ class AymaAudioService extends ChangeNotifier {
 
     _subs.add(_client.disconnectedStream.listen((_) {
       _clearPendingMicAudio();
+      _talkHoldoffTimer?.cancel();
+      _talkHoldoffTimer = null;
+      _userTalking = false;
       _pendingTurnUser = '';
       _pendingTurnModel = '';
       _setState(SessionState.disconnected);
@@ -373,28 +380,49 @@ class AymaAudioService extends ChangeNotifier {
       }
     }
 
-    final bootstrap = await BackendService.bootstrap();
+    final bootstrap = await _bootstrapForProvider();
     final liveWsUrl = bootstrap['websocket_url'] as String?;
-    final apiKey = bootstrap['token'] as String?;
+    final apiKey = _credentialFromBootstrap(bootstrap);
     final setup = bootstrap['setup'] as Map<String, dynamic>?;
 
-    _geminiApiKey = apiKey;
-    _systemPrompt = (setup?['system_instruction']?['parts'] as List<dynamic>?)
-        ?.map((p) => p['text'] as String? ?? '')
-        .join('');
+    _providerApiKey = apiKey;
+    _systemPrompt = _extractSystemPrompt(setup);
 
-    if (liveWsUrl == null || liveWsUrl.isEmpty || apiKey == null) {
+    try {
+      if (Env.liveProvider == 'gemini') {
+        if (liveWsUrl == null || liveWsUrl.isEmpty || apiKey == null) {
+          throw Exception('Missing Gemini Live bootstrap data');
+        }
+
+        final payload = setup ??
+            {
+              'model': 'models/${bootstrap['model'] ?? 'gemini-3.1-flash-live-preview'}',
+              'response_modalities': ['AUDIO'],
+            };
+
+        await _client.connect(liveWsUrl, apiKey, payload);
+        return;
+      }
+
+      if (apiKey == null || apiKey.isEmpty) {
+        throw Exception(
+          'Missing OpenAI credential. Provide AYMA_OPENAI_API_KEY or return openai_api_key/client_secret from bootstrap.',
+        );
+      }
+
+      final model =
+          (bootstrap['openai_realtime_model'] as String?) ?? Env.openAiRealtimeModel;
+      await _client.connect(
+        apiKey: apiKey,
+        model: model.isEmpty ? 'gpt-realtime-2' : model,
+        session: _openAiSessionFromBootstrap(setup),
+      );
+    } catch (e) {
+      debugPrint('Live connection failed: $e');
+      _disconnectTransport();
       _setState(SessionState.disconnected);
-      throw Exception('Missing Gemini Live bootstrap data');
+      rethrow;
     }
-
-    final payload = setup ??
-        {
-          'model': 'models/${bootstrap['model'] ?? 'gemini-3.1-flash-live-preview'}',
-          'response_modalities': ['AUDIO'],
-        };
-
-    await _client.connect(liveWsUrl, apiKey, payload);
   }
 
   void disconnect({bool notify = true}) {
@@ -598,7 +626,7 @@ class AymaAudioService extends ChangeNotifier {
 
     try {
       await _bootstrapTextChatIfNeeded();
-      final reply = await _geminiTextChat(historyText, attachments: attachments);
+      final reply = await _providerTextChat(historyText, attachments: attachments);
       if (reply.isEmpty) {
         _addAssistantFallbackMessage();
         return false;
@@ -637,24 +665,42 @@ class AymaAudioService extends ChangeNotifier {
   }
 
   Future<void> _bootstrapTextChatIfNeeded() async {
-    if ((_geminiApiKey ?? '').isNotEmpty) return;
-    final bootstrap = await BackendService.bootstrap();
-    _geminiApiKey = bootstrap['token'] as String?;
+    if ((_providerApiKey ?? '').isNotEmpty) return;
+    final bootstrap = await _bootstrapForProvider();
+    _providerApiKey = _credentialFromBootstrap(bootstrap);
     final setup = bootstrap['setup'] as Map<String, dynamic>?;
-    _systemPrompt = (setup?['system_instruction']?['parts'] as List<dynamic>?)
-        ?.map((p) => p['text'] as String? ?? '')
-        .join('');
-    if ((_geminiApiKey ?? '').isEmpty) {
-      throw Exception('Missing Gemini API key from bootstrap');
+    _systemPrompt = _extractSystemPrompt(setup);
+    if ((_providerApiKey ?? '').isEmpty) {
+      throw Exception('Missing ${Env.liveProvider} API key from bootstrap/env');
     }
+  }
+
+  Future<Map<String, dynamic>> _bootstrapForProvider() async {
+    if (Env.liveProvider != 'gemini' && Env.openAiApiKey.isNotEmpty) {
+      try {
+        return await BackendService.bootstrap().timeout(const Duration(seconds: 4));
+      } catch (_) {
+        return <String, dynamic>{};
+      }
+    }
+    return BackendService.bootstrap();
+  }
+
+  Future<String> _providerTextChat(
+    String message, {
+    List<Map<String, String>> attachments = const [],
+  }) async {
+    await _bootstrapTextChatIfNeeded();
+    return Env.liveProvider == 'gemini'
+        ? _geminiTextChat(message, attachments: attachments)
+        : _openAiTextChat(message, attachments: attachments);
   }
 
   Future<String> _geminiTextChat(
     String message, {
     List<Map<String, String>> attachments = const [],
   }) async {
-    await _bootstrapTextChatIfNeeded();
-    final key = _geminiApiKey;
+    final key = _providerApiKey;
     if (key == null || key.isEmpty) return '';
 
     final userParts = await _buildUserParts(message: message, attachments: attachments);
@@ -695,6 +741,53 @@ class AymaAudioService extends ChangeNotifier {
     return parts.map((p) => (p['text'] as String? ?? '')).join(' ').trim();
   }
 
+  Future<String> _openAiTextChat(
+    String message, {
+    List<Map<String, String>> attachments = const [],
+  }) async {
+    final key = _providerApiKey;
+    if (key == null || key.isEmpty) return '';
+
+    final input = <Map<String, dynamic>>[
+      for (final h in _history.sublist(0, math.max(0, _history.length - 1)))
+        {
+          'role': h['role'] == 'model' ? 'assistant' : 'user',
+          'content': [
+            {'type': 'input_text', 'text': h['text'] ?? ''},
+          ],
+        },
+      {
+        'role': 'user',
+        'content': await _buildOpenAiUserContent(
+          message: message,
+          attachments: attachments,
+        ),
+      },
+    ];
+
+    final response = await http
+        .post(
+          Uri.parse('https://api.openai.com/v1/responses'),
+          headers: {
+            'Content-Type': 'application/json',
+            'Authorization': 'Bearer $key',
+          },
+          body: jsonEncode({
+            'model': Env.openAiTextModel.isEmpty ? 'gpt-5.5' : Env.openAiTextModel,
+            if ((_systemPrompt ?? '').isNotEmpty) 'instructions': _systemPrompt,
+            'input': input,
+          }),
+        )
+        .timeout(const Duration(seconds: 30));
+
+    if (response.statusCode != 200) {
+      debugPrint('OpenAI text chat failed: ${response.statusCode} ${response.body}');
+      return '';
+    }
+    final body = jsonDecode(response.body) as Map<String, dynamic>;
+    return _extractOpenAiOutputText(body).trim();
+  }
+
   Future<List<Map<String, dynamic>>> _buildUserParts({
     required String message,
     List<Map<String, String>> attachments = const [],
@@ -722,6 +815,158 @@ class AymaAudioService extends ChangeNotifier {
       } catch (_) {}
     }
     return parts;
+  }
+
+  List<Map<String, dynamic>> _openAiToolsFromGeminiSetup(Map<String, dynamic>? setup) {
+    final declarations = setup?['tools'] is List
+        ? (setup?['tools'] as List)
+            .whereType<Map<String, dynamic>>()
+            .expand((tool) => (tool['function_declarations'] as List? ?? const []))
+            .whereType<Map<String, dynamic>>()
+            .toList()
+        : const <Map<String, dynamic>>[];
+
+    final source = declarations.isNotEmpty
+        ? declarations
+        : const [
+            {
+              'name': 'add_followup_question',
+              'description': 'Save a useful follow-up question to ask the user later.',
+              'parameters': {
+                'type': 'object',
+                'properties': {
+                  'question': {
+                    'type': 'string',
+                    'description': 'The concise follow-up question to save.'
+                  }
+                },
+                'required': ['question']
+              }
+            },
+            {
+              'name': 'get_current_time',
+              'description': 'Get the current local timestamp.',
+              'parameters': {'type': 'object', 'properties': {}}
+            },
+          ];
+
+    return [
+      for (final declaration in source)
+        {
+          'type': 'function',
+          'name': declaration['name'] as String? ?? '',
+          if ((declaration['description'] as String? ?? '').isNotEmpty)
+            'description': declaration['description'],
+          'parameters': declaration['parameters'] ??
+              {'type': 'object', 'properties': <String, dynamic>{}},
+        },
+    ].where((tool) => (tool['name'] as String).isNotEmpty).toList();
+  }
+
+  Map<String, dynamic> _openAiSessionFromBootstrap(Map<String, dynamic>? setup) {
+    return {
+      'type': 'realtime',
+      if ((_systemPrompt ?? '').isNotEmpty) 'instructions': _systemPrompt,
+      'audio': {
+        'input': {
+          'format': {
+            'type': 'audio/pcm',
+            'rate': 24000,
+          },
+          'turn_detection': {
+            'type': 'server_vad',
+            'interrupt_response': true,
+            'create_response': true,
+          },
+          'transcription': {
+            'model': 'gpt-4o-mini-transcribe',
+          },
+        },
+        'output': {
+          'format': {
+            'type': 'audio/pcm',
+            'rate': 24000,
+          },
+          'voice': Env.openAiVoice.isEmpty ? 'marin' : Env.openAiVoice,
+        },
+      },
+      'tools': _openAiToolsFromGeminiSetup(setup),
+    };
+  }
+
+  String? _credentialFromBootstrap(Map<String, dynamic> bootstrap) {
+    if (Env.liveProvider != 'gemini' && Env.openAiApiKey.isNotEmpty) {
+      return Env.openAiApiKey;
+    }
+    final clientSecret = bootstrap['client_secret'];
+    if (clientSecret is Map<String, dynamic>) {
+      final secretValue = clientSecret['value'] as String?;
+      if ((secretValue ?? '').isNotEmpty) return secretValue;
+    }
+    return bootstrap['openai_api_key'] as String? ??
+        bootstrap['token'] as String? ??
+        bootstrap['api_key'] as String?;
+  }
+
+  String _extractSystemPrompt(Map<String, dynamic>? setup) {
+    final geminiParts = setup?['system_instruction']?['parts'];
+    if (geminiParts is List) {
+      return geminiParts
+          .whereType<Map<String, dynamic>>()
+          .map((p) => p['text'] as String? ?? '')
+          .join('')
+          .trim();
+    }
+    return (setup?['instructions'] as String? ?? '').trim();
+  }
+
+  Future<List<Map<String, dynamic>>> _buildOpenAiUserContent({
+    required String message,
+    List<Map<String, String>> attachments = const [],
+  }) async {
+    final content = <Map<String, dynamic>>[
+      {'type': 'input_text', 'text': message},
+    ];
+
+    var imageCount = 0;
+    for (final att in attachments) {
+      final kind = (att['kind'] ?? '').toLowerCase();
+      final url = att['url'] ?? '';
+      if (kind != 'image' || url.isEmpty || imageCount >= 3 || !url.startsWith('http')) {
+        continue;
+      }
+      try {
+        final res = await http.get(Uri.parse(url)).timeout(const Duration(seconds: 12));
+        if (res.statusCode != 200 || res.bodyBytes.isEmpty) continue;
+        if (res.bodyBytes.length > 4 * 1024 * 1024) continue;
+        final mimeType = _detectImageMimeType(att, res.headers) ?? 'image/jpeg';
+        content.add({
+          'type': 'input_image',
+          'image_url': 'data:$mimeType;base64,${base64Encode(res.bodyBytes)}',
+        });
+        imageCount++;
+      } catch (_) {}
+    }
+    return content;
+  }
+
+  String _extractOpenAiOutputText(Map<String, dynamic> body) {
+    final direct = body['output_text'] as String?;
+    if ((direct ?? '').isNotEmpty) return direct!;
+
+    final buffer = StringBuffer();
+    final output = body['output'] as List<dynamic>? ?? const [];
+    for (final item in output.whereType<Map<String, dynamic>>()) {
+      final content = item['content'] as List<dynamic>? ?? const [];
+      for (final part in content.whereType<Map<String, dynamic>>()) {
+        final text = part['text'] as String? ?? part['transcript'] as String? ?? '';
+        if (text.isNotEmpty) {
+          if (buffer.isNotEmpty) buffer.write(' ');
+          buffer.write(text);
+        }
+      }
+    }
+    return buffer.toString();
   }
 
   String? _detectImageMimeType(

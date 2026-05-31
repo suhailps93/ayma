@@ -869,7 +869,6 @@ class _ExploreProfileScreenState extends State<_ExploreProfileScreen> {
   late Future<Map<String, dynamic>?> _profileFuture;
   double? _matchScore;
   bool _busy = false;
-  bool _connected = false;
 
   @override
   void initState() {
@@ -878,48 +877,6 @@ class _ExploreProfileScreenState extends State<_ExploreProfileScreen> {
     _profileFuture = id == null
         ? Future.value(widget.profile)
         : FirestoreService.getPublicProfile(id);
-  }
-
-  Future<void> _generateScore(String userId) async {
-    setState(() => _busy = true);
-    try {
-      final score = await FirestoreService.generateMatchScore(userId);
-      if (!mounted) return;
-      setState(() => _matchScore = score);
-    } finally {
-      if (mounted) setState(() => _busy = false);
-    }
-  }
-
-  Future<void> _connect(
-      String userId, String name, String? photoUrl) async {
-    final sent = await showModalBottomSheet<bool>(
-      context: context,
-      isScrollControlled: true,
-      backgroundColor: Colors.transparent,
-      builder: (_) => _ConnectSheet(
-        targetUserId: userId,
-        targetName: name,
-        photoUrl: photoUrl,
-      ),
-    );
-    if (sent == true && mounted) {
-      setState(() => _connected = true);
-    }
-  }
-
-  Future<void> _sendMessage(String userId) async {
-    final p = await _profileFuture;
-    final name = ((p?['display_name'] as String?) ?? 'Message').trim();
-    if (!mounted) return;
-    Navigator.of(context).push(
-      MaterialPageRoute<void>(
-        builder: (_) => DirectMessageScreen(
-          targetUserId: userId,
-          targetName: name.isEmpty ? 'Message' : name,
-        ),
-      ),
-    );
   }
 
   @override
@@ -976,101 +933,13 @@ class _ExploreProfileScreenState extends State<_ExploreProfileScreen> {
             extraPills: extraPills,
             isOnline: true,
             showEditControls: false,
-            bottom: Column(
-              crossAxisAlignment: CrossAxisAlignment.stretch,
-              children: [
-                // ── Primary: Connect ──────────────────────────────────
-                GestureDetector(
-                  onTap: _busy || userId.isEmpty || _connected
-                      ? null
-                      : () => _connect(
-                            userId,
-                            name?.isNotEmpty == true ? name! : 'Someone',
-                            photos.isNotEmpty ? photos.first : null,
-                          ),
-                  child: AnimatedContainer(
-                    duration: const Duration(milliseconds: 250),
-                    padding: const EdgeInsets.symmetric(vertical: 16),
-                    decoration: BoxDecoration(
-                      color: _connected
-                          ? const Color(0xFF1E2A1A)
-                          : context.ac.accent,
-                      borderRadius: BorderRadius.circular(18),
-                      border: _connected
-                          ? Border.all(
-                              color: const Color(0xFF46D96A).withValues(alpha: 0.4),
-                              width: 0.5,
-                            )
-                          : null,
-                    ),
-                    child: Row(
-                      mainAxisAlignment: MainAxisAlignment.center,
-                      children: [
-                        if (_busy && !_connected)
-                          const SizedBox(
-                            width: 16,
-                            height: 16,
-                            child: CircularProgressIndicator(
-                              strokeWidth: 2,
-                              color: Colors.black,
-                            ),
-                          )
-                        else if (_connected) ...[
-                          const Icon(
-                            Icons.check_circle_rounded,
-                            size: 16,
-                            color: Color(0xFF46D96A),
-                          ),
-                          const SizedBox(width: 8),
-                          const Text(
-                            'Connected',
-                            style: TextStyle(
-                              color: Color(0xFF46D96A),
-                              fontSize: 15,
-                              fontWeight: FontWeight.w600,
-                            ),
-                          ),
-                        ] else
-                          const Text(
-                            'Connect',
-                            style: TextStyle(
-                              color: Colors.black,
-                              fontSize: 15,
-                              fontWeight: FontWeight.w600,
-                            ),
-                          ),
-                      ],
-                    ),
-                  ),
-                ),
-                const SizedBox(height: 10),
-                // ── Secondary: Match Score + Message ──────────────────
-                Row(
-                  children: [
-                    Expanded(
-                      child: _ActionBtn(
-                        label: _matchScore == null
-                            ? 'Match Score'
-                            : '${(100 * _matchScore!).round()}% Match',
-                        icon: Icons.favorite_border_rounded,
-                        onTap: _busy || userId.isEmpty
-                            ? null
-                            : () => _generateScore(userId),
-                      ),
-                    ),
-                    const SizedBox(width: 8),
-                    Expanded(
-                      child: _ActionBtn(
-                        label: 'Message',
-                        icon: Icons.chat_bubble_outline_rounded,
-                        onTap: _busy || userId.isEmpty
-                            ? null
-                            : () => _sendMessage(userId),
-                      ),
-                    ),
-                  ],
-                ),
-              ],
+            bottom: _ProfileActions(
+              userId: userId,
+              profileFuture: _profileFuture,
+              matchScore: _matchScore,
+              onScoreGenerated: (s) => setState(() => _matchScore = s),
+              busy: _busy,
+              onBusyChanged: (b) => setState(() => _busy = b),
             ),
           );
         },
@@ -1079,273 +948,125 @@ class _ExploreProfileScreenState extends State<_ExploreProfileScreen> {
   }
 }
 
-class _ActionBtn extends StatelessWidget {
-  final String label;
-  final VoidCallback? onTap;
-  final IconData? icon;
-  const _ActionBtn({required this.label, this.onTap, this.icon});
+class _ProfileActions extends StatefulWidget {
+  final String userId;
+  final Future<Map<String, dynamic>?> profileFuture;
+  final double? matchScore;
+  final ValueChanged<double> onScoreGenerated;
+  final bool busy;
+  final ValueChanged<bool> onBusyChanged;
 
-  @override
-  Widget build(BuildContext context) {
-    final enabled = onTap != null;
-    return GestureDetector(
-      onTap: onTap,
-      child: Container(
-        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 12),
-        decoration: BoxDecoration(
-          color: context.ac.bgCard,
-          borderRadius: BorderRadius.circular(14),
-          border: Border.all(color: context.ac.lineSoft, width: 0.5),
-        ),
-        child: Row(
-          mainAxisAlignment: MainAxisAlignment.center,
-          children: [
-            if (icon != null) ...[
-              Icon(
-                icon,
-                size: 15,
-                color: enabled ? context.ac.fgDim : context.ac.fgMute,
-              ),
-              const SizedBox(width: 6),
-            ],
-            Text(
-              label,
-              style: TextStyle(
-                color: enabled ? context.ac.fg : context.ac.fgMute,
-                fontSize: 13,
-              ),
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-}
-
-// ── Connect sheet ─────────────────────────────────────────────────────────────
-
-class _ConnectSheet extends StatefulWidget {
-  final String targetUserId;
-  final String targetName;
-  final String? photoUrl;
-
-  const _ConnectSheet({
-    required this.targetUserId,
-    required this.targetName,
-    this.photoUrl,
+  const _ProfileActions({
+    required this.userId,
+    required this.profileFuture,
+    required this.matchScore,
+    required this.onScoreGenerated,
+    required this.busy,
+    required this.onBusyChanged,
   });
 
   @override
-  State<_ConnectSheet> createState() => _ConnectSheetState();
+  State<_ProfileActions> createState() => _ProfileActionsState();
 }
 
-class _ConnectSheetState extends State<_ConnectSheet> {
-  final _ctrl = TextEditingController();
-  bool _sending = false;
-  bool _sent = false;
+class _ProfileActionsState extends State<_ProfileActions> {
+  bool _liked = false;
 
-  @override
-  void dispose() {
-    _ctrl.dispose();
-    super.dispose();
+  Future<void> _like() async {
+    if (_liked || widget.busy || widget.userId.isEmpty) return;
+    widget.onBusyChanged(true);
+    try {
+      await FirestoreService.sendPoke(widget.userId);
+      if (mounted) setState(() => _liked = true);
+    } finally {
+      widget.onBusyChanged(false);
+    }
   }
 
-  Future<void> _send() async {
-    final text = _ctrl.text.trim();
-    setState(() => _sending = true);
+  Future<void> _message() async {
+    final p = await widget.profileFuture;
+    final name = ((p?['display_name'] as String?) ?? 'Message').trim();
+    if (!mounted) return;
+    Navigator.of(context).push(MaterialPageRoute<void>(
+      builder: (_) => DirectMessageScreen(
+        targetUserId: widget.userId,
+        targetName: name.isEmpty ? 'Message' : name,
+      ),
+    ));
+  }
+
+  Future<void> _score() async {
+    if (widget.busy || widget.userId.isEmpty) return;
+    widget.onBusyChanged(true);
     try {
-      if (text.isNotEmpty) {
-        await FirestoreService.sendDirectMessage(
-          targetUserId: widget.targetUserId,
-          text: text,
-        );
-      } else {
-        await FirestoreService.sendPoke(widget.targetUserId);
-      }
-      if (!mounted) return;
-      setState(() {
-        _sent = true;
-        _sending = false;
-      });
-      await Future<void>.delayed(const Duration(milliseconds: 900));
-      if (mounted) Navigator.of(context).pop(true);
-    } catch (_) {
-      if (mounted) setState(() => _sending = false);
+      final s = await FirestoreService.generateMatchScore(widget.userId);
+      if (mounted) widget.onScoreGenerated(s);
+    } finally {
+      widget.onBusyChanged(false);
     }
   }
 
   @override
   Widget build(BuildContext context) {
-    final bottomPad = MediaQuery.viewInsetsOf(context).bottom;
-    return Container(
-      margin: const EdgeInsets.fromLTRB(12, 0, 12, 12),
-      padding: EdgeInsets.fromLTRB(20, 24, 20, 20 + bottomPad),
-      decoration: BoxDecoration(
-        color: context.ac.bgElev,
-        borderRadius: BorderRadius.circular(28),
-        border: Border.all(color: context.ac.lineSoft, width: 0.5),
-      ),
-      child: Column(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          Container(
-            width: 36,
-            height: 4,
-            margin: const EdgeInsets.only(bottom: 20),
-            decoration: BoxDecoration(
-              color: context.ac.lineSoft,
-              borderRadius: BorderRadius.circular(2),
-            ),
+    return Row(
+      children: [
+        Expanded(child: _ActionBtn(
+          label: _liked ? 'Liked' : 'Like Photos',
+          icon: _liked ? Icons.favorite_rounded : Icons.favorite_border_rounded,
+          accent: _liked,
+          onTap: widget.busy || widget.userId.isEmpty ? null : _like,
+        )),
+        const SizedBox(width: 8),
+        Expanded(child: _ActionBtn(
+          label: 'Message',
+          icon: Icons.chat_bubble_outline_rounded,
+          onTap: widget.busy || widget.userId.isEmpty ? null : _message,
+        )),
+        const SizedBox(width: 8),
+        Expanded(child: _ActionBtn(
+          label: widget.matchScore == null
+              ? 'Match'
+              : '${(100 * widget.matchScore!).round()}%',
+          icon: Icons.stars_rounded,
+          onTap: widget.busy || widget.userId.isEmpty ? null : _score,
+        )),
+      ],
+    );
+  }
+}
+
+class _ActionBtn extends StatelessWidget {
+  final String label;
+  final VoidCallback? onTap;
+  final IconData? icon;
+  final bool accent;
+  const _ActionBtn({required this.label, this.onTap, this.icon, this.accent = false});
+
+  @override
+  Widget build(BuildContext context) {
+    final enabled = onTap != null;
+    final color = accent ? context.ac.accent : (enabled ? context.ac.fg : context.ac.fgMute);
+    return GestureDetector(
+      onTap: onTap,
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 12),
+        decoration: BoxDecoration(
+          color: accent ? context.ac.accentFaint : context.ac.bgCard,
+          borderRadius: BorderRadius.circular(14),
+          border: Border.all(
+            color: accent ? context.ac.accentSoft : context.ac.lineSoft,
+            width: 0.5,
           ),
-          Row(
-            children: [
-              Container(
-                width: 52,
-                height: 52,
-                decoration: BoxDecoration(
-                  shape: BoxShape.circle,
-                  color: context.ac.bgCard,
-                  border: Border.all(
-                    color: context.ac.accent.withValues(alpha: 0.3),
-                    width: 1,
-                  ),
-                  image: widget.photoUrl != null && widget.photoUrl!.isNotEmpty
-                      ? DecorationImage(
-                          image: NetworkImage(widget.photoUrl!),
-                          fit: BoxFit.cover,
-                        )
-                      : null,
-                ),
-                child: widget.photoUrl == null || widget.photoUrl!.isEmpty
-                    ? Icon(Icons.person_outline_rounded,
-                        color: context.ac.fgMute, size: 24)
-                    : null,
-              ),
-              const SizedBox(width: 14),
-              Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(
-                      _sent
-                          ? 'Connected!'
-                          : 'Connect with ${widget.targetName}',
-                      style: AymaFonts.serif(size: 20, color: context.ac.fg),
-                    ),
-                    const SizedBox(height: 3),
-                    Text(
-                      _sent
-                          ? 'Your message is on its way'
-                          : 'Send an intro or connect silently',
-                      style: TextStyle(
-                          color: context.ac.fgMute, fontSize: 13),
-                    ),
-                  ],
-                ),
-              ),
-            ],
-          ),
-          const SizedBox(height: 20),
-          if (!_sent) ...[
-            Container(
-              decoration: BoxDecoration(
-                color: context.ac.bg,
-                borderRadius: BorderRadius.circular(14),
-                border: Border.all(color: context.ac.lineSoft, width: 0.5),
-              ),
-              child: TextField(
-                controller: _ctrl,
-                maxLines: 3,
-                minLines: 1,
-                autofocus: true,
-                style: TextStyle(color: context.ac.fg, fontSize: 14),
-                decoration: InputDecoration(
-                  hintText: 'Write a short intro… (optional)',
-                  hintStyle:
-                      TextStyle(color: context.ac.fgMute, fontSize: 14),
-                  border: InputBorder.none,
-                  contentPadding: const EdgeInsets.symmetric(
-                      horizontal: 14, vertical: 12),
-                ),
-              ),
-            ),
-            const SizedBox(height: 14),
-            GestureDetector(
-              onTap: _sending ? null : _send,
-              child: Container(
-                width: double.infinity,
-                padding: const EdgeInsets.symmetric(vertical: 15),
-                decoration: BoxDecoration(
-                  color: context.ac.accent,
-                  borderRadius: BorderRadius.circular(16),
-                ),
-                child: Center(
-                  child: _sending
-                      ? const SizedBox(
-                          width: 18,
-                          height: 18,
-                          child: CircularProgressIndicator(
-                              strokeWidth: 2, color: Colors.black),
-                        )
-                      : const Text(
-                          'Connect',
-                          style: TextStyle(
-                            color: Colors.black,
-                            fontSize: 15,
-                            fontWeight: FontWeight.w600,
-                          ),
-                        ),
-                ),
-              ),
-            ),
-            const SizedBox(height: 10),
-            GestureDetector(
-              onTap: () => Navigator.of(context).pop(false),
-              child: Container(
-                width: double.infinity,
-                padding: const EdgeInsets.symmetric(vertical: 13),
-                decoration: BoxDecoration(
-                  color: Colors.transparent,
-                  borderRadius: BorderRadius.circular(16),
-                  border: Border.all(color: context.ac.lineSoft, width: 0.5),
-                ),
-                child: Center(
-                  child: Text(
-                    'Cancel',
-                    style:
-                        TextStyle(color: context.ac.fgDim, fontSize: 14),
-                  ),
-                ),
-              ),
-            ),
-          ] else ...[
-            Container(
-              padding: const EdgeInsets.all(16),
-              decoration: BoxDecoration(
-                color: const Color(0xFF1E2A1A),
-                borderRadius: BorderRadius.circular(16),
-                border: Border.all(
-                    color: const Color(0xFF46D96A).withValues(alpha: 0.3),
-                    width: 0.5),
-              ),
-              child: Row(
-                mainAxisAlignment: MainAxisAlignment.center,
-                children: [
-                  const Icon(Icons.check_circle_rounded,
-                      color: Color(0xFF46D96A), size: 20),
-                  const SizedBox(width: 10),
-                  Text(
-                    'Sent to ${widget.targetName}',
-                    style: const TextStyle(
-                        color: Color(0xFF46D96A),
-                        fontSize: 15,
-                        fontWeight: FontWeight.w500),
-                  ),
-                ],
-              ),
-            ),
+        ),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            if (icon != null) Icon(icon, size: 18, color: color),
+            if (icon != null) const SizedBox(height: 4),
+            Text(label, style: TextStyle(color: color, fontSize: 11),
+                textAlign: TextAlign.center),
           ],
-        ],
+        ),
       ),
     );
   }

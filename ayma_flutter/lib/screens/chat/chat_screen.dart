@@ -75,6 +75,7 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
     super.initState();
     _audioService = ref.read(audioServiceProvider);
     _textCtrl.addListener(() => setState(() {}));
+    WidgetsBinding.instance.addPostFrameCallback((_) => _scrollToBottom());
   }
 
   void _startTimer() {

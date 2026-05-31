@@ -141,7 +141,7 @@ class _ShellScreenState extends ConsumerState<ShellScreen>
           pulseValue: _pulse.value,
           onTap: (i) {
             final onChatTab = location.startsWith('/chat');
-            if (i == 0 && connected && onChatTab) {
+            if (i == 2 && connected && onChatTab) {
               ref.read(audioServiceProvider).disconnect();
             } else {
               context.go(_tabs[i].path);
@@ -153,9 +153,9 @@ class _ShellScreenState extends ConsumerState<ShellScreen>
   }
 
   static const _tabs = [
-    (path: '/chat', kind: 'agent', label: 'Agent'),
     (path: '/matches', kind: 'matches', label: 'Matches'),
     (path: '/explore', kind: 'explore', label: 'Explore'),
+    (path: '/chat', kind: 'agent', label: 'Ayma'),
     (path: '/notifications', kind: 'notifications', label: 'Signals'),
     (path: '/profile', kind: 'profile', label: 'You'),
   ];

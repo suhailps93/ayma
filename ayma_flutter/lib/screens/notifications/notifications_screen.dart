@@ -6,6 +6,7 @@ import 'package:go_router/go_router.dart';
 import '../../models/notification_model.dart';
 import '../../providers/providers.dart';
 import '../../theme.dart';
+import '../explore/direct_message_screen.dart';
 
 class NotificationsScreen extends ConsumerWidget {
   const NotificationsScreen({super.key});
@@ -81,9 +82,32 @@ void _navigate(BuildContext context, NotificationModel n) {
     case NotificationType.newMatch:
       context.go('/matches');
     case NotificationType.agentUpdate:
-      context.go('/insights');
+      // Message notification: has from_user_id in meta → go to DM
+      final fromId = n.meta?['from_user_id'] as String?;
+      if (fromId != null && fromId.isNotEmpty) {
+        final name = (n.meta?['from_name'] as String?) ?? n.title;
+        Navigator.of(context).push(MaterialPageRoute<void>(
+          builder: (_) => DirectMessageScreen(
+            targetUserId: fromId,
+            targetName: name.isNotEmpty ? name : 'Message',
+          ),
+        ));
+      } else {
+        context.go('/profile');
+      }
     case NotificationType.profileSuggestion:
-      context.go('/profile');
+      // Poke notification: has from_user_id → go to DM
+      final fromId = n.meta?['from_user_id'] as String?;
+      if (fromId != null && fromId.isNotEmpty) {
+        Navigator.of(context).push(MaterialPageRoute<void>(
+          builder: (_) => DirectMessageScreen(
+            targetUserId: fromId,
+            targetName: n.title.isNotEmpty ? n.title : 'Message',
+          ),
+        ));
+      } else {
+        context.go('/profile');
+      }
     case NotificationType.system:
       break;
   }
