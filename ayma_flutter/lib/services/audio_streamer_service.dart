@@ -12,14 +12,15 @@ class AudioStreamerService {
   final _webPlayer = WebPcmPlayer();
 
   bool _initialized = false;
+  Future<void>? _initFuture;
   bool _streaming = false;
   int _sampleRate = 24000;
   int _channels = 1;
 
   Future<void> _ensureInit() async {
     if (kIsWeb || _initialized) return;
-    await _player.openPlayer();
-    _initialized = true;
+    _initFuture ??= _player.openPlayer().then((_) => _initialized = true);
+    await _initFuture;
   }
 
   Future<void> addPcm16(Uint8List data, {String mimeType = 'audio/pcm;rate=24000'}) async {

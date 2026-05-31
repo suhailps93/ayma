@@ -53,6 +53,7 @@ dependencies:
   image_picker: ^1.1.2
   flutter_markdown: ^0.7.7+1
   flutter_skill: ^0.9.36
+  flutter_overlay_window: ^0.5.0
 
 dev_dependencies:
   flutter_test:

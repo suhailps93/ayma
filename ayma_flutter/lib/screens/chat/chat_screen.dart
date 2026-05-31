@@ -91,7 +91,9 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
     try {
       await _audioService.connect(userInitiated: true);
       _startTimer();
-      return _audioService.state != SessionState.disconnected;
+      final ok = _audioService.state != SessionState.disconnected;
+      if (ok) _audioService.setMuted(false);
+      return ok;
     } catch (_) {}
     return false;
   }
@@ -105,22 +107,6 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
       _voiceActionInFlight = false;
     } else {
       _audioService.setMuted(!_audioService.muted);
-    }
-  }
-
-  Future<void> _onSphereTap() async {
-    if (_audioService.state == SessionState.disconnected) {
-      if (_voiceActionInFlight) return;
-      _voiceActionInFlight = true;
-      await _autoConnect();
-      if (_audioService.state != SessionState.disconnected) {
-        _audioService.setMuted(true);
-      }
-      _voiceActionInFlight = false;
-    } else {
-      _audioService.disconnect();
-      _sessionTimer?.cancel();
-      setState(() => _sessionDuration = Duration.zero);
     }
   }
 
@@ -377,7 +363,6 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
               hasAttachment: _drafts.isNotEmpty,
               drafts: _drafts,
               onMicTap: _onMicTap,
-              onSphereTap: _onSphereTap,
               onSend: _sendText,
               onAttach: _showMediaSheet,
               onRemoveDraft: _removeDraft,
@@ -640,7 +625,6 @@ class _InputBar extends StatefulWidget {
   final List<_DraftAttachment> drafts;
   final bool userTalking;
   final Future<void> Function() onMicTap;
-  final Future<void> Function() onSphereTap;
   final Future<void> Function() onSend;
   final VoidCallback onAttach;
   final ValueChanged<String> onRemoveDraft;
@@ -657,7 +641,6 @@ class _InputBar extends StatefulWidget {
     required this.hasAttachment,
     required this.drafts,
     required this.onMicTap,
-    required this.onSphereTap,
     required this.onSend,
     required this.onAttach,
     required this.onRemoveDraft,
@@ -836,14 +819,6 @@ class _InputBarState extends State<_InputBar>
                                       onMicTap: widget.onMicTap,
                                       onSend: widget.onSend,
                                     ),
-                                    if (!_voiceActive) ...[
-                                      const SizedBox(width: 10),
-                                      _ConnectionSphere(
-                                        connected: false,
-                                        state: widget.state,
-                                        onTap: widget.onSphereTap,
-                                      ),
-                                    ],
                                   ],
                                 ),
                               ),
@@ -1154,7 +1129,7 @@ class _ComposerOutlinePainter extends CustomPainter {
     final level = volume.clamp(0.0, 1.0);
     // AI talks on top, User talks on bottom
     final bool aiTalking = isAiTalking && level > 0.005;
-    final bool userTalking = !isAiTalking && level > 0.015;
+    final bool userTalking = isUserTalking;
 
     final freqMod = 1.0 + level * 0.45;
     final speedMod = 1.0 + level * 0.6;
@@ -1172,7 +1147,7 @@ class _ComposerOutlinePainter extends CustomPainter {
     ).createShader(Offset.zero & size);
 
     void drawEdgeWaves(bool talking, bool atBottom) {
-      final amp = talking ? (6.0 + level * 14.0) : 0.0;
+      final amp = talking ? (8.0 + level * 12.0) : 0.0;
 
       void drawWave(double a, double phaseShift, double freq, double detailFreq,
           [double opacity = 1.0]) {

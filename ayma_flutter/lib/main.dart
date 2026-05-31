@@ -1,12 +1,18 @@
 import 'package:firebase_core/firebase_core.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:flutter_overlay_window/flutter_overlay_window.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import 'firebase_options.dart';
 import 'providers/providers.dart';
 import 'router.dart';
 import 'theme.dart';
+
+@pragma('vm:entry-point')
+void overlayMain() {
+  runApp(const _OverlayApp());
+}
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -67,6 +73,47 @@ class AymaApp extends ConsumerWidget {
       themeMode: themeMode,
       routerConfig: router,
       debugShowCheckedModeBanner: false,
+    );
+  }
+}
+
+// Overlay entry point — runs in a separate Dart isolate when the
+// system floating sphere is active (flutter_overlay_window).
+class _OverlayApp extends StatelessWidget {
+  const _OverlayApp();
+
+  @override
+  Widget build(BuildContext context) {
+    return MaterialApp(
+      debugShowCheckedModeBanner: false,
+      home: GestureDetector(
+        onTap: FlutterOverlayWindow.closeOverlay,
+        child: Container(
+          width: 80,
+          height: 80,
+          decoration: const BoxDecoration(
+            shape: BoxShape.circle,
+            gradient: RadialGradient(
+              center: Alignment(-0.30, -0.38),
+              radius: 0.82,
+              colors: [
+                Color(0xFFFFF6EF),
+                Color(0xFFEA9858),
+                Color(0xFFB86228),
+                Color(0xFF5A2408),
+              ],
+              stops: [0.0, 0.32, 0.68, 1.0],
+            ),
+            boxShadow: [
+              BoxShadow(
+                color: Color(0x88CF7628),
+                blurRadius: 20,
+                spreadRadius: 4,
+              ),
+            ],
+          ),
+        ),
+      ),
     );
   }
 }

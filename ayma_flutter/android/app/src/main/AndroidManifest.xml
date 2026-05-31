@@ -6,6 +6,8 @@
     <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS"/>
     <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION"/>
     <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION"/>
+    <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW"/>
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE"/>
 
     <application
         android:label="Ayma"
@@ -40,6 +42,13 @@
         <meta-data
             android:name="flutterEmbedding"
             android:value="2" />
+        <meta-data
+            android:name="flutter_overlay_window.flutter_overlay_window.OVERLAY_ENTRY"
+            android:value="overlayMain" />
+        <service
+            android:name="net.pregy.flutter_overlay_window.OverlayService"
+            android:exported="false"
+            android:stopWithTask="false" />
     </application>
     <queries>
         <intent>

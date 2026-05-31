@@ -119,13 +119,32 @@ class AymaAudioService extends ChangeNotifier {
     await _restoreTranscript();
   }
 
+  // ── Playback drain helper ─────────────────────────────────────────────────────
+
+  void _awaitPlaybackEnd() {
+    int ticks = 0;
+    Timer.periodic(const Duration(milliseconds: 80), (t) {
+      ticks++;
+      final drained = _outputVolume < 0.004;
+      final timeout = ticks > 50; // 4 second max
+      if (drained || timeout) {
+        t.cancel();
+        if (_state == SessionState.speaking || _state == SessionState.thinking) {
+          _setState(SessionState.listening);
+          _outputVolume = 0;
+          _notifyMetersThrottled();
+        }
+      }
+    });
+  }
+
   // ── Wire GeminiLiveClient events → session state (mirrors use-live-api.ts) ──
 
   void _wireClientStreams() {
     // setupComplete → start mic (mirrors ControlTray useEffect on `connected`)
-    _subs.add(_client.setupCompleteStream.listen((_) {
+    _subs.add(_client.setupCompleteStream.listen((_) async {
       _setState(SessionState.ready);
-      unawaited(_recorder.start());
+      await _recorder.start();
       _setState(SessionState.listening);
     }));
 
@@ -173,7 +192,7 @@ class AymaAudioService extends ChangeNotifier {
         _addTranscript(modelText, isUser: false, allowRecentDuplicate: true);
       }
       unawaited(_commitTurnToBackend());
-      _setState(SessionState.listening);
+      _awaitPlaybackEnd();
     }));
 
     _subs.add(_client.toolCallStream.listen((calls) {

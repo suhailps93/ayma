@@ -4,6 +4,7 @@ import 'package:go_router/go_router.dart';
 
 import '../../providers/providers.dart';
 import '../../services/audio_service.dart';
+import '../../services/overlay_service.dart';
 import '../../theme.dart';
 
 class ShellScreen extends ConsumerStatefulWidget {
@@ -15,16 +16,7 @@ class ShellScreen extends ConsumerStatefulWidget {
 }
 
 class _ShellScreenState extends ConsumerState<ShellScreen>
-    with SingleTickerProviderStateMixin {
-  static const double _orbSize = 52.0;
-  static const double _orbPad = 14.0;
-
-  Offset _orbPos = const Offset(-1, -1);
-  bool _orbPosInit = false;
-  bool _orbSnapping = false;
-  bool _orbDragging = false;
-  double _orbDragTotal = 0;
-
+    with SingleTickerProviderStateMixin, WidgetsBindingObserver {
   late final AnimationController _pulseCtrl;
   late final Animation<double> _pulse;
 
@@ -36,31 +28,29 @@ class _ShellScreenState extends ConsumerState<ShellScreen>
       duration: const Duration(milliseconds: 2400),
     )..repeat(reverse: true);
     _pulse = CurvedAnimation(parent: _pulseCtrl, curve: Curves.easeInOut);
+    WidgetsBinding.instance.addObserver(this);
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      OverlayService.requestPermission();
+    });
   }
 
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
     _pulseCtrl.dispose();
     super.dispose();
   }
 
-  void _initOrbPos(Size screen, double topPad) {
-    if (_orbPosInit) return;
-    _orbPosInit = true;
-    _orbPos = Offset(screen.width - _orbSize - _orbPad, topPad + 8);
-  }
-
-  void _snapOrbToEdge(Size screen, double topPad, double bottomPad) {
-    final cx = _orbPos.dx + _orbSize / 2;
-    final tx = cx < screen.width / 2 ? _orbPad : screen.width - _orbSize - _orbPad;
-    final ty = _orbPos.dy.clamp(topPad + 4, screen.height - _orbSize - bottomPad - 20);
-    setState(() {
-      _orbSnapping = true;
-      _orbPos = Offset(tx, ty.toDouble());
-    });
-    Future<void>.delayed(const Duration(milliseconds: 350), () {
-      if (mounted) setState(() => _orbSnapping = false);
-    });
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    final connected = ref.read(audioServiceProvider.select(
+        (a) => a.state != SessionState.disconnected));
+    if ((state == AppLifecycleState.hidden ||
+         state == AppLifecycleState.paused) && connected) {
+      OverlayService.showOverlay();
+    } else if (state == AppLifecycleState.resumed) {
+      OverlayService.hideOverlay();
+    }
   }
 
   @override
@@ -68,15 +58,15 @@ class _ShellScreenState extends ConsumerState<ShellScreen>
     final location = GoRouterState.of(context).matchedLocation;
     final unread = ref.watch(
         notificationsProvider.select((ns) => ns.where((n) => !n.read).length));
-    final connected = ref.watch(
-        audioServiceProvider.select((a) => a.state != SessionState.disconnected));
+    final connected = ref.watch(audioServiceProvider.select((a) =>
+        a.state == SessionState.listening ||
+        a.state == SessionState.ready ||
+        a.state == SessionState.speaking ||
+        a.state == SessionState.thinking));
 
     final mq = MediaQuery.of(context);
     final bottomInset = mq.padding.bottom;
-    final topPad = mq.padding.top;
     final bottomNavH = 56.0 + bottomInset;
-
-    _initOrbPos(mq.size, topPad);
 
     int selectedIndex = _tabs.indexWhere((t) => location.startsWith(t.path));
     if (selectedIndex == -1) selectedIndex = 0;
@@ -84,103 +74,32 @@ class _ShellScreenState extends ConsumerState<ShellScreen>
     return Scaffold(
       backgroundColor: context.ac.bg,
       extendBody: true,
-      body: Stack(
-        children: [
-          Padding(
-            padding: EdgeInsets.only(bottom: bottomNavH),
-            child: widget.child,
-          ),
-          // Floating session orb — visible on all pages while session is active
-          AnimatedOpacity(
-            opacity: connected ? 1.0 : 0.0,
-            duration: const Duration(milliseconds: 350),
-            curve: Curves.easeInOut,
-            child: IgnorePointer(
-              ignoring: !connected,
-              child: AnimatedPositioned(
-                duration: _orbSnapping && !_orbDragging
-                    ? const Duration(milliseconds: 320)
-                    : Duration.zero,
-                curve: Curves.easeOutCubic,
-                left: _orbPos.dx,
-                top: _orbPos.dy,
-                width: _orbSize,
-                height: _orbSize,
-                child: GestureDetector(
-                  onPanStart: (_) {
-                    _orbDragging = false;
-                    _orbDragTotal = 0;
-                  },
-                  onPanUpdate: (d) {
-                    _orbDragTotal += d.delta.distance;
-                    if (_orbDragTotal > 6) _orbDragging = true;
-                    final nx = (_orbPos.dx + d.delta.dx)
-                        .clamp(_orbPad, mq.size.width - _orbSize - _orbPad);
-                    final ny = (_orbPos.dy + d.delta.dy).clamp(
-                      topPad + 4,
-                      mq.size.height - _orbSize - bottomNavH - 12,
-                    );
-                    setState(() => _orbPos = Offset(nx, ny));
-                  },
-                  onPanEnd: (_) {
-                    if (!_orbDragging) {
-                      ref.read(audioServiceProvider).disconnect();
-                    } else {
-                      _snapOrbToEdge(mq.size, topPad, bottomNavH);
-                    }
-                    _orbDragging = false;
-                  },
-                  child: AnimatedBuilder(
-                    animation: _pulse,
-                    builder: (_, __) {
-                      final glow = 0.22 + _pulse.value * 0.28;
-                      return Container(
-                        decoration: BoxDecoration(
-                          shape: BoxShape.circle,
-                          gradient: const RadialGradient(
-                            center: Alignment(-0.30, -0.38),
-                            radius: 0.82,
-                            colors: [
-                              Color(0xFFFFF6EF), // specular highlight
-                              Color(0xFFEA9858), // warm mid
-                              Color(0xFFB86228), // deep orange
-                              Color(0xFF5A2408), // shadow
-                            ],
-                            stops: [0.0, 0.32, 0.68, 1.0],
-                          ),
-                          boxShadow: [
-                            BoxShadow(
-                              color: Color(0xFFCF7628).withValues(alpha: glow),
-                              blurRadius: 20,
-                              spreadRadius: 4,
-                            ),
-                            BoxShadow(
-                              color: Colors.black.withValues(alpha: 0.35),
-                              blurRadius: 8,
-                              offset: const Offset(0, 4),
-                            ),
-                          ],
-                        ),
-                      );
-                    },
-                  ),
-                ),
-              ),
-            ),
-          ),
-        ],
+      body: Padding(
+        padding: EdgeInsets.only(bottom: bottomNavH),
+        child: widget.child,
       ),
-      bottomNavigationBar: _AymaTabBar(
-        tabs: _tabs,
-        selectedIndex: selectedIndex,
-        unreadCount: unread,
-        onTap: (i) => context.go(_tabs[i].path),
+      bottomNavigationBar: AnimatedBuilder(
+        animation: _pulse,
+        builder: (_, __) => _AymaTabBar(
+          tabs: _tabs,
+          selectedIndex: selectedIndex,
+          unreadCount: unread,
+          connected: connected,
+          pulseValue: _pulse.value,
+          onTap: (i) {
+            if (i == 0 && connected) {
+              ref.read(audioServiceProvider).disconnect();
+            } else {
+              context.go(_tabs[i].path);
+            }
+          },
+        ),
       ),
     );
   }
 
   static const _tabs = [
-    (path: '/chat', kind: 'talk', label: 'Talk'),
+    (path: '/chat', kind: 'agent', label: 'Agent'),
     (path: '/matches', kind: 'matches', label: 'Matches'),
     (path: '/explore', kind: 'explore', label: 'Explore'),
     (path: '/notifications', kind: 'notifications', label: 'Signals'),
@@ -192,12 +111,16 @@ class _AymaTabBar extends StatelessWidget {
   final List<({String path, String kind, String label})> tabs;
   final int selectedIndex;
   final int unreadCount;
+  final bool connected;
+  final double pulseValue;
   final ValueChanged<int> onTap;
 
   const _AymaTabBar({
     required this.tabs,
     required this.selectedIndex,
     required this.unreadCount,
+    required this.connected,
+    required this.pulseValue,
     required this.onTap,
   });
 
@@ -232,7 +155,7 @@ class _AymaTabBar extends StatelessWidget {
                           Stack(
                             clipBehavior: Clip.none,
                             children: [
-                              _TabIcon(kind: tab.kind, active: active),
+                              _TabIcon(kind: tab.kind, active: active, connected: connected, pulseValue: pulseValue),
                               if (isSignals && unreadCount > 0)
                                 Positioned(
                                   top: -4,
@@ -284,10 +207,55 @@ class _AymaTabBar extends StatelessWidget {
 class _TabIcon extends StatelessWidget {
   final String kind;
   final bool active;
-  const _TabIcon({required this.kind, required this.active});
+  final bool connected;
+  final double pulseValue;
+  const _TabIcon({
+    required this.kind,
+    required this.active,
+    required this.connected,
+    required this.pulseValue,
+  });
 
   @override
   Widget build(BuildContext context) {
+    if (kind == 'agent') {
+      final size = active ? 28.0 : 22.0;
+      return Container(
+        width: size,
+        height: size,
+        decoration: BoxDecoration(
+          shape: BoxShape.circle,
+          gradient: RadialGradient(
+            center: const Alignment(-0.30, -0.38),
+            radius: 0.82,
+            colors: connected
+                ? const [
+                    Color(0xFFFFF6EF),
+                    Color(0xFFEA9858),
+                    Color(0xFFB86228),
+                    Color(0xFF5A2408),
+                  ]
+                : const [
+                    Color(0xFF888888),
+                    Color(0xFF444444),
+                    Color(0xFF252525),
+                    Color(0xFF111111),
+                  ],
+            stops: const [0.0, 0.32, 0.68, 1.0],
+          ),
+          boxShadow: connected
+              ? [
+                  BoxShadow(
+                    color: const Color(0xFFCF7628).withValues(alpha: pulseValue * 0.55),
+                    blurRadius: 16,
+                    spreadRadius: 3,
+                  ),
+                ]
+              : null,
+        ),
+      );
+    }
+
     final c = active ? context.ac.fg : context.ac.fgMute;
     final accentC = active ? context.ac.accent : Colors.transparent;
 
@@ -324,19 +292,6 @@ class _TabIconPainter extends CustomPainter {
     canvas.scale(sx, sy);
 
     switch (kind) {
-      case 'talk':
-        // Inner dot (accent filled)
-        final dotPaint = Paint()
-          ..color = accentColor != Colors.transparent ? accentColor : color
-          ..style = PaintingStyle.fill;
-        canvas.drawCircle(const Offset(10, 10), 2.2, dotPaint);
-        canvas.drawCircle(const Offset(10, 10), 5, stroke);
-        final outerStroke = Paint()
-          ..color = color.withValues(alpha: 0.5)
-          ..strokeWidth = 1.4
-          ..style = PaintingStyle.stroke;
-        canvas.drawCircle(const Offset(10, 10), 8, outerStroke);
-
       case 'matches':
         canvas.drawRRect(
           RRect.fromRectAndRadius(
