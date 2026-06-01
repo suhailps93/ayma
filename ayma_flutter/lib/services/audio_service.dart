@@ -115,7 +115,6 @@ class AymaAudioService extends ChangeNotifier {
   Future<void>? _connectFuture;
 
   DateTime _lastMeterUiUpdate = DateTime.fromMillisecondsSinceEpoch(0);
-  DateTime _lastUserVoiceAt = DateTime.fromMillisecondsSinceEpoch(0);
 
   final BytesBuilder _pendingMicAudio = BytesBuilder(copy: false);
   Timer? _micFlushTimer;
@@ -164,11 +163,18 @@ class AymaAudioService extends ChangeNotifier {
     _subs.add(_client.audioStream.listen((event) {
       final chunk = event as LiveAudioChunk;
       if (_speakerMuted) return;
-      _setState(SessionState.speaking);
-      _outputVolume = _pcmRms(chunk.data);
+      // Feed streamer first, before any UI work, to minimize delivery latency
       _audioBytesPerTurn += chunk.data.lengthInBytes;
       unawaited(_streamer.addPcm16(chunk.data, mimeType: chunk.mimeType));
-      _notifyMetersThrottled();
+      if (_state != SessionState.speaking) {
+        _setState(SessionState.speaking);
+      }
+      final now = DateTime.now();
+      if (now.difference(_lastMeterUiUpdate) >= const Duration(milliseconds: 33)) {
+        _outputVolume = _pcmRms(chunk.data);
+        _lastMeterUiUpdate = now;
+        notifyListeners();
+      }
     }));
 
     // interrupted → stop streamer (mirrors stopAudioStreamer in useLiveAPI)
@@ -203,7 +209,6 @@ class AymaAudioService extends ChangeNotifier {
         _userTalking = true;
         _notifyMetersThrottled();
       }
-      _lastUserVoiceAt = DateTime.now();
       _talkHoldoffTimer?.cancel();
       _talkHoldoffTimer = Timer(const Duration(milliseconds: 1200), () {
         _userTalking = false;
@@ -285,16 +290,6 @@ class AymaAudioService extends ChangeNotifier {
 
   void _sendAudioToClient(Uint8List pcm) {
     if (!_client.isConnected || _state == SessionState.disconnected || _muted) return;
-
-    final speaking = _state == SessionState.speaking;
-    final recentVoice =
-        DateTime.now().difference(_lastUserVoiceAt) < const Duration(milliseconds: 900);
-    if (speaking) {
-      if (!_userTalking && !recentVoice) return;
-      final likelyEcho = _outputVolume > 0.07 && _rawInputVolume < 0.09;
-      if (likelyEcho) return;
-    }
-
     _client.sendRealtimeAudio(pcm);
   }
 
@@ -874,7 +869,8 @@ class AymaAudioService extends ChangeNotifier {
             'rate': 24000,
           },
           'turn_detection': {
-            'type': 'server_vad',
+            'type': 'semantic_vad',
+            'eagerness': 'medium',
             'interrupt_response': true,
             'create_response': true,
           },

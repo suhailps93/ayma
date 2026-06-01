@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:collection';
 
 import 'package:cloud_firestore/cloud_firestore.dart';
@@ -206,25 +207,55 @@ class FirestoreService {
     });
   }
 
-  static Stream<List<Map<String, dynamic>>> conversationStream(
-      String otherUserId) {
-    return _db
+  static Stream<List<Map<String, dynamic>>> conversationStream(String otherUserId) {
+    final uid = _uid;
+    final q1 = _db
         .collection('messages')
-        .orderBy('created_at', descending: true)
-        .limit(300)
-        .snapshots()
-        .map((snap) => snap.docs.map((d) => d.data()..['id'] = d.id).where((m) {
-              final from = (m['from_user_id'] as String?) ?? '';
-              final to = (m['to_user_id'] as String?) ?? '';
-              final betweenMeAndOther = (from == _uid && to == otherUserId) ||
-                  (from == otherUserId && to == _uid);
-              return betweenMeAndOther;
-            }).toList()
-              ..sort((a, b) {
-                final ta = (a['created_at'] as String?) ?? '';
-                final tb = (b['created_at'] as String?) ?? '';
-                return ta.compareTo(tb);
-              }));
+        .where('from_user_id', isEqualTo: uid)
+        .where('to_user_id', isEqualTo: otherUserId)
+        .limit(150)
+        .snapshots();
+    final q2 = _db
+        .collection('messages')
+        .where('from_user_id', isEqualTo: otherUserId)
+        .where('to_user_id', isEqualTo: uid)
+        .limit(150)
+        .snapshots();
+
+    QuerySnapshot<Map<String, dynamic>>? snap1;
+    QuerySnapshot<Map<String, dynamic>>? snap2;
+    StreamSubscription? sub1;
+    StreamSubscription? sub2;
+    late StreamController<List<Map<String, dynamic>>> ctrl;
+
+    void emit() {
+      if (snap1 == null || snap2 == null) return;
+      final seen = <String>{};
+      final combined = <Map<String, dynamic>>[];
+      for (final doc in [...snap1!.docs, ...snap2!.docs]) {
+        if (seen.add(doc.id)) {
+          combined.add(doc.data()..['id'] = doc.id);
+        }
+      }
+      combined.sort((a, b) {
+        final ta = (a['created_at'] as String?) ?? '';
+        final tb = (b['created_at'] as String?) ?? '';
+        return ta.compareTo(tb);
+      });
+      ctrl.add(combined);
+    }
+
+    ctrl = StreamController<List<Map<String, dynamic>>>.broadcast(
+      onListen: () {
+        sub1 = q1.listen((s) { snap1 = s; emit(); }, onError: ctrl.addError);
+        sub2 = q2.listen((s) { snap2 = s; emit(); }, onError: ctrl.addError);
+      },
+      onCancel: () {
+        sub1?.cancel();
+        sub2?.cancel();
+      },
+    );
+    return ctrl.stream;
   }
 
   static Map<String, String> deriveVoiceDefaults({
@@ -638,164 +669,740 @@ class FirestoreService {
 
   // ── Questions ─────────────────────────────────────────────────────────────
 
-  static const List<Map<String, dynamic>> _standardQuestions = [
-    // Required — must collect early
+  /// Northstar 45-question profile system.
+  static const List<Map<String, dynamic>> _northstarQuestions = [
+    // Phase 1 — required core
     {
-      'key': 'name',
-      'text': "What's their name",
+      'id': 'age',
+      'text': 'What is your age?',
+      'section': 'basic_identity',
+      'required': true,
+      'sensitive_flag': false,
+      'priority': 'high',
+      'phase': 1,
       'category': 'required',
-      'order': 1
+      'order': 1,
     },
     {
-      'key': 'age',
-      'text': 'How old they are',
+      'id': 'location_city',
+      'text': 'Which city do you currently live in?',
+      'section': 'location_mobility',
+      'required': true,
+      'sensitive_flag': false,
+      'priority': 'high',
+      'phase': 1,
       'category': 'required',
-      'order': 2
+      'order': 3,
     },
     {
-      'key': 'gender',
-      'text': 'Their gender',
+      'id': 'max_distance_km',
+      'text': 'What is the maximum distance you are comfortable for a match?',
+      'section': 'location_mobility',
+      'required': true,
+      'sensitive_flag': false,
+      'priority': 'high',
+      'phase': 1,
       'category': 'required',
-      'order': 3
+      'order': 4,
     },
     {
-      'key': 'interested_in',
-      'text': "Who they're interested in (men, women, everyone)",
+      'id': 'willing_to_relocate',
+      'text': 'Are you willing to relocate after commitment/marriage?',
+      'section': 'location_mobility',
+      'required': true,
+      'sensitive_flag': false,
+      'priority': 'high',
+      'phase': 1,
       'category': 'required',
-      'order': 4
+      'order': 5,
     },
     {
-      'key': 'location',
-      'text': "Roughly where they're based",
+      'id': 'height_cm',
+      'text': 'What is your height (cm)?',
+      'section': 'physical_lifestyle',
+      'required': true,
+      'sensitive_flag': false,
+      'priority': 'high',
+      'phase': 1,
       'category': 'required',
-      'order': 5
+      'order': 6,
     },
     {
-      'key': 'relationship_goal',
-      'text': 'What kind of relationship they want (casual, serious, marriage)',
+      'id': 'education_level',
+      'text': 'What is your highest education level?',
+      'section': 'education_career',
+      'required': true,
+      'sensitive_flag': false,
+      'priority': 'high',
+      'phase': 1,
       'category': 'required',
-      'order': 6
-    },
-    // Deeper — weave in naturally
-    {
-      'key': 'career',
-      'text': 'What they do for work or study',
-      'category': 'deeper',
-      'order': 1
+      'order': 7,
     },
     {
-      'key': 'lifestyle',
-      'text': 'How they spend their time — social life, hobbies, routines',
-      'category': 'deeper',
-      'order': 2
+      'id': 'occupation',
+      'text': 'What is your current occupation?',
+      'section': 'education_career',
+      'required': true,
+      'sensitive_flag': false,
+      'priority': 'high',
+      'phase': 1,
+      'category': 'required',
+      'order': 8,
     },
     {
-      'key': 'values',
-      'text': 'What matters most to them in life',
-      'category': 'deeper',
-      'order': 3
+      'id': 'relationship_intent',
+      'text':
+          'Describe your relationship intent in your own words (hookups, casual, long-term, marriage, etc).',
+      'section': 'intent_readiness',
+      'required': true,
+      'sensitive_flag': false,
+      'priority': 'high',
+      'phase': 1,
+      'category': 'required',
+      'order': 9,
     },
     {
-      'key': 'family_views',
-      'text': 'How they feel about family and kids',
-      'category': 'deeper',
-      'order': 4
+      'id': 'timeline_for_commitment',
+      'text': 'When do you want to commit?',
+      'section': 'intent_readiness',
+      'required': true,
+      'sensitive_flag': false,
+      'priority': 'high',
+      'phase': 1,
+      'category': 'required',
+      'order': 10,
     },
     {
-      'key': 'deal_breakers',
-      'text': 'What they absolutely cannot compromise on in a partner',
-      'category': 'deeper',
-      'order': 5
+      'id': 'marital_status',
+      'text': 'What is your current marital status?',
+      'section': 'intent_readiness',
+      'required': true,
+      'sensitive_flag': false,
+      'priority': 'high',
+      'phase': 1,
+      'category': 'required',
+      'order': 11,
     },
     {
-      'key': 'past_relationships',
-      'text': 'What their relationship history is like (ask gently)',
-      'category': 'deeper',
-      'order': 6
+      'id': 'has_children',
+      'text': 'Do you have children?',
+      'section': 'children_parenting',
+      'required': true,
+      'sensitive_flag': false,
+      'priority': 'high',
+      'phase': 1,
+      'category': 'required',
+      'order': 12,
     },
     {
-      'key': 'love_language',
-      'text': 'How they show and receive affection',
-      'category': 'deeper',
-      'order': 7
+      'id': 'wants_children',
+      'text': 'Do you want children in the future?',
+      'section': 'children_parenting',
+      'required': true,
+      'sensitive_flag': false,
+      'priority': 'high',
+      'phase': 1,
+      'category': 'required',
+      'order': 13,
     },
     {
-      'key': 'fun_quirks',
-      'text': 'Something surprising or unique about them',
-      'category': 'deeper',
-      'order': 8
+      'id': 'smoking_status',
+      'text': 'Do you smoke?',
+      'section': 'physical_lifestyle',
+      'required': true,
+      'sensitive_flag': false,
+      'priority': 'high',
+      'phase': 1,
+      'category': 'required',
+      'order': 14,
     },
     {
-      'key': 'ideal_date',
-      'text': 'What their perfect date or evening looks like',
-      'category': 'deeper',
-      'order': 9
+      'id': 'alcohol_status',
+      'text': 'Do you drink alcohol?',
+      'section': 'physical_lifestyle',
+      'required': true,
+      'sensitive_flag': false,
+      'priority': 'high',
+      'phase': 1,
+      'category': 'required',
+      'order': 15,
     },
     {
-      'key': 'green_flags',
-      'text': 'What immediately draws them to someone',
-      'category': 'deeper',
-      'order': 10
+      'id': 'family_type',
+      'text': 'What family setup do you prefer after marriage?',
+      'section': 'family_background',
+      'required': true,
+      'sensitive_flag': false,
+      'priority': 'high',
+      'phase': 1,
+      'category': 'required',
+      'order': 16,
     },
     {
-      'key': 'conflict_style',
-      'text': 'How they handle disagreements',
-      'category': 'deeper',
-      'order': 11
-    },
-    {
-      'key': 'social_energy',
-      'text': "Whether they're an introvert, extrovert, or in between",
-      'category': 'deeper',
-      'order': 12
-    },
-    {
-      'key': 'humor_style',
-      'text': 'What kind of humor they enjoy',
-      'category': 'deeper',
-      'order': 13
-    },
-    {
-      'key': 'life_ambition',
-      'text': 'Their big-picture goals for the next few years',
-      'category': 'deeper',
-      'order': 14
-    },
-    // Matching prefs
-    {
-      'key': 'match_age_range',
-      'text': 'What age range they are open to',
+      'id': 'partner_non_negotiables',
+      'text': 'What are your non-negotiables in a partner?',
+      'section': 'partner_preferences',
+      'required': true,
+      'sensitive_flag': false,
+      'priority': 'high',
+      'phase': 1,
       'category': 'matching_prefs',
-      'order': 1
+      'order': 1,
     },
     {
-      'key': 'match_location',
-      'text': 'Whether location matters to them in a match',
+      'id': 'partner_must_haves',
+      'text': 'List your top 5 must-haves in a partner.',
+      'section': 'partner_preferences',
+      'required': true,
+      'sensitive_flag': false,
+      'priority': 'high',
+      'phase': 1,
       'category': 'matching_prefs',
-      'order': 2
+      'order': 2,
     },
     {
-      'key': 'match_dealbreakers',
-      'text': "Anything that's a hard no in a potential match",
+      'id': 'preferred_age_range',
+      'text': 'What age range do you prefer in a partner?',
+      'section': 'partner_preferences',
+      'required': true,
+      'sensitive_flag': false,
+      'priority': 'high',
+      'phase': 1,
       'category': 'matching_prefs',
-      'order': 3
+      'order': 3,
+    },
+    // Phase 2 — optional structured
+    {
+      'id': 'weight_kg',
+      'text': 'What is your weight (kg)?',
+      'section': 'physical_lifestyle',
+      'required': false,
+      'sensitive_flag': false,
+      'priority': 'medium',
+      'phase': 2,
+      'category': 'deeper',
+      'order': 8,
+    },
+    {
+      'id': 'career_stage',
+      'text': 'Which best describes your career stage?',
+      'section': 'education_career',
+      'required': true,
+      'sensitive_flag': false,
+      'priority': 'medium',
+      'phase': 2,
+      'category': 'deeper',
+      'order': 1,
+    },
+    {
+      'id': 'diet',
+      'text': 'What is your diet preference?',
+      'section': 'physical_lifestyle',
+      'required': true,
+      'sensitive_flag': false,
+      'priority': 'medium',
+      'phase': 2,
+      'category': 'deeper',
+      'order': 2,
+    },
+    {
+      'id': 'family_values',
+      'text': 'Describe the family values that matter most to you.',
+      'section': 'family_background',
+      'required': false,
+      'sensitive_flag': false,
+      'priority': 'medium',
+      'phase': 2,
+      'category': 'deeper',
+      'order': 7,
+    },
+    {
+      'id': 'communication_style',
+      'text': 'How do you prefer to communicate in a relationship?',
+      'section': 'communication_conflict',
+      'required': true,
+      'sensitive_flag': false,
+      'priority': 'medium',
+      'phase': 2,
+      'category': 'deeper',
+      'order': 3,
+    },
+    {
+      'id': 'conflict_style',
+      'text': 'How do you typically handle conflict?',
+      'section': 'communication_conflict',
+      'required': true,
+      'sensitive_flag': false,
+      'priority': 'medium',
+      'phase': 2,
+      'category': 'deeper',
+      'order': 4,
+    },
+    {
+      'id': 'preferred_height_range_cm',
+      'text': 'What height range do you prefer in a partner (cm)?',
+      'section': 'partner_preferences',
+      'required': false,
+      'sensitive_flag': false,
+      'priority': 'medium',
+      'phase': 2,
+      'category': 'matching_prefs',
+      'order': 4,
+    },
+    {
+      'id': 'bio_relationship_offer',
+      'text': 'What do you offer in a relationship?',
+      'section': 'depth_authenticity',
+      'required': true,
+      'sensitive_flag': false,
+      'priority': 'medium',
+      'phase': 2,
+      'category': 'deeper',
+      'order': 5,
+    },
+    {
+      'id': 'bio_relationship_need',
+      'text': 'What do you need most from a partner?',
+      'section': 'depth_authenticity',
+      'required': true,
+      'sensitive_flag': false,
+      'priority': 'medium',
+      'phase': 2,
+      'category': 'deeper',
+      'order': 6,
+    },
+    {
+      'id': 'ai_profile_summary',
+      'text': 'AI-generated profile summary from answered fields.',
+      'section': 'ai_profile_summary',
+      'required': true,
+      'sensitive_flag': false,
+      'priority': 'high',
+      'phase': 2,
+      'category': 'deeper',
+      'order': 21,
+    },
+    {
+      'id': 'past_relationship_learnings',
+      'text': 'What did you learn from past relationships?',
+      'section': 'relationship_history',
+      'required': false,
+      'sensitive_flag': true,
+      'priority': 'medium',
+      'phase': 2,
+      'category': 'deeper',
+      'order': 13,
+    },
+    {
+      'id': 'friends_social_style',
+      'text': 'How active is your social/friends life?',
+      'section': 'social_life',
+      'required': false,
+      'sensitive_flag': false,
+      'priority': 'low',
+      'phase': 2,
+      'category': 'deeper',
+      'order': 14,
+    },
+    {
+      'id': 'has_pets',
+      'text': 'Do you have pets?',
+      'section': 'social_life',
+      'required': false,
+      'sensitive_flag': false,
+      'priority': 'low',
+      'phase': 2,
+      'category': 'deeper',
+      'order': 15,
+    },
+    {
+      'id': 'pet_details',
+      'text': 'What pets do you have?',
+      'section': 'social_life',
+      'required': false,
+      'sensitive_flag': false,
+      'priority': 'low',
+      'phase': 2,
+      'category': 'deeper',
+      'order': 16,
+    },
+    // Phase 3 — sensitive opt-in
+    {
+      'id': 'gender_identity',
+      'text': 'What is your gender identity?',
+      'section': 'basic_identity',
+      'required': true,
+      'sensitive_flag': true,
+      'priority': 'high',
+      'phase': 3,
+      'category': 'required',
+      'order': 2,
+    },
+    {
+      'id': 'religion',
+      'text': 'What is your religion?',
+      'section': 'values_religion_culture',
+      'required': false,
+      'sensitive_flag': true,
+      'priority': 'high',
+      'phase': 3,
+      'category': 'deeper',
+      'order': 9,
+    },
+    {
+      'id': 'religious_practice_level',
+      'text': 'How actively do you practice your religion?',
+      'section': 'values_religion_culture',
+      'required': false,
+      'sensitive_flag': true,
+      'priority': 'medium',
+      'phase': 3,
+      'category': 'deeper',
+      'order': 10,
+    },
+    {
+      'id': 'income_band',
+      'text': 'What is your approximate income band?',
+      'section': 'financial_compatibility',
+      'required': false,
+      'sensitive_flag': true,
+      'priority': 'medium',
+      'phase': 3,
+      'category': 'deeper',
+      'order': 11,
+    },
+    {
+      'id': 'race',
+      'text': 'What is your race/ethnicity?',
+      'section': 'sensitive_attributes',
+      'required': false,
+      'sensitive_flag': true,
+      'priority': 'medium',
+      'phase': 3,
+      'category': 'deeper',
+      'order': 12,
+    },
+    {
+      'id': 'caste',
+      'text': 'Do you want to share your caste?',
+      'section': 'sensitive_attributes',
+      'required': false,
+      'sensitive_flag': true,
+      'priority': 'low',
+      'phase': 3,
+      'category': 'deeper',
+      'order': 17,
+    },
+    {
+      'id': 'sub_caste',
+      'text': 'Do you want to share your sub-caste/community details?',
+      'section': 'sensitive_attributes',
+      'required': false,
+      'sensitive_flag': true,
+      'priority': 'low',
+      'phase': 3,
+      'category': 'deeper',
+      'order': 18,
+    },
+    {
+      'id': 'skin_tone',
+      'text': 'Do you want to share your skin tone?',
+      'section': 'sensitive_attributes',
+      'required': false,
+      'sensitive_flag': true,
+      'priority': 'low',
+      'phase': 3,
+      'category': 'deeper',
+      'order': 19,
+    },
+    {
+      'id': 'past_relationship_count',
+      'text': 'How many serious past relationships have you had?',
+      'section': 'relationship_history',
+      'required': false,
+      'sensitive_flag': true,
+      'priority': 'low',
+      'phase': 3,
+      'category': 'deeper',
+      'order': 20,
+    },
+    {
+      'id': 'preferred_religion',
+      'text': 'Do you have a religion preference for your partner?',
+      'section': 'partner_preferences_sensitive',
+      'required': false,
+      'sensitive_flag': true,
+      'priority': 'medium',
+      'phase': 3,
+      'category': 'matching_prefs',
+      'order': 5,
+    },
+    {
+      'id': 'preferred_caste',
+      'text': 'Do you have a caste preference for your partner?',
+      'section': 'partner_preferences_sensitive',
+      'required': false,
+      'sensitive_flag': true,
+      'priority': 'low',
+      'phase': 3,
+      'category': 'matching_prefs',
+      'order': 6,
+    },
+    {
+      'id': 'preferred_sub_caste',
+      'text': 'Do you have a sub-caste/community preference for your partner?',
+      'section': 'partner_preferences_sensitive',
+      'required': false,
+      'sensitive_flag': true,
+      'priority': 'low',
+      'phase': 3,
+      'category': 'matching_prefs',
+      'order': 7,
+    },
+    {
+      'id': 'preferred_race_ethnicity',
+      'text': 'Do you have a race/ethnicity preference for your partner?',
+      'section': 'partner_preferences_sensitive',
+      'required': false,
+      'sensitive_flag': true,
+      'priority': 'low',
+      'phase': 3,
+      'category': 'matching_prefs',
+      'order': 8,
     },
   ];
+
+  /// Backward-compat alias.
+  // ignore: unused_field
+  static const List<Map<String, dynamic>> _standardQuestions =
+      _northstarQuestions;
+
+  /// Maps each question id to its scoring bucket.
+  static const Map<String, String> _questionScoringBucket = {
+    // core_matchability
+    'age': 'core_matchability',
+    'gender_identity': 'core_matchability',
+    'location_city': 'core_matchability',
+    'max_distance_km': 'core_matchability',
+    'willing_to_relocate': 'core_matchability',
+    'height_cm': 'core_matchability',
+    'education_level': 'core_matchability',
+    'occupation': 'core_matchability',
+    'career_stage': 'core_matchability',
+    'income_band': 'core_matchability',
+    'has_children': 'core_matchability',
+    'wants_children': 'core_matchability',
+    // intent_and_readiness
+    'relationship_intent': 'intent_and_readiness',
+    'timeline_for_commitment': 'intent_and_readiness',
+    'marital_status': 'intent_and_readiness',
+    // lifestyle_compatibility
+    'weight_kg': 'lifestyle_compatibility',
+    'diet': 'lifestyle_compatibility',
+    'smoking_status': 'lifestyle_compatibility',
+    'alcohol_status': 'lifestyle_compatibility',
+    'communication_style': 'lifestyle_compatibility',
+    'conflict_style': 'lifestyle_compatibility',
+    'friends_social_style': 'lifestyle_compatibility',
+    'has_pets': 'lifestyle_compatibility',
+    'pet_details': 'lifestyle_compatibility',
+    // values_and_family_alignment
+    'religion': 'values_and_family_alignment',
+    'religious_practice_level': 'values_and_family_alignment',
+    'skin_tone': 'values_and_family_alignment',
+    'race': 'values_and_family_alignment',
+    'caste': 'values_and_family_alignment',
+    'sub_caste': 'values_and_family_alignment',
+    'family_type': 'values_and_family_alignment',
+    'family_values': 'values_and_family_alignment',
+    'past_relationship_count': 'values_and_family_alignment',
+    'past_relationship_learnings': 'values_and_family_alignment',
+    // depth_and_authenticity
+    'partner_non_negotiables': 'depth_and_authenticity',
+    'partner_must_haves': 'depth_and_authenticity',
+    'preferred_age_range': 'depth_and_authenticity',
+    'preferred_height_range_cm': 'depth_and_authenticity',
+    'preferred_religion': 'depth_and_authenticity',
+    'preferred_caste': 'depth_and_authenticity',
+    'preferred_sub_caste': 'depth_and_authenticity',
+    'preferred_race_ethnicity': 'depth_and_authenticity',
+    'bio_relationship_offer': 'depth_and_authenticity',
+    'bio_relationship_need': 'depth_and_authenticity',
+    'ai_profile_summary': 'depth_and_authenticity',
+  };
+
+  // ── Profile Answers ────────────────────────────────────────────────────────
+
+  /// Reads the user's profile_answers map from their user doc.
+  static Future<Map<String, dynamic>> getProfileAnswers() async {
+    try {
+      final doc = await _db.collection('users').doc(_uid).get();
+      if (!doc.exists) return {};
+      final data = doc.data() ?? {};
+      final answers = data['profile_answers'];
+      if (answers is Map<String, dynamic>) return answers;
+      return {};
+    } catch (_) {
+      return {};
+    }
+  }
+
+  /// Merges a single answer into users/{uid}.profile_answers.{questionId}.
+  static Future<void> saveProfileAnswer(
+      String questionId, dynamic value) async {
+    await _db.collection('users').doc(_uid).set({
+      'profile_answers': {questionId: value},
+    }, SetOptions(merge: true));
+  }
+
+  /// Weighted completeness score 0–100.
+  /// Checks both profile_answers and legacy profileData fields.
+  static double computeProfileCompleteness(
+    Map<String, dynamic> answers,
+    Map<String, dynamic> profileData,
+  ) {
+    const bucketWeights = <String, double>{
+      'core_matchability': 40.0,
+      'intent_and_readiness': 20.0,
+      'lifestyle_compatibility': 15.0,
+      'values_and_family_alignment': 15.0,
+      'depth_and_authenticity': 10.0,
+    };
+
+    // Legacy field mappings: questionId → profileData key
+    const legacyMap = <String, String>{
+      'age': 'age',
+      'gender_identity': 'gender',
+      'location_city': 'location_region',
+      'occupation': 'occupation',
+      'height_cm': 'height_cm',
+    };
+
+    // Group questions by bucket
+    final bucketQuestions = <String, List<Map<String, dynamic>>>{};
+    for (final q in _northstarQuestions) {
+      final bucket =
+          _questionScoringBucket[q['id'] as String] ?? 'depth_and_authenticity';
+      bucketQuestions.putIfAbsent(bucket, () => []).add(q);
+    }
+
+    double total = 0.0;
+
+    for (final entry in bucketWeights.entries) {
+      final bucketName = entry.key;
+      final weight = entry.value;
+      final questions = bucketQuestions[bucketName] ?? [];
+      if (questions.isEmpty) continue;
+
+      double achieved = 0.0;
+      double maxPossible = 0.0;
+
+      for (final q in questions) {
+        final id = q['id'] as String;
+        final isRequired = (q['required'] as bool?) ?? false;
+        final questionMax = isRequired ? 1.0 : 0.6;
+        maxPossible += questionMax;
+
+        // Check answers map first, then legacy profileData
+        dynamic val = answers[id];
+        if (_isEmptyValue(val)) {
+          final legacyKey = legacyMap[id];
+          if (legacyKey != null) {
+            val = profileData[legacyKey];
+          }
+        }
+
+        if (_isEmptyValue(val)) {
+          // unanswered — 0 contribution
+        } else if (val == 'prefer_not_to_say') {
+          achieved += 0.2;
+        } else {
+          achieved += questionMax;
+        }
+      }
+
+      if (maxPossible > 0) {
+        total += (achieved / maxPossible) * weight;
+      }
+    }
+
+    return total.clamp(0.0, 100.0);
+  }
+
+  static bool _isEmptyValue(dynamic val) {
+    if (val == null) return true;
+    if (val is String && val.trim().isEmpty) return true;
+    return false;
+  }
+
+  /// Reads answers and user doc, returns completeness score 0–100.
+  static Future<double> getProfileCompleteness() async {
+    final doc = await _db.collection('users').doc(_uid).get();
+    final profileData = doc.exists ? (doc.data() ?? {}) : <String, dynamic>{};
+    final answers = profileData['profile_answers'];
+    final answersMap =
+        (answers is Map<String, dynamic>) ? answers : <String, dynamic>{};
+    return computeProfileCompleteness(answersMap, profileData);
+  }
+
+  // ── Questions ─────────────────────────────────────────────────────────────
 
   // Call once after onboarding. alreadyAnswered keys are marked answered immediately.
   static Future<void> initializeQuestions(
       {Set<String> alreadyAnswered = const {}}) async {
     final ref = _db.collection('users').doc(_uid).collection('questions');
-    final existing = await ref.limit(1).get();
-    if (existing.docs.isNotEmpty) return; // already seeded
+    final existing = await ref.get();
 
+    bool needsReseed = existing.docs.isEmpty;
+    if (!needsReseed && existing.docs.length < 20) {
+      needsReseed = true;
+    }
+    if (!needsReseed) {
+      // Check whether any existing doc has a key matching a northstar id
+      final northstarIds =
+          _northstarQuestions.map((q) => q['id'] as String).toSet();
+      final hasNorthstar = existing.docs.any((d) {
+        final id = d.data()['id'] as String?;
+        return id != null && northstarIds.contains(id);
+      });
+      if (!hasNorthstar) needsReseed = true;
+    }
+    if (!needsReseed) {
+      // Check whether existing docs are missing category/order fields
+      final missingFields = existing.docs.any((d) {
+        final data = d.data();
+        return data['category'] == null || data['order'] == null;
+      });
+      if (missingFields) needsReseed = true;
+    }
+
+    if (!needsReseed) return;
+
+    // Delete all existing questions
+    final deleteBatch = _db.batch();
+    for (final doc in existing.docs) {
+      deleteBatch.delete(doc.reference);
+    }
+    if (existing.docs.isNotEmpty) await deleteBatch.commit();
+
+    // Seed northstar questions
     final batch = _db.batch();
-    for (final q in _standardQuestions) {
-      final key = q['key'] as String;
-      final answered = alreadyAnswered.contains(key);
+    for (final q in _northstarQuestions) {
+      final id = q['id'] as String;
+      final answered = alreadyAnswered.contains(id);
       batch.set(ref.doc(), {
-        ...q,
+        'id': id,
+        'key': id,
+        'text': q['text'],
+        'section': q['section'],
+        'required': q['required'],
+        'sensitive_flag': q['sensitive_flag'],
+        'priority': q['priority'],
+        'phase': q['phase'],
+        'category': q['category'],
+        'order': q['order'],
         'answered': answered,
+        'answered_value': null,
         'is_followup': false,
         'created_at': FieldValue.serverTimestamp(),
         if (answered) 'answered_at': FieldValue.serverTimestamp(),
@@ -808,10 +1415,15 @@ class FirestoreService {
       {String sessionId = ''}) async {
     await _db.collection('users').doc(_uid).collection('questions').add({
       'key': 'followup_${DateTime.now().millisecondsSinceEpoch}',
+      'id': 'followup_${DateTime.now().millisecondsSinceEpoch}',
       'text': question,
-      'category': 'followup',
-      'order': 99,
+      'section': 'followup',
+      'phase': 99,
+      'priority': 'low',
+      'required': false,
+      'sensitive_flag': false,
       'answered': false,
+      'answered_value': null,
       'is_followup': true,
       'session_id': sessionId,
       'created_at': FieldValue.serverTimestamp(),
@@ -826,20 +1438,41 @@ class FirestoreService {
         .where('answered', isEqualTo: false)
         .get();
     final docs = snap.docs.map((d) => d.data()..['id'] = d.id).toList();
-    // Sort: required first, then deeper, then matching_prefs, then followup
-    const order = {
-      'required': 0,
-      'deeper': 1,
-      'matching_prefs': 2,
-      'followup': 3
-    };
+
+    const priorityOrder = {'high': 0, 'medium': 1, 'low': 2};
+
     docs.sort((a, b) {
-      final catA = order[a['category']] ?? 4;
-      final catB = order[b['category']] ?? 4;
-      if (catA != catB) return catA.compareTo(catB);
+      // Phase first (1 before 2 before 3)
+      final phaseA = (a['phase'] as int?) ?? 99;
+      final phaseB = (b['phase'] as int?) ?? 99;
+      if (phaseA != phaseB) return phaseA.compareTo(phaseB);
+
+      // Then priority
+      final prioA = priorityOrder[(a['priority'] as String?) ?? 'low'] ?? 3;
+      final prioB = priorityOrder[(b['priority'] as String?) ?? 'low'] ?? 3;
+      if (prioA != prioB) return prioA.compareTo(prioB);
+
+      // Then order (legacy field, fallback 0)
       return ((a['order'] as int?) ?? 0).compareTo((b['order'] as int?) ?? 0);
     });
     return docs;
+  }
+
+  /// Marks a question answered in the questions sub-collection and saves
+  /// the value to profile_answers.
+  static Future<void> markQuestionAnswered(
+      String questionId, dynamic value) async {
+    final ref = _db.collection('users').doc(_uid).collection('questions');
+    final snap =
+        await ref.where('id', isEqualTo: questionId).limit(1).get();
+    if (snap.docs.isNotEmpty) {
+      await snap.docs.first.reference.update({
+        'answered': true,
+        'answered_value': value,
+        'answered_at': FieldValue.serverTimestamp(),
+      });
+    }
+    await saveProfileAnswer(questionId, value);
   }
 
   // ── Media ──────────────────────────────────────────────────────────────────

@@ -82,7 +82,7 @@ class _ProfileScreenState extends ConsumerState<ProfileScreen>
   @override
   void initState() {
     super.initState();
-    _tabController = TabController(length: 3, vsync: this);
+    _tabController = TabController(length: 2, vsync: this);
     _tabController.addListener(() {
       if (mounted) setState(() {});
     });
@@ -332,7 +332,6 @@ class _ProfileScreenState extends ConsumerState<ProfileScreen>
                             _reorderPhotos(profile, ordered),
                       ),
                       _YourStoryPane(profile: profile),
-                      _StoryWikiPane(),
                     ],
                   ),
                 ),
@@ -376,7 +375,6 @@ class _TopTabs extends StatelessWidget {
         tabs: const [
           Tab(text: 'Public'),
           Tab(text: 'Private'),
-          Tab(text: 'Story'),
         ],
       ),
     );
@@ -700,33 +698,10 @@ class _PublicTabWithCompleteness extends ConsumerWidget {
   final ValueChanged<String> onDeletePhoto;
   final ValueChanged<List<String>> onReorderPhotos;
 
-  double _completeness(Map<String, String> insights, List<String> photos) {
-    double pct = 0;
-    if (profile.displayName.isNotEmpty) pct += 5;
-    if (profile.age != null) pct += 10;
-    if ((profile.gender ?? '').isNotEmpty) pct += 10;
-    if ((profile.locationRegion ?? '').isNotEmpty) pct += 10;
-    if ((profile.profilePublic ?? '').trim().isNotEmpty) pct += 15;
-    if ((insights['about_me'] ?? '').trim().isNotEmpty) pct += 15;
-    if ((insights['preferences'] ?? '').trim().isNotEmpty) pct += 15;
-    if ((insights['context'] ?? '').trim().isNotEmpty) pct += 10;
-    if (photos.isNotEmpty) pct += 10;
-    return pct;
-  }
-
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    final insightsAsync = ref.watch(insightsProvider);
-    final publicAsync = ref.watch(publicProfileProvider(profile.id));
-
-    final insights = insightsAsync.valueOrNull ?? const <String, String>{};
-    final pub = publicAsync.valueOrNull ?? const <String, dynamic>{};
-    final photos = ((pub['photos'] as List?) ?? const [])
-        .whereType<String>()
-        .where((u) => u.isNotEmpty)
-        .toList();
-
-    final pct = _completeness(insights, photos).round();
+    final completenessAsync = ref.watch(profileCompletenessProvider);
+    final pct = (completenessAsync.valueOrNull ?? 0.0).round();
 
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
@@ -765,139 +740,6 @@ class _PublicTabWithCompleteness extends ConsumerWidget {
           ),
         ),
       ],
-    );
-  }
-}
-
-// ─── Tab 2: Story (wiki insights) ────────────────────────────────────────────
-
-class _StoryWikiPane extends ConsumerWidget {
-  const _StoryWikiPane();
-
-  static const _sections = [
-    _WikiSection(
-      key: 'about_me',
-      title: 'About You',
-      icon: Icons.person_outline_rounded,
-    ),
-    _WikiSection(
-      key: 'preferences',
-      title: 'Looking For',
-      icon: Icons.favorite_border_rounded,
-    ),
-    _WikiSection(
-      key: 'context',
-      title: 'Right Now',
-      icon: Icons.wb_sunny_outlined,
-    ),
-    _WikiSection(
-      key: 'media',
-      title: 'Your Photos',
-      icon: Icons.photo_library_outlined,
-    ),
-  ];
-
-  @override
-  Widget build(BuildContext context, WidgetRef ref) {
-    final async = ref.watch(insightsProvider);
-
-    return async.when(
-      loading: () => Center(
-        child: CircularProgressIndicator(
-            strokeWidth: 1.5, color: context.ac.accent),
-      ),
-      error: (e, _) => Center(
-        child: Text('Error: $e', style: TextStyle(color: context.ac.fgMute)),
-      ),
-      data: (data) => ListView.separated(
-        padding: const EdgeInsets.fromLTRB(16, 12, 16, 32),
-        itemCount: _sections.length,
-        separatorBuilder: (_, __) => const SizedBox(height: 12),
-        itemBuilder: (_, i) {
-          final section = _sections[i];
-          final content = data[section.key] ?? '';
-          return _WikiSectionCard(section: section, content: content);
-        },
-      ),
-    );
-  }
-}
-
-class _WikiSection {
-  final String key;
-  final String title;
-  final IconData icon;
-  const _WikiSection({required this.key, required this.title, required this.icon});
-}
-
-class _WikiSectionCard extends StatelessWidget {
-  const _WikiSectionCard({required this.section, required this.content});
-  final _WikiSection section;
-  final String content;
-
-  @override
-  Widget build(BuildContext context) {
-    final hasContent = content.trim().isNotEmpty;
-    return Container(
-      padding: const EdgeInsets.all(16),
-      decoration: BoxDecoration(
-        color: const Color(0xFF14110F),
-        borderRadius: BorderRadius.circular(16),
-        border: Border.all(color: const Color(0xFF282118), width: 0.5),
-      ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Row(
-            children: [
-              Container(
-                width: 28,
-                height: 28,
-                decoration: BoxDecoration(
-                  color: context.ac.accent.withValues(alpha: 0.08),
-                  borderRadius: BorderRadius.circular(7),
-                  border: Border.all(
-                    color: context.ac.accent.withValues(alpha: 0.2),
-                    width: 0.5,
-                  ),
-                ),
-                child: Icon(section.icon, size: 14, color: context.ac.accent),
-              ),
-              const SizedBox(width: 10),
-              Text(
-                section.title,
-                style: TextStyle(
-                  color: context.ac.fg,
-                  fontSize: 13,
-                  fontWeight: FontWeight.w600,
-                  letterSpacing: 0.3,
-                ),
-              ),
-            ],
-          ),
-          const SizedBox(height: 12),
-          Container(height: 0.5, color: context.ac.lineSoft),
-          const SizedBox(height: 12),
-          hasContent
-              ? SelectableText(
-                  content.trim(),
-                  style: TextStyle(
-                    color: context.ac.fg,
-                    fontSize: 13,
-                    height: 1.65,
-                  ),
-                )
-              : Text(
-                  'Talk to Ayma to fill this in.',
-                  style: TextStyle(
-                    color: context.ac.fgMute,
-                    fontSize: 12,
-                    height: 1.6,
-                    fontStyle: FontStyle.italic,
-                  ),
-                ),
-        ],
-      ),
     );
   }
 }

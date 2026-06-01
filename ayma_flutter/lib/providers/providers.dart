@@ -147,6 +147,22 @@ final insightsProvider = FutureProvider<Map<String, String>>((ref) async {
   return FirestoreService.getInsights();
 });
 
+// ── Profile Answers ───────────────────────────────────────────────────────────
+
+final profileAnswersProvider = FutureProvider<Map<String, dynamic>>((ref) async {
+  final user = ref.watch(currentUserProvider);
+  if (user == null) return {};
+  return FirestoreService.getProfileAnswers();
+});
+
+// ── Profile Completeness ──────────────────────────────────────────────────────
+
+final profileCompletenessProvider = FutureProvider<double>((ref) async {
+  final user = ref.watch(currentUserProvider);
+  if (user == null) return 0.0;
+  return FirestoreService.getProfileCompleteness();
+});
+
 // ── Match actions ─────────────────────────────────────────────────────────────
 
 Future<void> acceptMatch(String matchId, WidgetRef ref) async {

@@ -14,6 +14,7 @@ class AudioStreamerService {
   bool _initialized = false;
   Future<void>? _initFuture;
   bool _streaming = false;
+  Future<void>? _startingFuture;
   int _sampleRate = 24000;
   int _channels = 1;
 
@@ -35,17 +36,12 @@ class AudioStreamerService {
       _stopStreamPlayer();
       _sampleRate = cfg.sampleRate;
       _channels = cfg.channels;
-      unawaited(_startStreamPlayer());
+      // Only start once; subsequent concurrent callers await the same future.
+      _startingFuture ??= _startStreamPlayer().whenComplete(() => _startingFuture = null);
     }
-
-    final sink = _player.uint8ListSink;
-    if (sink != null) {
-      sink.add(data);
-    } else {
-      Future<void>.delayed(const Duration(milliseconds: 25), () {
-        _player.uint8ListSink?.add(data);
-      });
-    }
+    // If player is starting, wait for it so no chunks are dropped.
+    if (_startingFuture != null) await _startingFuture;
+    _player.uint8ListSink?.add(data);
   }
 
   Future<void> _startStreamPlayer() async {
@@ -57,7 +53,7 @@ class AudioStreamerService {
         interleaved: false,
         sampleRate: _sampleRate,
         numChannels: _channels,
-        bufferSize: 8192,
+        bufferSize: 32768,
       );
     } catch (_) {
       _streaming = false;
@@ -70,6 +66,7 @@ class AudioStreamerService {
       _player.stopPlayer();
     } catch (_) {}
     _streaming = false;
+    _startingFuture = null;
   }
 
   void stop() {

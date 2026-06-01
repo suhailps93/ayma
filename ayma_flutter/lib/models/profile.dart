@@ -7,6 +7,7 @@ class UserProfile {
   final String agentName;
   final String voicePreference;
   final Map<String, dynamic> matchingPrefs;
+  final Map<String, dynamic> profileAnswers;
   final int? age;
   final String? gender;
   final String? locationRegion;
@@ -25,6 +26,7 @@ class UserProfile {
     required this.agentName,
     required this.voicePreference,
     required this.matchingPrefs,
+    this.profileAnswers = const {},
     this.age,
     this.gender,
     this.locationRegion,
@@ -44,6 +46,7 @@ class UserProfile {
     agentName:            (m['agent_name'] as String?) ?? 'Ayma',
     voicePreference:      (m['voice_preference'] as String?) ?? 'Charon',
     matchingPrefs:        (m['matching_prefs'] as Map<String, dynamic>?) ?? {},
+    profileAnswers:       (m['profile_answers'] as Map<String, dynamic>?) ?? const {},
     age:                  m['age'] as int?,
     gender:               m['gender'] as String?,
     locationRegion:       m['location_region'] as String?,
@@ -62,6 +65,7 @@ class UserProfile {
     String? agentName,
     String? voicePreference,
     Map<String, dynamic>? matchingPrefs,
+    Map<String, dynamic>? profileAnswers,
     int? age,
     String? gender,
     String? locationRegion,
@@ -79,6 +83,7 @@ class UserProfile {
     agentName:                 agentName ?? this.agentName,
     voicePreference:           voicePreference ?? this.voicePreference,
     matchingPrefs:             matchingPrefs ?? this.matchingPrefs,
+    profileAnswers:            profileAnswers ?? this.profileAnswers,
     age:                       age ?? this.age,
     gender:                    gender ?? this.gender,
     locationRegion:            locationRegion ?? this.locationRegion,
