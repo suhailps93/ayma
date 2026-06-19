@@ -17,7 +17,7 @@ import '../services/firestore_service.dart';
 // ── Auth ──────────────────────────────────────────────────────────────────────
 
 final authControllerProvider = ChangeNotifierProvider<AuthService>((ref) {
-  final service = AuthService();
+  final service = AuthService(ref);
   ref.onDispose(service.dispose);
   return service;
 });
@@ -101,7 +101,13 @@ class NotificationsNotifier extends StateNotifier<List<NotificationModel>> {
       return;
     }
     _sub?.cancel();
-    _sub = FirestoreService.notificationsStream().listen((list) => state = list);
+    _sub = FirestoreService.notificationsStream().listen(
+      (list) => state = list,
+      onError: (e) {
+        debugPrint('Notifications stream error: $e');
+        state = const [];
+      },
+    );
   }
 
   void add(NotificationModel n) => state = [n, ...state];

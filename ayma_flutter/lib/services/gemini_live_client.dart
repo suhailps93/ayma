@@ -74,12 +74,18 @@ class GeminiLiveClient {
   }
 
   Future<void> connect(String wsUrl, String apiKey, Map<String, dynamic> setupPayload) async {
+    debugPrint('DEBUG: GeminiLiveClient connecting to $wsUrl');
     if (_status != LiveClientStatus.disconnected) {
       _closeTransport();
     }
     _status = LiveClientStatus.connecting;
 
-    final wsUri = Uri.parse(wsUrl).replace(queryParameters: {'key': apiKey});
+    final isToken = apiKey.startsWith('AQ.');
+    final authParam = isToken ? 'access_token' : 'key';
+    
+    debugPrint('DEBUG: Using ${isToken ? 'OAuth Token' : 'API Key'} for authentication');
+    
+    final wsUri = Uri.parse(wsUrl).replace(queryParameters: {authParam: apiKey});
     _channel = kIsWeb
         ? WebSocketChannel.connect(wsUri)
         : IOWebSocketChannel.connect(wsUri, pingInterval: const Duration(seconds: 30));
@@ -87,11 +93,21 @@ class GeminiLiveClient {
     _channel!.sink.add(jsonEncode({'setup': _normalizeSetup(setupPayload)}));
 
     _wsSub = _channel!.stream.listen(
-      _onRawMessage,
-      onError: (_) => _onDisconnect(),
-      onDone: _onDisconnect,
+      (data) {
+        debugPrint('DEBUG: Received message from Gemini: $data');
+        _onRawMessage(data);
+      },
+      onError: (e) {
+        debugPrint('DEBUG: Gemini WebSocket error: $e');
+        _onDisconnect();
+      },
+      onDone: () {
+        debugPrint('DEBUG: Gemini WebSocket closed');
+        _onDisconnect();
+      },
     );
     _status = LiveClientStatus.connected;
+    debugPrint('DEBUG: GeminiLiveClient status: connected');
   }
 
   void disconnect() {
@@ -208,6 +224,23 @@ class GeminiLiveClient {
           'mimeType': 'audio/pcm;rate=16000',
           'data': base64Encode(pcm16),
         }
+      }
+    }));
+  }
+
+  void interrupt() {
+    if (_channel == null || _status != LiveClientStatus.connected) return;
+    // Sending any clientContent message interrupts the model output.
+    // We send an empty turn to signal interruption without adding new content.
+    _channel!.sink.add(jsonEncode({
+      'clientContent': {
+        'turns': [
+          {
+            'role': 'user',
+            'parts': [],
+          }
+        ],
+        'turnComplete': true,
       }
     }));
   }

@@ -38,12 +38,9 @@ final routerProvider = Provider<GoRouter>((ref) {
       if (path == '/auth') return '/chat';
 
       final onboarding = ref.read(onboardingStatusProvider);
-      final preboardingSeen = ref.read(preboardingSeenProvider);
-      if (onboarding.hasValue && preboardingSeen.hasValue) {
+      if (onboarding.hasValue) {
         final complete = onboarding.value ?? false;
-        final seen = preboardingSeen.value ?? false;
-        if (!complete && !seen && path != '/onboarding') return '/onboarding';
-        if (!complete && seen && path == '/onboarding') return '/chat';
+        if (!complete && path != '/onboarding') return '/onboarding';
         if (complete && path == '/onboarding') return '/chat';
       }
 

@@ -76,8 +76,17 @@ class WebMicCapture {
       );
     }
     js_util.callMethod(_source, 'connect', [_processor]);
-    // Must connect to destination for ScriptProcessorNode to fire (browser quirk)
-    js_util.callMethod(_processor, 'connect', [js_util.getProperty(_ctx, 'destination')]);
+    
+    // Create a silent sink (GainNode with gain 0) to ensure the ScriptProcessorNode
+    // continues to fire 'audioprocess' events in all browsers without playing
+    // the microphone input back through the speakers.
+    final gainNode = js_util.callMethod(_ctx, 'createGain', const []);
+    final gainParam = js_util.getProperty(gainNode, 'gain');
+    js_util.setProperty(gainParam, 'value', 0.0);
+    
+    js_util.callMethod(_processor, 'connect', [gainNode]);
+    js_util.callMethod(gainNode, 'connect', [js_util.getProperty(_ctx, 'destination')]);
+    
     _active = true;
   }
 

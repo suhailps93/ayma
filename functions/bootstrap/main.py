@@ -101,9 +101,9 @@ Rules:
 
 
 def _load_profile_schema() -> dict:
-    base = Path(__file__).resolve().parents[2]  # repo root
-    p = base / "docs" / "ayma_profile_questions.json"
     try:
+        base = Path(__file__).resolve().parents[2]  # repo root in dev; /app in container
+        p = base / "docs" / "ayma_profile_questions.json"
         return json.loads(p.read_text())
     except Exception:
         return {"questions": [], "profile_storage_policy": {}}
@@ -140,6 +140,15 @@ def _build_system_prompt(
         demo.append(f"Location: {profile['location_region']}")
     if demo:
         parts.append(f"## Demographics\n{', '.join(demo)}")
+
+    # Verbatim ground truth — last 20 things the user actually said (beats wiki if contradicted)
+    raw_statements = profile.get("raw_user_statements", []) or []
+    if raw_statements:
+        recent = raw_statements[-20:]
+        parts.append(
+            f"## What {name} Has Actually Said\n"
+            + "\n".join(f"- {s}" for s in recent)
+        )
 
     # LLM wiki — synthesized profile from all sessions
     if profile.get("wiki_about_me"):
@@ -307,82 +316,77 @@ async def bootstrap(uid: str = Depends(verify_token)):
 
 # ── LLM Wiki ──────────────────────────────────────────────────────────────────
 
-WIKI_ABOUT_ME_PROMPT = """You are maintaining a profile section for a matchmaking app.
+WIKI_ABOUT_ME_PROMPT = """You are maintaining a fact list for a matchmaking app.
 
-Current "About Me" content (may be empty on first session):
+RULES — read carefully:
+- Only record facts the USER explicitly stated. Ignore everything the AI/assistant said.
+- Each bullet must be directly traceable to a USER: line in the conversation.
+- Do NOT infer, extrapolate, or imply anything. If the user said "I like hiking," write "- likes hiking" — NOT "values fitness" or "enjoys outdoor lifestyle."
+- Remove a fact only if the user directly contradicted it.
+- If nothing new was learned, return the current list unchanged.
+- Max 20 bullets. Each bullet: "- [fact]" with no elaboration.
+
+Current fact list (may be empty):
 {current}
 
 New conversation:
 {conversation}
 
-Rewrite "About Me" to capture this person's personality, communication style, hobbies, interests, and lifestyle.
+Return only the updated bullet list, no heading, no prose."""
 
-Rules:
-- Only use facts explicitly stated or clearly implied — never invent details
-- Correct stale info if the user contradicts something
-- Remove redundant or repeated content
-- Write in third person, present tense, flowing prose
-- Max 150 words
-- If nothing new was learned, return the current content unchanged
+WIKI_CONTEXT_PROMPT = """You are maintaining a fact list for a matchmaking app.
 
-Return only the updated content, no heading."""
+RULES — read carefully:
+- Only record facts the USER explicitly stated. Ignore everything the AI/assistant said.
+- Each bullet must be directly traceable to a USER: line in the conversation.
+- Do NOT infer or extrapolate. Write exactly what was said, no elaboration.
+- Prioritise recency — if the user contradicts a previous fact, replace it.
+- If nothing new was learned, return the current list unchanged.
+- Max 10 bullets. Each bullet: "- [fact]" with no elaboration.
 
-WIKI_CONTEXT_PROMPT = """You are maintaining a profile section for a matchmaking app.
-
-Current "Life Context" content (may be empty on first session):
+Current fact list (may be empty):
 {current}
 
 New conversation:
 {conversation}
 
-Rewrite "Life Context" to capture this person's current life phase, recent events, emotional state, and what's on their mind right now.
+Return only the updated bullet list, no heading, no prose."""
 
-Rules:
-- Prioritise recency — newer information replaces older context
-- Only use facts explicitly stated
-- Write in third person, present tense
-- Max 100 words
-- If nothing new was learned, return the current content unchanged
+WIKI_PREFERENCES_PROMPT = """You are maintaining a fact list for a matchmaking app.
 
-Return only the updated content, no heading."""
+RULES — read carefully:
+- Only record facts the USER explicitly stated about what they want in a partner or relationship. Ignore everything the AI/assistant said.
+- Each bullet must be directly traceable to a USER: line in the conversation.
+- Do NOT infer preferences. If the user said "I want someone kind," write "- wants someone kind" — not "values emotional intelligence."
+- Remove a fact only if the user directly contradicted it.
+- If nothing new was learned, return the current list unchanged.
+- Max 20 bullets. Each bullet: "- [fact]" with no elaboration.
 
-WIKI_PREFERENCES_PROMPT = """You are maintaining a profile section for a matchmaking app.
-
-Current "What They're Looking For" content (may be empty on first session):
+Current fact list (may be empty):
 {current}
 
 New conversation:
 {conversation}
 
-Rewrite to capture what this person wants in a partner and relationship — attraction criteria, dealbreakers, relationship goals, values they want shared.
+Return only the updated bullet list, no heading, no prose."""
 
-Rules:
-- Only use facts explicitly stated — never assume preferences
-- Update or remove anything they've contradicted
-- Write in third person, present tense
-- Max 150 words
-- If nothing new was learned, return the current content unchanged
+WIKI_MATCHING_PROMPT = """You are maintaining a structured fact list for algorithmic matchmaking.
 
-Return only the updated content, no heading."""
+RULES — read carefully:
+- Only record facts the USER explicitly stated (age range, location, relationship type, dealbreakers, lifestyle requirements). Ignore everything the AI/assistant said.
+- Each bullet must be directly traceable to a USER: line in the conversation.
+- Do NOT infer. Be specific and literal — only what was said.
+- Remove a fact only if the user directly contradicted it.
+- If nothing new was learned, return the current list unchanged.
+- Max 20 bullets. Each bullet: "- [fact]" with no elaboration.
 
-WIKI_MATCHING_PROMPT = """You are maintaining a structured matching profile for a matchmaking app.
-
-Current "Matching Profile" content (may be empty on first session):
+Current fact list (may be empty):
 {current}
 
 New conversation:
 {conversation}
 
-Rewrite to capture structured facts directly useful for algorithmic matching: desired age range, location flexibility, relationship type sought, core values alignment, lifestyle compatibility requirements, hard dealbreakers.
-
-Rules:
-- Only use facts explicitly stated
-- Be specific and concrete
-- Bullet points are fine here
-- Max 150 words
-- If nothing new was learned, return the current content unchanged
-
-Return only the updated content, no heading."""
+Return only the updated bullet list, no heading, no prose."""
 
 MARK_ANSWERED_PROMPT = """A matchmaker AI has been talking to a user. Based on the current profile, which of these questions have clearly been answered?
 
@@ -493,6 +497,14 @@ async def post_turn(body: PostTurnRequest, uid: str = Depends(verify_token)):
 
     user_ref = db.collection("users").document(uid)
     profile = (user_ref.get().to_dict()) or {}
+
+    # Store verbatim user statements as ground truth (no LLM involved)
+    user_lines = [m["text"] for m in body.messages[-10:] if m.get("role") == "user" and m.get("text", "").strip()]
+    if user_lines:
+        existing_statements = profile.get("raw_user_statements", []) or []
+        combined = existing_statements + user_lines
+        # Cap at last 100 statements
+        user_ref.update({"raw_user_statements": combined[-100:]})
 
     current = {
         "about_me":    profile.get("wiki_about_me", ""),

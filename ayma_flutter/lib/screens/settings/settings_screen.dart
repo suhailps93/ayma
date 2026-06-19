@@ -54,8 +54,14 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
 
   Future<void> _deleteAccount() async {
     try {
-      await FirebaseAuth.instance.currentUser?.delete();
-      await ref.read(authControllerProvider).signOut();
+      // Invalidate providers first to stop active listeners and prevent permission errors
+      // during the data deletion phase.
+      ref.invalidate(notificationsProvider);
+      ref.invalidate(matchesProvider);
+      ref.invalidate(profileProvider);
+      ref.invalidate(insightsProvider);
+      
+      await ref.read(authControllerProvider).deleteAccount();
       if (mounted) context.go('/auth');
     } catch (e) {
       if (mounted) {

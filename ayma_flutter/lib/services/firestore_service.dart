@@ -367,6 +367,52 @@ class FirestoreService {
     await initializeQuestions();
   }
 
+  // ── Account Deletion ──────────────────────────────────────────────────────
+
+  static Future<void> deleteUserData() async {
+    final uid = _uid;
+    final userRef = _db.collection('users').doc(uid);
+
+    // 1. Delete subcollections
+    await _deleteSubcollection(userRef.collection('memories'),
+        orderByField: 'created_at');
+    await _deleteSubcollection(userRef.collection('questions'),
+        orderByField: 'created_at');
+
+    // 2. Delete from top-level collections where user is the owner
+    await _deleteSubcollection(
+      _db.collection('notifications').where('user_id', isEqualTo: uid),
+      orderByField: 'created_at',
+    );
+    await _deleteSubcollection(
+      _db.collection('media').where('user_id', isEqualTo: uid),
+      orderByField: 'created_at',
+    );
+
+    // 3. Delete messages (sent and received)
+    await _deleteSubcollection(
+      _db.collection('messages').where('from_user_id', isEqualTo: uid),
+      orderByField: 'created_at',
+    );
+    await _deleteSubcollection(
+      _db.collection('messages').where('to_user_id', isEqualTo: uid),
+      orderByField: 'created_at',
+    );
+
+    // 4. Delete matches
+    await _deleteSubcollection(
+      _db.collection('matches').where('user_a', isEqualTo: uid),
+      orderByField: 'created_at',
+    );
+    await _deleteSubcollection(
+      _db.collection('matches').where('user_b', isEqualTo: uid),
+      orderByField: 'created_at',
+    );
+
+    // 5. Delete the main user document
+    await userRef.delete();
+  }
+
   static Future<void> _deleteSubcollection(
     Query<Map<String, dynamic>> query, {
     required String orderByField,
@@ -1526,7 +1572,7 @@ class FirestoreService {
     // Keep query shape simple to reduce composite-index requirements.
     final snap = await _db
         .collection('users')
-        .where('onboarding_complete', isEqualTo: true)
+        .where('display_name', isGreaterThan: '')
         .limit(150)
         .get();
     final lowerQuery = query.toLowerCase();

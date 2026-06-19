@@ -2,6 +2,8 @@ import 'package:flutter/material.dart';
 import 'package:flutter_animate/flutter_animate.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
+import 'package:intl_phone_field/intl_phone_field.dart';
+import 'package:intl_phone_field/country_picker_dialog.dart';
 
 import '../../providers/providers.dart';
 import '../../theme.dart';
@@ -26,6 +28,7 @@ class _AuthScreenState extends ConsumerState<AuthScreen> {
   String? _verificationId;
   final _phoneCtrl = TextEditingController();
   final _otpCtrl   = TextEditingController();
+  String _fullPhone = '';
 
   @override
   void dispose() {
@@ -70,16 +73,6 @@ class _AuthScreenState extends ConsumerState<AuthScreen> {
     if (mounted) setState(() => _loading = false);
   }
 
-  void _comingSoon(String label) {
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(
-        content: Text('$label sign-in coming soon'),
-        backgroundColor: context.ac.bgElev,
-        behavior: SnackBarBehavior.floating,
-      ),
-    );
-  }
-
   Future<void> _signInWithGoogle() async {
     setState(() { _loading = true; _error = null; });
     try {
@@ -95,9 +88,27 @@ class _AuthScreenState extends ConsumerState<AuthScreen> {
     if (mounted) setState(() => _loading = false);
   }
 
+  Future<void> _signInWithApple() async {
+    setState(() { _loading = true; _error = null; });
+    try {
+      final ok = await ref.read(authControllerProvider).signInWithApple();
+      if (ok) {
+        await _goToChat();
+      } else if (mounted) {
+        setState(() { _error = 'Sign-in cancelled.'; });
+      }
+    } catch (e) {
+      if (mounted) setState(() { _error = e.toString().replaceFirst('Exception: ', ''); });
+    }
+    if (mounted) setState(() => _loading = false);
+  }
+
   Future<void> _sendPhoneOtp() async {
-    final phone = _phoneCtrl.text.trim();
-    if (phone.isEmpty) return;
+    final phone = _fullPhone.trim();
+    if (phone.isEmpty) {
+      setState(() => _error = 'Please enter a valid phone number');
+      return;
+    }
     setState(() { _loading = true; _error = null; });
     try {
       final vid = await ref.read(authControllerProvider).sendPhoneOtp(phone);
@@ -237,10 +248,11 @@ class _AuthScreenState extends ConsumerState<AuthScreen> {
                                           error: _error,
                                           onSubmit: _sendPhoneOtp,
                                           onBack: () => setState(() { _showPhone = false; _error = null; }),
+                                          onFullPhoneChanged: (val) => _fullPhone = val,
                                         )
                                       : _LandingButtons(
                                           key: const ValueKey('landing'),
-                                          onApple: () => _comingSoon('Apple'),
+                                          onApple: _loading ? () {} : _signInWithApple,
                                           onGoogle: _loading ? () {} : _signInWithGoogle,
                                           onEmail: () => setState(() => _showEmail = true),
                                           onPhone: () => setState(() { _showPhone = true; _error = null; }),
@@ -287,39 +299,17 @@ class _LandingButtons extends StatelessWidget {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
-        // Continue with Apple — large cream pill
-        GestureDetector(
-          onTap: onApple,
-          child: Container(
-            padding: const EdgeInsets.symmetric(vertical: 17),
-            decoration: BoxDecoration(
-              color: const Color(0xFFF0EDE6),
-              borderRadius: BorderRadius.circular(50),
-            ),
-            child: Row(
-              mainAxisAlignment: MainAxisAlignment.center,
-              children: [
-                const Icon(Icons.apple, color: Colors.black, size: 20),
-                const SizedBox(width: 10),
-                const Text(
-                  'Continue with Apple',
-                  style: TextStyle(
-                    color: Colors.black,
-                    fontSize: 15,
-                    fontWeight: FontWeight.w600,
-                    letterSpacing: -0.2,
-                  ),
-                ),
-              ],
-            ),
-          ),
-        ).animate(delay: 380.ms).fadeIn(duration: 400.ms).slideY(begin: 0.06, end: 0),
-
-        const SizedBox(height: 12),
-
-        // Google | Email | Phone — three equal dark pills
         Row(
           children: [
+            Expanded(
+              child: _SmallPill(
+                icon: const Icon(Icons.apple, size: 18, color: Color(0xFFD4C9B5)),
+                label: 'Apple',
+                onTap: onApple,
+                delay: 380,
+              ),
+            ),
+            const SizedBox(width: 8),
             Expanded(
               child: _SmallPill(
                 icon: _GoogleIcon(),
@@ -328,7 +318,11 @@ class _LandingButtons extends StatelessWidget {
                 delay: 420,
               ),
             ),
-            const SizedBox(width: 8),
+          ],
+        ),
+        const SizedBox(height: 8),
+        Row(
+          children: [
             Expanded(
               child: _SmallPill(
                 icon: const Icon(Icons.mail_outline_rounded, size: 16, color: Color(0xFFD4C9B5)),
@@ -670,6 +664,7 @@ class _PhoneForm extends StatelessWidget {
   final bool loading;
   final String? error;
   final VoidCallback onSubmit, onBack;
+  final ValueChanged<String> onFullPhoneChanged;
 
   const _PhoneForm({
     super.key,
@@ -678,6 +673,7 @@ class _PhoneForm extends StatelessWidget {
     required this.error,
     required this.onSubmit,
     required this.onBack,
+    required this.onFullPhoneChanged,
   });
 
   @override
@@ -696,10 +692,41 @@ class _PhoneForm extends StatelessWidget {
           ),
         ),
         const SizedBox(height: 18),
-        _AuthField(
-          controller: phoneCtrl,
-          label: '+1 555 000 0000',
-          keyboardType: TextInputType.phone,
+        Container(
+          decoration: BoxDecoration(
+            color: context.ac.bgElev,
+            borderRadius: BorderRadius.circular(14),
+            border: Border.all(color: context.ac.lineSoft, width: 0.5),
+          ),
+          child: IntlPhoneField(
+            controller: phoneCtrl,
+            initialCountryCode: 'US',
+            onChanged: (phone) => onFullPhoneChanged(phone.completeNumber),
+            style: TextStyle(color: context.ac.fg, fontSize: 15),
+            dropdownTextStyle: TextStyle(color: context.ac.fg, fontSize: 15),
+            cursorColor: context.ac.accent,
+            showCountryFlag: true,
+            dropdownIconPosition: IconPosition.trailing,
+            dropdownIcon: Icon(Icons.arrow_drop_down_rounded, color: context.ac.fgMute),
+            pickerDialogStyle: PickerDialogStyle(
+              backgroundColor: context.ac.bgElev,
+              countryCodeStyle: TextStyle(color: context.ac.fg, fontSize: 15),
+              countryNameStyle: TextStyle(color: context.ac.fg, fontSize: 15),
+              searchFieldInputDecoration: InputDecoration(
+                hintText: 'Search country',
+                hintStyle: TextStyle(color: context.ac.fgMute, fontSize: 14),
+                prefixIcon: Icon(Icons.search_rounded, color: context.ac.fgMute, size: 20),
+                border: UnderlineInputBorder(borderSide: BorderSide(color: context.ac.lineSoft)),
+              ),
+            ),
+            decoration: InputDecoration(
+              hintText: '555 000 0000',
+              hintStyle: TextStyle(color: context.ac.fgMute, fontSize: 15),
+              border: InputBorder.none,
+              contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 16),
+              counterText: '',
+            ),
+          ),
         ),
         if (error != null) ...[
           const SizedBox(height: 10),

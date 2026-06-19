@@ -4,6 +4,7 @@ import 'dart:math' as math;
 import 'dart:typed_data';
 
 import 'package:flutter/foundation.dart';
+import 'package:firebase_auth/firebase_auth.dart';
 import 'package:http/http.dart' as http;
 import 'package:permission_handler/permission_handler.dart';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -62,7 +63,10 @@ class TranscriptLine {
 // Orchestrates the selected live client + recorder + streamer while preserving
 // the UI contract used by ChatScreen.
 class AymaAudioService extends ChangeNotifier {
-  static const _transcriptStorageKey = 'ayma.chat.transcript';
+  String get _transcriptStorageKey {
+    final uid = FirebaseAuth.instance.currentUser?.uid ?? 'guest';
+    return 'ayma.chat.transcript.$uid';
+  }
 
   late final dynamic _client =
       Env.liveProvider == 'gemini' ? GeminiLiveClient() : OpenAiRealtimeClient();
@@ -96,7 +100,6 @@ class AymaAudioService extends ChangeNotifier {
 
   final List<Map<String, String>> _history = [];
 
-  bool _restoredTranscript = false;
   String _pendingTurnUser = '';
   String _pendingTurnModel = '';
   Timer? _persistDebounce;
@@ -121,12 +124,12 @@ class AymaAudioService extends ChangeNotifier {
   static const _micFlushInterval = Duration(milliseconds: 120);
 
   AymaAudioService() {
-    unawaited(_restoreTranscript());
     _wireClientStreams();
     _wireRecorderStreams();
+    unawaited(initForUser());
   }
 
-  Future<void> init() async {
+  Future<void> initForUser() async {
     await _restoreTranscript();
   }
 
@@ -267,6 +270,13 @@ class AymaAudioService extends ChangeNotifier {
 
   void _bufferAudio(Uint8List pcm) {
     if (!_client.isConnected || _state == SessionState.disconnected || _muted) return;
+    
+    // For autonomous barge-in to work, we MUST send microphone audio even
+    // while the model is speaking. The server uses VAD (Voice Activity Detection)
+    // to detect when the user interrupts the model.
+    // We rely on client-side AEC (configured in web_audio_impl.dart and 
+    // audio_recorder_service.dart) to filter out the model's own voice.
+    
     _pendingMicAudio.add(pcm);
     _micFlushTimer ??= Timer(_micFlushInterval, _flushBufferedAudio);
   }
@@ -342,6 +352,14 @@ class AymaAudioService extends ChangeNotifier {
 
   bool get wakeWordListening => _wakeWordListening;
 
+  void stopSpeaking() {
+    if (_client.isConnected && _state == SessionState.speaking) {
+      _client.interrupt();
+      // The server will send an 'interrupted' message back, 
+      // which we already handle in _wireClientStreams to stop playback.
+    }
+  }
+
   // ── Connection lifecycle ─────────────────────────────────────────────────────
 
   Future<void> connect({bool userInitiated = false}) async {
@@ -367,6 +385,31 @@ class AymaAudioService extends ChangeNotifier {
     _setState(SessionState.connecting);
     _sessionId = DateTime.now().millisecondsSinceEpoch.toString();
 
+    // Check for environment bypass first
+    debugPrint('DEBUG: Attempting connect. Provider: ${Env.liveProvider}, Key length: ${Env.geminiApiKey.length}');
+    if (Env.liveProvider == 'gemini' && Env.geminiApiKey.isNotEmpty) {
+      debugPrint('DEBUG: Using Gemini API Key Bypass');
+      _providerApiKey = Env.geminiApiKey;
+      final payload = {
+        // PERMANENT MODEL SELECTION - DO NOT CHANGE WITHOUT EXPLICIT USER DIRECTIVE
+        'model': 'models/gemini-3.1-flash-live-preview',
+        'generation_config': {
+          'response_modalities': ['AUDIO'],
+          'speech_config': {
+            'voice_config': {
+              'prebuilt_voice_config': {
+                'voice_name': 'Aoide',
+              }
+            }
+          }
+        }
+      };
+      // Switch to stable v1beta URL
+      const wsUrl = 'wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent';
+      await _client.connect(wsUrl, _providerApiKey!, payload);
+      return;
+    }
+
     if (!kIsWeb) {
       final permission = await Permission.microphone.request();
       if (!permission.isGranted) {
@@ -389,11 +432,42 @@ class AymaAudioService extends ChangeNotifier {
           throw Exception('Missing Gemini Live bootstrap data');
         }
 
-        final payload = setup ??
-            {
-              'model': 'models/${bootstrap['model'] ?? 'gemini-3.1-flash-live-preview'}',
-              'response_modalities': ['AUDIO'],
-            };
+        final Map<String, dynamic> payload = setup != null
+            ? Map<String, dynamic>.from(setup)
+            : <String, dynamic>{
+                // PERMANENT MODEL SELECTION - DO NOT CHANGE WITHOUT EXPLICIT USER DIRECTIVE
+                'model': 'models/gemini-3.1-flash-live-preview',
+                'response_modalities': ['AUDIO'],
+                'speech_config': {
+                  'voice_config': {
+                    'prebuilt_voice_config': {
+                      'voice_name': 'Aoide', // Standard Gemini Live voice
+                    }
+                  }
+                },
+                'generation_config': {
+                  'speech_config': {
+                    'voice_config': {
+                      'prebuilt_voice_config': {
+                        'voice_name': 'Aoide',
+                      }
+                    }
+                  }
+                }
+              };
+
+        // Inject VAD config if not present to ensure best barge-in experience
+        payload['speech_config'] ??= <String, dynamic>{};
+        final speechConfig = Map<String, dynamic>.from(payload['speech_config'] as Map);
+        payload['speech_config'] = speechConfig;
+
+        // Gemini Multimodal Live API uses 'speech_config' with 'voice_config'
+        // Some versions use 'automatic_activity_detection'
+        speechConfig['automatic_activity_detection'] ??= {
+          'enabled': true,
+          'detection_sensitivity': 'HIGH',
+          'prefix_padding_ms': 300,
+        };
 
         await _client.connect(liveWsUrl, apiKey, payload);
         return;
@@ -451,27 +525,35 @@ class AymaAudioService extends ChangeNotifier {
   }
 
   Future<void> _restoreTranscript() async {
-    if (_restoredTranscript) return;
-    _restoredTranscript = true;
+    final uid = FirebaseAuth.instance.currentUser?.uid;
+    if (uid == null) {
+      _transcript.clear();
+      _history.clear();
+      notifyListeners();
+      return;
+    }
+    
+    // We don't use _restoredTranscript flag because we want to re-restore 
+    // when a DIFFERENT user signs in.
     try {
       final prefs = await SharedPreferences.getInstance();
       final raw = prefs.getString(_transcriptStorageKey);
-      if (raw == null || raw.isEmpty) return;
-      final decoded = jsonDecode(raw) as List<dynamic>;
-      _transcript
-        ..clear()
-        ..addAll(decoded
-            .whereType<Map<String, dynamic>>()
-            .map(TranscriptLine.fromMap)
-            .where((l) => l.text.isNotEmpty));
+      _transcript.clear();
       _history.clear();
-      for (final line in _transcript) {
-        _history.add({
-          'role': line.isUser ? 'user' : 'model',
-          'text': _stamp(line.time, line.text),
-        });
+      if (raw != null && raw.isNotEmpty) {
+        final decoded = jsonDecode(raw) as List<dynamic>;
+        _transcript.addAll(decoded
+              .whereType<Map<String, dynamic>>()
+              .map(TranscriptLine.fromMap)
+              .where((l) => l.text.isNotEmpty));
+        for (final line in _transcript) {
+          _history.add({
+            'role': line.isUser ? 'user' : 'model',
+            'text': _stamp(line.time, line.text),
+          });
+        }
+        _trimHistory();
       }
-      _trimHistory();
       notifyListeners();
     } catch (_) {}
   }
@@ -714,7 +796,8 @@ class AymaAudioService extends ChangeNotifier {
     final response = await http
         .post(
           Uri.parse(
-              'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=$key'),
+              // PERMANENT MODEL SELECTION - DO NOT CHANGE WITHOUT EXPLICIT USER DIRECTIVE
+              'https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash:generateContent?key=$key'),
           headers: {'Content-Type': 'application/json'},
           body: jsonEncode({
             'contents': contents,

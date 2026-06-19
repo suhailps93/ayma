@@ -101,6 +101,10 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
   }
 
   Future<void> _onMicTap() async {
+    if (_audioService.state == SessionState.speaking) {
+      _audioService.stopSpeaking();
+      return;
+    }
     if (_audioService.state == SessionState.disconnected) {
       if (_voiceActionInFlight) return;
       _voiceActionInFlight = true;
@@ -863,6 +867,7 @@ class _InputBarState extends State<_InputBar>
                                     _MicOrSendButton(
                                       canSend: _canSend,
                                       micOn: _micOn,
+                                      isSpeaking: widget.state == SessionState.speaking,
                                       onMicTap: widget.onMicTap,
                                       onSend: widget.onSend,
                                     ),
@@ -980,12 +985,14 @@ class _DraftDockStrip extends StatelessWidget {
 class _MicOrSendButton extends StatelessWidget {
   final bool canSend;
   final bool micOn;
+  final bool isSpeaking;
   final Future<void> Function() onMicTap;
   final Future<void> Function() onSend;
 
   const _MicOrSendButton({
     required this.canSend,
     required this.micOn,
+    required this.isSpeaking,
     required this.onMicTap,
     required this.onSend,
   });
@@ -993,6 +1000,12 @@ class _MicOrSendButton extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final isSend = canSend;
+    final icon = isSend
+        ? Icons.arrow_upward_rounded
+        : isSpeaking
+            ? Icons.stop_rounded
+            : Icons.mic_rounded;
+
     return GestureDetector(
       onTap: isSend ? () => onSend() : () => onMicTap(),
       child: AnimatedContainer(
@@ -1007,18 +1020,18 @@ class _MicOrSendButton extends StatelessWidget {
           border: Border.all(
             color: isSend
                 ? context.ac.accent
-                : micOn
+                : (micOn || isSpeaking)
                     ? context.ac.accent.withValues(alpha: 0.7)
                     : context.ac.fgMute.withValues(alpha: 0.35),
             width: 0.85,
           ),
         ),
         child: Icon(
-          isSend ? Icons.arrow_upward_rounded : Icons.mic_rounded,
-          size: 17,
+          icon,
+          size: isSpeaking ? 22 : 17,
           color: isSend
               ? context.ac.accent
-              : micOn
+              : (micOn || isSpeaking)
                   ? context.ac.accent
                   : context.ac.fgMute.withValues(alpha: 0.5),
         ),
