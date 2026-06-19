@@ -1,6 +1,5 @@
 import 'dart:async';
 
-import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -28,51 +27,16 @@ class AuthService extends ChangeNotifier {
             ? user.displayName!.trim()
             : (user.email?.split('@').first ?? 'User'));
 
-    final ref = FirebaseFirestore.instance.collection('users').doc(user.uid);
-    final snap = await ref.get();
-    final exists = snap.exists;
-    final data = snap.data() ?? const <String, dynamic>{};
-
-    final existingOnboarding = data['onboarding_complete'] as bool? ?? false;
-    final hasBasicOnboardingData =
-        ((data['display_name'] as String?)?.trim().isNotEmpty ?? false) &&
-            ((data['gender'] as String?)?.trim().isNotEmpty ?? false);
-    final defaults = FirestoreService.deriveVoiceDefaults(
-      gender: data['gender'] as String?,
-      locationRegion: data['location_region'] as String?,
-    );
-    final existingVoiceSettings =
-        (data['voice_settings'] as Map<String, dynamic>?) ?? const {};
-    final onboardingComplete = FirestoreService.inferOnboardingComplete(data);
-    final preboardingSeen = data['preboarding_seen'] as bool? ?? false;
-
-    await ref.set({
-      'display_name': fallbackName,
-      'agent_name': data['agent_name'] ?? 'Ayma',
-      'voice_preference': data['voice_preference'] ?? 'Charon',
-      'voice_accent': data['voice_accent'] ?? defaults['accent_locale'],
-      'voice_settings': {
-        'voice_gender': existingVoiceSettings['voice_gender'] ??
-            defaults['voice_gender'],
-        'accent_locale': existingVoiceSettings['accent_locale'] ??
-            defaults['accent_locale'],
-        'accent_label': existingVoiceSettings['accent_label'] ??
-            defaults['accent_label'],
-      },
-      'matching_prefs': data['matching_prefs'] ?? {},
-      // Preserve onboarding flag once user completed it.
-      'onboarding_complete': existingOnboarding ||
-              hasBasicOnboardingData ||
-              onboardingComplete,
-      'preboarding_seen': preboardingSeen,
-      'matching_paused': data['matching_paused'] ?? false,
-      'profile_public_locked': data['profile_public_locked'] ?? false,
-      'community_profile': data['community_profile'] ?? 'dating_standard',
-      'phone_number': user.phoneNumber,
-      'email': user.email,
-      'last_sign_in_at': FieldValue.serverTimestamp(),
-      if (!exists) 'created_at': FieldValue.serverTimestamp(),
-    }, SetOptions(merge: true));
+    final profile = await FirestoreService.getProfile();
+    if (profile != null) {
+      final fields = <String, dynamic>{};
+      if (profile.displayName.isEmpty || profile.displayName == 'User') {
+        fields['display_name'] = fallbackName;
+      }
+      if (fields.isNotEmpty) {
+        await FirestoreService.updateProfile(fields);
+      }
+    }
   }
 
   Future<bool> signIn(String email, String password) async {

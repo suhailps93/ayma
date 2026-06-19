@@ -4,7 +4,6 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
 import '../../providers/providers.dart';
-import 'package:firebase_auth/firebase_auth.dart';
 import '../../services/firestore_service.dart';
 import '../../theme.dart';
 
@@ -50,6 +49,21 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
       }
     }
     if (mounted) setState(() => _pauseLoading = false);
+  }
+
+  Future<void> _toggleSimulationTranscript(bool value) async {
+    final profile = ref.read(profileProvider).valueOrNull;
+    final currentPrefs = Map<String, dynamic>.from(profile?.matchingPrefs ?? {});
+    currentPrefs['show_simulation_transcript'] = value;
+    try {
+      await updateProfile({'matching_prefs': currentPrefs}, ref);
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Could not update preference: $e')),
+        );
+      }
+    }
   }
 
   Future<void> _deleteAccount() async {
@@ -236,6 +250,7 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
     final profile = profileAsync.valueOrNull;
     final displayName = profile?.displayName ?? 'You';
     final matchingPaused = profile?.matchingPaused ?? false;
+    final showSimulationTranscript = profile?.matchingPrefs['show_simulation_transcript'] as bool? ?? true;
     if (profile != null) {
       _voiceName ??= profile.voicePreference.isNotEmpty
           ? profile.voicePreference
@@ -434,6 +449,20 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
                       inactiveTrackColor: context.ac.lineSoft,
                     ),
               delay: 260,
+            ),
+            const SizedBox(height: 2),
+            _Tile(
+              icon: Icons.chat_bubble_outline_rounded,
+              title: 'Show simulation transcripts',
+              subtitle: 'Show chat logs between AI agents',
+              trailing: Switch(
+                value: showSimulationTranscript,
+                onChanged: _toggleSimulationTranscript,
+                activeColor: context.ac.accent,
+                inactiveThumbColor: context.ac.fgMute,
+                inactiveTrackColor: context.ac.lineSoft,
+              ),
+              delay: 280,
             ),
             const SizedBox(height: 2),
             _Tile(

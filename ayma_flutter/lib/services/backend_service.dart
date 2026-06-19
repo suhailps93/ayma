@@ -78,6 +78,27 @@ class BackendService {
     return jsonDecode(response.body) as Map<String, dynamic>;
   }
 
+  static Future<Map<String, dynamic>> vibeCheck(String matchId) async {
+    final token = await _idToken();
+    if (token == null) throw Exception('Not authenticated');
+
+    final response = await http
+        .post(
+          Uri.parse('${Env.bootstrapUrl}/vibe-check'),
+          headers: {
+            'Content-Type': 'application/json',
+            'Authorization': 'Bearer $token',
+          },
+          body: jsonEncode({'match_id': int.tryParse(matchId) ?? 0}),
+        )
+        .timeout(const Duration(seconds: 60));
+
+    if (response.statusCode != 200) {
+      throw Exception('Vibe check failed: ${response.body}');
+    }
+    return jsonDecode(response.body) as Map<String, dynamic>;
+  }
+
   static Future<String> uploadMedia(Uint8List bytes, String filename) async {
     final uid = FirebaseAuth.instance.currentUser?.uid;
     if (uid == null) throw Exception('Not authenticated');

@@ -5,6 +5,7 @@ import 'package:go_router/go_router.dart';
 
 import '../../models/match_model.dart';
 import '../../providers/providers.dart';
+import '../../services/firestore_service.dart';
 import '../../theme.dart';
 
 String _userLabel(Map<String, dynamic> data) {
@@ -75,6 +76,12 @@ class _MatchDetailScreenState extends ConsumerState<MatchDetailScreen> {
 
   @override
   Widget build(BuildContext context) {
+    final matchesAsync = ref.watch(matchesProvider);
+    final m = matchesAsync.valueOrNull?.firstWhere(
+      (element) => element.id == widget.match.id,
+      orElse: () => widget.match,
+    ) ?? widget.match;
+
     final otherId = m.userA == m.currentUserId ? m.userB : m.userA;
     final otherProfileAsync = ref.watch(userProfileByIdProvider(otherId));
     final myProfileAsync = ref.watch(userProfileByIdProvider(m.currentUserId));
@@ -235,6 +242,11 @@ class _MatchDetailScreenState extends ConsumerState<MatchDetailScreen> {
                   ).animate(delay: 80.ms).fadeIn(duration: 300.ms).slideY(begin: 0.04, end: 0),
                   const SizedBox(height: 16),
                 ],
+
+                // ── Vibe Check Section ────────────────────────────
+                _VibeCheckSection(match: m)
+                    .animate(delay: 100.ms).fadeIn(duration: 300.ms).slideY(begin: 0.04, end: 0),
+                const SizedBox(height: 16),
 
                 // ── Both profiles ─────────────────────────────────
                 _BothProfilesCard(
@@ -635,6 +647,286 @@ class _MiniOrb extends StatelessWidget {
         ),
         boxShadow: [
           BoxShadow(color: AymaColors.accent.withValues(alpha: 0.4), blurRadius: 6),
+        ],
+      ),
+    );
+  }
+}
+
+// ── Vibe Check Section ────────────────────────────────────────────────────────
+
+class _VibeCheckSection extends ConsumerStatefulWidget {
+  final MatchModel match;
+  const _VibeCheckSection({required this.match});
+
+  @override
+  ConsumerState<_VibeCheckSection> createState() => _VibeCheckSectionState();
+}
+
+class _VibeCheckSectionState extends ConsumerState<_VibeCheckSection> {
+  bool _running = false;
+  List<Map<String, dynamic>>? _transcript;
+  bool _loadingTranscript = false;
+
+  @override
+  void initState() {
+    super.initState();
+    if (widget.match.showSimulationTranscript && widget.match.synergyScore != null) {
+      _loadTranscript();
+    }
+  }
+
+  @override
+  void didUpdateWidget(covariant _VibeCheckSection oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (widget.match.showSimulationTranscript && 
+        widget.match.synergyScore != null && 
+        (oldWidget.match.showSimulationTranscript != widget.match.showSimulationTranscript || 
+         oldWidget.match.synergyScore != widget.match.synergyScore)) {
+      _loadTranscript();
+    }
+  }
+
+  Future<void> _loadTranscript() async {
+    if (!mounted) return;
+    setState(() => _loadingTranscript = true);
+    try {
+      final t = await FirestoreService.getMatchSimulation(widget.match.id);
+      if (mounted) {
+        setState(() {
+          _transcript = t;
+          _loadingTranscript = false;
+        });
+      }
+    } catch (_) {
+      if (mounted) setState(() => _loadingTranscript = false);
+    }
+  }
+
+  Future<void> _runVibe() async {
+    setState(() => _running = true);
+    try {
+      await runVibeCheck(widget.match.id, ref);
+      if (mounted) {
+        setState(() => _running = false);
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('AI Vibe Check simulation complete!')),
+        );
+      }
+    } catch (e) {
+      if (mounted) {
+        setState(() => _running = false);
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Vibe check failed: $e')),
+        );
+      }
+    }
+  }
+
+  Future<void> _toggleTranscript(bool val) async {
+    try {
+      await toggleMatchSimulation(widget.match.id, val, ref);
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Could not update toggle: $e')),
+        );
+      }
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final m = widget.match;
+    final hasVibe = m.synergyScore != null;
+
+    return Container(
+      padding: const EdgeInsets.all(18),
+      decoration: BoxDecoration(
+        color: context.ac.bgElev,
+        borderRadius: BorderRadius.circular(20),
+        border: Border.all(color: context.ac.lineSoft, width: 0.5),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+            children: [
+              Text('AGENT-TO-AGENT VIBE CHECK', style: AymaFonts.mono(size: 9, color: context.ac.fgMute)),
+              if (hasVibe)
+                Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+                  decoration: BoxDecoration(
+                    color: context.ac.accent.withValues(alpha: 0.1),
+                    borderRadius: BorderRadius.circular(99),
+                    border: Border.all(color: context.ac.accent.withValues(alpha: 0.3), width: 0.5),
+                  ),
+                  child: Text(
+                    'Synergy: ${m.synergyScore}%',
+                    style: AymaFonts.mono(size: 9, color: context.ac.accent),
+                  ),
+                ),
+            ],
+          ),
+          const SizedBox(height: 12),
+          if (!hasVibe) ...[
+            Text(
+              'Simulate a first-date conversation between your AI agents to evaluate conversational chemistry and synergy.',
+              style: TextStyle(fontSize: 13, color: context.ac.fgDim, height: 1.5),
+            ),
+            const SizedBox(height: 14),
+            SizedBox(
+              width: double.infinity,
+              child: ElevatedButton(
+                onPressed: _running ? null : _runVibe,
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: context.ac.fg,
+                  foregroundColor: context.ac.bg,
+                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+                  padding: const EdgeInsets.symmetric(vertical: 14),
+                ),
+                child: _running
+                    ? SizedBox(
+                        width: 18,
+                        height: 18,
+                        child: CircularProgressIndicator(
+                          strokeWidth: 2,
+                          color: context.ac.bg,
+                        ),
+                      )
+                    : const Text(
+                        'Simulate Conversation',
+                        style: TextStyle(fontSize: 13, fontWeight: FontWeight.bold),
+                      ),
+              ),
+            ),
+          ] else ...[
+            if (m.synergySummary != null && m.synergySummary!.isNotEmpty) ...[
+              Text(
+                '"${m.synergySummary}"',
+                style: AymaFonts.serif(size: 15, italic: true, color: context.ac.fg),
+              ),
+              const SizedBox(height: 14),
+            ],
+            Row(
+              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+              children: [
+                Text(
+                  'Show simulated conversation',
+                  style: TextStyle(fontSize: 13, color: context.ac.fgDim),
+                ),
+                Switch(
+                  value: m.showSimulationTranscript,
+                  onChanged: _toggleTranscript,
+                  activeColor: context.ac.accent,
+                  inactiveThumbColor: context.ac.fgMute,
+                  inactiveTrackColor: context.ac.lineSoft,
+                ),
+              ],
+            ),
+            if (m.showSimulationTranscript) ...[
+              const SizedBox(height: 12),
+              if (_loadingTranscript)
+                const Center(
+                  child: Padding(
+                    padding: EdgeInsets.all(16.0),
+                    child: SizedBox(
+                      width: 20,
+                      height: 20,
+                      child: CircularProgressIndicator(strokeWidth: 2),
+                    ),
+                  ),
+                )
+              else if (_transcript != null && _transcript!.isNotEmpty) ...[
+                Container(
+                  padding: const EdgeInsets.all(12),
+                  decoration: BoxDecoration(
+                    color: context.ac.bg.withValues(alpha: 0.5),
+                    borderRadius: BorderRadius.circular(16),
+                    border: Border.all(color: context.ac.lineSoft, width: 0.5),
+                  ),
+                  child: ListView.separated(
+                    shrinkWrap: true,
+                    physics: const NeverScrollableScrollPhysics(),
+                    itemCount: _transcript!.length,
+                    separatorBuilder: (_, __) => const SizedBox(height: 12),
+                    itemBuilder: (context, idx) {
+                      final turn = _transcript![idx];
+                      final isMe = turn['sender_uid'] == m.currentUserId;
+                      return Column(
+                        crossAxisAlignment: isMe ? CrossAxisAlignment.end : CrossAxisAlignment.start,
+                        children: [
+                          Text(
+                            isMe ? 'Your Agent' : 'Their Agent',
+                            style: AymaFonts.mono(size: 8, color: context.ac.fgMute),
+                          ),
+                          const SizedBox(height: 4),
+                          Container(
+                            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                            decoration: BoxDecoration(
+                              color: isMe 
+                                  ? context.ac.accent.withValues(alpha: 0.15) 
+                                  : context.ac.lineSoft.withValues(alpha: 0.3),
+                              borderRadius: BorderRadius.only(
+                                topLeft: const Radius.circular(12),
+                                topRight: const Radius.circular(12),
+                                bottomLeft: isMe ? const Radius.circular(12) : const Radius.circular(0),
+                                bottomRight: isMe ? const Radius.circular(0) : const Radius.circular(12),
+                              ),
+                              border: Border.all(
+                                color: isMe 
+                                    ? context.ac.accent.withValues(alpha: 0.3) 
+                                    : context.ac.lineSoft.withValues(alpha: 0.5),
+                                width: 0.5,
+                              ),
+                            ),
+                            child: Text(
+                              turn['message_text'] ?? '',
+                              style: TextStyle(
+                                fontSize: 13,
+                                color: context.ac.fgDim,
+                                height: 1.4,
+                              ),
+                            ),
+                          ),
+                        ],
+                      );
+                    },
+                  ),
+                ),
+                const SizedBox(height: 12),
+                SizedBox(
+                  width: double.infinity,
+                  child: OutlinedButton(
+                    onPressed: _running ? null : _runVibe,
+                    style: OutlinedButton.styleFrom(
+                      side: BorderSide(color: context.ac.lineSoft),
+                      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+                      padding: const EdgeInsets.symmetric(vertical: 10),
+                    ),
+                    child: _running
+                        ? SizedBox(
+                            width: 14,
+                            height: 14,
+                            child: CircularProgressIndicator(
+                              strokeWidth: 1.5,
+                              color: context.ac.fg,
+                            ),
+                          )
+                        : Text(
+                            'Re-run Simulation',
+                            style: TextStyle(fontSize: 12, color: context.ac.fgDim),
+                          ),
+                  ),
+                ),
+              ] else
+                Text(
+                  'No conversation transcript found. Try re-running the simulation.',
+                  style: TextStyle(fontSize: 12, fontStyle: FontStyle.italic, color: context.ac.fgMute),
+                ),
+            ],
+          ],
         ],
       ),
     );

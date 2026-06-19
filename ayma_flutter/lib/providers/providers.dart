@@ -13,6 +13,7 @@ import '../models/profile.dart';
 import '../services/audio_service.dart';
 import '../services/auth_service.dart';
 import '../services/firestore_service.dart';
+import '../services/backend_service.dart';
 
 // ── Auth ──────────────────────────────────────────────────────────────────────
 
@@ -178,6 +179,16 @@ Future<void> acceptMatch(String matchId, WidgetRef ref) async {
 
 Future<void> rejectMatch(String matchId, WidgetRef ref) async {
   await FirestoreService.updateMatchStatus(matchId, 'rejected');
+  ref.invalidate(matchesProvider);
+}
+
+Future<void> runVibeCheck(String matchId, WidgetRef ref) async {
+  await BackendService.vibeCheck(matchId);
+  ref.invalidate(matchesProvider);
+}
+
+Future<void> toggleMatchSimulation(String matchId, bool show, WidgetRef ref) async {
+  await FirestoreService.toggleMatchSimulation(matchId, show);
   ref.invalidate(matchesProvider);
 }
 

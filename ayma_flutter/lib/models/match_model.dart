@@ -9,6 +9,9 @@ class MatchModel {
   final String? summaryA;
   final String? summaryB;
   final DateTime createdAt;
+  final int? synergyScore;
+  final String? synergySummary;
+  final bool showSimulationTranscript;
 
   const MatchModel({
     required this.id,
@@ -21,11 +24,14 @@ class MatchModel {
     this.summaryA,
     this.summaryB,
     required this.createdAt,
+    this.synergyScore,
+    this.synergySummary,
+    required this.showSimulationTranscript,
   });
 
   factory MatchModel.fromMap(Map<String, dynamic> m, String currentUserId) {
     return MatchModel(
-      id:            m['id'] as String,
+      id:            m['id'].toString(),
       userA:         m['user_a'] as String,
       userB:         m['user_b'] as String,
       currentUserId: currentUserId,
@@ -35,6 +41,9 @@ class MatchModel {
       summaryA:      m['summary_a'] as String?,
       summaryB:      m['summary_b'] as String?,
       createdAt:     DateTime.parse(m['created_at'] as String),
+      synergyScore:  m['synergy_score'] as int?,
+      synergySummary: m['synergy_summary'] as String?,
+      showSimulationTranscript: (m['show_simulation_transcript'] as bool?) ?? true,
     );
   }
 
