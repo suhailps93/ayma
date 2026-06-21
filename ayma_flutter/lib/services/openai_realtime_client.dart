@@ -6,6 +6,7 @@ import 'package:flutter/foundation.dart';
 import 'package:web_socket_channel/io.dart';
 import 'package:web_socket_channel/web_socket_channel.dart';
 
+import '../config/audio_config.dart';
 import 'gemini_live_client.dart';
 
 class OpenAiRealtimeClient {
@@ -68,12 +69,12 @@ class OpenAiRealtimeClient {
         headers: {
           'Authorization': 'Bearer $apiKey',
         },
-        pingInterval: const Duration(seconds: 30),
-        connectTimeout: const Duration(seconds: 12),
+        pingInterval: const Duration(seconds: AudioConfig.websocketPingIntervalSeconds),
+        connectTimeout: const Duration(seconds: AudioConfig.connectionTimeoutSeconds),
       );
     }
 
-    await _channel!.ready.timeout(const Duration(seconds: 12));
+    await _channel!.ready.timeout(const Duration(seconds: AudioConfig.connectionTimeoutSeconds));
     _wsSub = _channel!.stream.listen(
       _onRawMessage,
       onError: (_) => _onDisconnect(),
@@ -290,7 +291,7 @@ class OpenAiRealtimeClient {
       },
     });
     _responseFallbackTimer?.cancel();
-    _responseFallbackTimer = Timer(const Duration(seconds: 10), () {
+    _responseFallbackTimer = Timer(const Duration(seconds: AudioConfig.openaiResponseFallbackSeconds), () {
       if (_status == LiveClientStatus.connected && !_sawAudioInResponse) {
         _send({'type': 'response.cancel'});
         if (!_turnCompleteCtrl.isClosed) _turnCompleteCtrl.add(null);

@@ -6,6 +6,8 @@ import 'package:flutter/foundation.dart';
 import 'package:web_socket_channel/io.dart';
 import 'package:web_socket_channel/web_socket_channel.dart';
 
+import '../config/audio_config.dart';
+
 enum LiveClientStatus { disconnected, connecting, connected }
 
 class LiveAudioChunk {
@@ -85,7 +87,7 @@ class GeminiLiveClient {
     debugPrint('DEBUG: GeminiLiveClient WS URI: ${wsUri.replace(queryParameters: {authParam: '${apiKey.substring(0, apiKey.length > 6 ? 6 : apiKey.length)}...'})}');
     _channel = kIsWeb
         ? WebSocketChannel.connect(wsUri)
-        : IOWebSocketChannel.connect(wsUri, pingInterval: const Duration(seconds: 30));
+        : IOWebSocketChannel.connect(wsUri, pingInterval: const Duration(seconds: AudioConfig.websocketPingIntervalSeconds));
 
     await _channel!.ready;
 

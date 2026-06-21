@@ -8,24 +8,39 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter_sound/flutter_sound.dart';
 import 'package:logger/logger.dart' show Level;
 
+import '../config/audio_config.dart';
 import 'web_audio_stub.dart' if (dart.library.html) 'web_audio_impl.dart';
 
+/// A buffer that collects raw incoming byte chunks of variable sizes
+/// and groups them into fixed-size frames (matching AudioConfig.frameSize).
+/// To prevent memory reference chains (where slice views keep large parent arrays
+/// alive), it duplicates sub-arrays using [Uint8List.fromList] so old buffers 
+/// can be garbage-collected immediately.
 class PcmFrameBuffer {
+  /// The target frame size in bytes.
   final int frameSize;
+  
+  /// The internal builder used to accumulate partial data chunks.
   final BytesBuilder _buffer = BytesBuilder(copy: false);
 
-  PcmFrameBuffer({this.frameSize = 1280});
+  PcmFrameBuffer({this.frameSize = AudioConfig.frameSize});
 
+  /// Adds a new audio byte chunk, returning a list of any completed, 
+  /// aligned frames of size [frameSize].
   List<Uint8List> add(Uint8List chunk) {
     _buffer.add(chunk);
     final List<Uint8List> frames = [];
     while (_buffer.length >= frameSize) {
       final fullBytes = _buffer.takeBytes();
-      // Copy the frame bytes to allow the fullBytes buffer to be garbage-collected
+      
+      // CRITICAL: Explicitly copy the slice into a new array. This isolates
+      // the frame buffer and releases the large parent fullBytes array to the GC.
       final frame = Uint8List.fromList(Uint8List.sublistView(fullBytes, 0, frameSize));
       frames.add(frame);
+      
       if (fullBytes.length > frameSize) {
-        // Copy the remainder to avoid holding a reference to the large fullBytes array inside the builder
+        // CRITICAL: Explicitly copy the remainder into a new array. This prevents
+        // the internal BytesBuilder list from holding onto the large fullBytes array.
         final remainder = Uint8List.fromList(Uint8List.sublistView(fullBytes, frameSize));
         _buffer.add(remainder);
       }
@@ -33,15 +48,24 @@ class PcmFrameBuffer {
     return frames;
   }
 
+  /// Clears the accumulated buffer content.
   void clear() {
     _buffer.clear();
   }
 }
 
+/// A service handles microphone hardware recording on both Mobile and Web platforms,
+/// using flutter_sound (mobile) or custom ScriptProcessor nodes (web).
+/// It outputs raw audio frames of a fixed size over [pcmStream] and volume amplitude on [volumeStream].
 class AudioRecorderService {
+  /// The mobile native audio recorder controller from flutter_sound.
   final _recorder = FlutterSoundRecorder(logLevel: Level.nothing);
+  
+  /// The web-specific microphone capture module.
   final _webMic = WebMicCapture();
-  final _frameBuffer = PcmFrameBuffer(frameSize: 1280); // 40ms frames for 16kHz PCM16 Mono
+  
+  /// Aligns native chunks into target frame sizes.
+  final _frameBuffer = PcmFrameBuffer(frameSize: AudioConfig.frameSize);
 
   bool _initialized = false;
   bool _recording = false;
@@ -50,17 +74,26 @@ class AudioRecorderService {
   final _pcmCtrl = StreamController<Uint8List>.broadcast();
   final _volumeCtrl = StreamController<double>.broadcast();
 
+  /// Stream of fixed-size PCM16 mono audio frames.
   Stream<Uint8List> get pcmStream => _pcmCtrl.stream;
+  
+  /// Stream of normalized input volumes (0.0 to 1.0).
   Stream<double> get volumeStream => _volumeCtrl.stream;
+  
+  /// Whether the recorder is currently capturing audio.
   bool get isRecording => _recording;
 
+  /// Ensures that the native recording hardware/layer is initialized.
   Future<void> _ensureInit() async {
     if (kIsWeb || _initialized) return;
     await _recorder.openRecorder();
-    await _recorder.setSubscriptionDuration(const Duration(milliseconds: 80));
+    await _recorder.setSubscriptionDuration(
+      const Duration(milliseconds: AudioConfig.subscriptionDurationMs),
+    );
     _initialized = true;
   }
 
+  /// Starts the audio capture pipeline, redirecting native/web samples to the frame buffer.
   Future<void> start() async {
     if (_recording) return;
     _recording = true;
@@ -90,17 +123,18 @@ class AudioRecorderService {
     await _recorder.startRecorder(
       toStream: ctrl.sink,
       codec: Codec.pcm16,
-      numChannels: 1,
-      sampleRate: 16000,
+      numChannels: AudioConfig.channelCount,
+      sampleRate: AudioConfig.inputSampleRate,
       audioSource: AudioSource.voice_communication,
     );
 
     _recorder.onProgress?.listen((e) {
-      final vol = ((e.decibels ?? -60) + 60) / 60;
+      final vol = ((e.decibels ?? AudioConfig.minDecibels) - AudioConfig.minDecibels) / AudioConfig.decibelRange;
       if (!_volumeCtrl.isClosed) _volumeCtrl.add(vol.clamp(0.0, 1.0));
     });
   }
 
+  /// Stops recording and cancels active subscriptions.
   void stop() {
     if (!_recording) return;
     _recording = false;
@@ -114,18 +148,20 @@ class AudioRecorderService {
     }
   }
 
+  /// Calculates the Root-Mean-Square (RMS) amplitude of a PCM16 frame.
   double _pcmRms(Uint8List pcm16) {
     if (pcm16.length < 2) return 0;
     final view = ByteData.sublistView(pcm16);
     final count = pcm16.length ~/ 2;
     double sum = 0;
     for (int i = 0; i < count; i++) {
-      final s = view.getInt16(i * 2, Endian.little) / 32768.0;
+      final s = view.getInt16(i * 2, Endian.little) / AudioConfig.maxPcmValue;
       sum += s * s;
     }
     return math.sqrt(sum / count).clamp(0.0, 1.0);
   }
 
+  /// Releases audio recorder resources.
   void dispose() {
     stop();
     _pcmCtrl.close();
@@ -136,32 +172,51 @@ class AudioRecorderService {
   }
 }
 
+/// A lightweight, client-side Voice Activity Detector (VAD).
+/// It analyzes short 40ms audio frames using:
+/// 1. RMS Energy (detects vocal power relative to a threshold).
+/// 2. Zero-Crossing Rate (ZCR) (identifies vocal cord vibrations and filters out sibilance/static).
+/// Holds a circular pre-buffer to recover leading consonants, and applies hangover time to
+/// prevent premature speech muting during standard mid-sentence pauses.
 class ClientVoiceActivityDetector {
+  /// The energy threshold (RMS) above which a frame might be considered voice.
   final double rmsThreshold;
+  
+  /// The minimum zero-crossing rate expected for voiced human speech.
   final double zcrMin;
+  
+  /// The maximum zero-crossing rate permitted for voiced human speech.
   final double zcrMax;
+  
+  /// How long speech state remains active after energy drops below threshold (ms).
   final Duration hangoverDuration;
+  
+  /// The duration of leading voice samples preserved before the onset of speech.
   final Duration preBufferDuration;
 
   bool _isSpeechActive = false;
   DateTime? _lastSpeechTime;
 
-  // A circular pre-buffer to store the last 300ms of audio
+  /// Holds silent/pre-speech frames to avoid clipping the start of words.
   final List<Uint8List> _preBuffer = [];
-  final int _maxPreBufferPackets; // e.g. 7-8 packets of 40ms
+  
+  /// The maximum number of frames stored in the pre-buffer.
+  final int _maxPreBufferPackets;
 
   ClientVoiceActivityDetector({
-    this.rmsThreshold = 0.015,
-    this.zcrMin = 0.03,
-    this.zcrMax = 0.35,
-    this.hangoverDuration = const Duration(milliseconds: 800),
-    this.preBufferDuration = const Duration(milliseconds: 300),
-    int packetDurationMs = 40,
+    this.rmsThreshold = AudioConfig.defaultRmsThreshold,
+    this.zcrMin = AudioConfig.zcrMin,
+    this.zcrMax = AudioConfig.zcrMax,
+    this.hangoverDuration = const Duration(milliseconds: AudioConfig.hangoverDurationMs),
+    this.preBufferDuration = const Duration(milliseconds: AudioConfig.preBufferDurationMs),
+    int packetDurationMs = AudioConfig.packetDurationMs,
   }) : _maxPreBufferPackets = preBufferDuration.inMilliseconds ~/ packetDurationMs;
 
+  /// Returns whether voice activity is currently active.
   bool get isSpeechActive => _isSpeechActive;
 
-  /// Process an audio frame, returning whether speech is active.
+  /// Analyzes a PCM16 audio frame and determines if it represents active human speech.
+  /// Manages hangover timing and pre-buffering.
   bool processFrame(Uint8List pcm16) {
     if (pcm16.length < 2) return _isSpeechActive;
 
@@ -184,7 +239,7 @@ class ClientVoiceActivityDetector {
       }
     }
 
-    // Manage pre-buffer when silent
+    // Keep pre-buffer populated during silence so consonants are not clipped
     if (!_isSpeechActive) {
       _preBuffer.add(pcm16);
       if (_preBuffer.length > _maxPreBufferPackets) {
@@ -195,30 +250,33 @@ class ClientVoiceActivityDetector {
     return _isSpeechActive;
   }
 
-  /// Get and clear the pre-buffer when speech starts
+  /// Retrieves and clears the leading silence frames collected prior to speech onset.
   List<Uint8List> getAndClearPreBuffer() {
     final copy = List<Uint8List>.from(_preBuffer);
     _preBuffer.clear();
     return copy;
   }
 
+  /// Resets the VAD tracking states.
   void reset() {
     _isSpeechActive = false;
     _lastSpeechTime = null;
     _preBuffer.clear();
   }
 
+  /// Helper to calculate root-mean-square amplitude of sample list.
   double _calculateRms(Uint8List pcm16) {
     final view = ByteData.sublistView(pcm16);
     final count = pcm16.length ~/ 2;
     double sum = 0.0;
     for (int i = 0; i < count; i++) {
-      final s = view.getInt16(i * 2, Endian.little) / 32768.0;
+      final s = view.getInt16(i * 2, Endian.little) / AudioConfig.maxPcmValue;
       sum += s * s;
     }
     return math.sqrt(sum / count);
   }
 
+  /// Helper to calculate zero-crossing rate.
   double _calculateZcr(Uint8List pcm16) {
     final view = ByteData.sublistView(pcm16);
     final count = pcm16.length ~/ 2;

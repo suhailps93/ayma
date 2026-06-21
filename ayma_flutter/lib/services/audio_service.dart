@@ -9,6 +9,7 @@ import 'package:permission_handler/permission_handler.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:speech_to_text/speech_to_text.dart' as stt;
 
+import '../config/audio_config.dart';
 import '../env.dart';
 import 'audio_recorder_service.dart';
 import 'audio_streamer_service.dart';
@@ -85,7 +86,7 @@ class AymaAudioService extends ChangeNotifier {
       Env.liveProvider == 'gemini' ? GeminiLiveClient() : OpenAiRealtimeClient();
   final _recorder = AudioRecorderService();
   final _streamer = AudioStreamerService();
-  final _vad = ClientVoiceActivityDetector(rmsThreshold: 0.018);
+  final _vad = ClientVoiceActivityDetector(rmsThreshold: AudioConfig.activeRmsThreshold);
 
   final List<StreamSubscription<dynamic>> _subs = [];
 
@@ -119,7 +120,7 @@ class AymaAudioService extends ChangeNotifier {
   Timer? _persistDebounce;
   Timer? _outputDecayTimer;
   int _audioBytesPerTurn = 0;
-  static const int _maxTranscriptLines = 180;
+  static const int _maxTranscriptLines = AudioConfig.maxTranscriptLines;
 
   // ── Text-chat error state ─────────────────────────────────────────────────
   /// Reason why the last text reply failed. Cleared when a reply succeeds.
@@ -163,21 +164,29 @@ class AymaAudioService extends ChangeNotifier {
 
   // ── Playback drain helper ─────────────────────────────────────────────────────
 
+  /// Schedules the release of the model's visual wave status by estimating the
+  /// audio playing time based on the byte length of the model turn's audio chunks.
   void _schedulePlaybackEnd() {
     _outputDecayTimer?.cancel();
     // PCM 16-bit mono @ 24 kHz → 48 000 bytes per second
-    const bytesPerMs = 48.0;
-    final bufferedMs = (_audioBytesPerTurn / bytesPerMs).clamp(200.0, 8000.0);
+    const bytesPerMs = AudioConfig.bytesPerMs24k;
+    final bufferedMs = (_audioBytesPerTurn / bytesPerMs).clamp(
+      AudioConfig.minPlaybackDecayMs,
+      AudioConfig.maxPlaybackDecayMs,
+    );
     _audioBytesPerTurn = 0;
-    // Let the wave stay alive for the estimated playback duration + 250 ms buffer
-    _outputDecayTimer = Timer(Duration(milliseconds: bufferedMs.toInt() + 250), () {
-      _outputDecayTimer = null;
-      if (_state == SessionState.speaking || _state == SessionState.thinking) {
-        _setState(SessionState.listening);
-      }
-      _outputVolume = 0;
-      _notifyMetersThrottled();
-    });
+    // Let the wave stay alive for the estimated playback duration + grace period
+    _outputDecayTimer = Timer(
+      Duration(milliseconds: bufferedMs.toInt() + AudioConfig.playbackDecayGraceMs),
+      () {
+        _outputDecayTimer = null;
+        if (_state == SessionState.speaking || _state == SessionState.thinking) {
+          _setState(SessionState.listening);
+        }
+        _outputVolume = 0;
+        _notifyMetersThrottled();
+      },
+    );
   }
 
   // ── Wire live-client events → session state ────────────────────────────────
@@ -201,7 +210,7 @@ class AymaAudioService extends ChangeNotifier {
         _setState(SessionState.speaking);
       }
       final now = DateTime.now();
-      if (now.difference(_lastMeterUiUpdate) >= const Duration(milliseconds: 33)) {
+      if (now.difference(_lastMeterUiUpdate) >= const Duration(milliseconds: AudioConfig.uiMeterUpdateIntervalMs)) {
         _outputVolume = _pcmRms(chunk.data);
         _lastMeterUiUpdate = now;
         notifyListeners();
@@ -241,7 +250,7 @@ class AymaAudioService extends ChangeNotifier {
         _notifyMetersThrottled();
       }
       _talkHoldoffTimer?.cancel();
-      _talkHoldoffTimer = Timer(const Duration(milliseconds: 1200), () {
+      _talkHoldoffTimer = Timer(const Duration(milliseconds: AudioConfig.userTalkHoldoffMs), () {
         _userTalking = false;
         _notifyMetersThrottled();
       });
@@ -320,7 +329,7 @@ class AymaAudioService extends ChangeNotifier {
           _notifyMetersThrottled();
         }
         _talkHoldoffTimer?.cancel();
-        _talkHoldoffTimer = Timer(const Duration(milliseconds: 1200), () {
+        _talkHoldoffTimer = Timer(const Duration(milliseconds: AudioConfig.userTalkHoldoffMs), () {
           _userTalking = false;
           _notifyMetersThrottled();
         });
@@ -338,7 +347,9 @@ class AymaAudioService extends ChangeNotifier {
     _subs.add(_recorder.volumeStream.listen((vol) {
       _inputVolume = vol;
       // EMA smoothing for visual amplitude only
-      final alpha = vol > _smoothedInputVol ? 0.35 : 0.15;
+      final alpha = vol > _smoothedInputVol 
+          ? AudioConfig.volumeEmaAlphaAttack 
+          : AudioConfig.volumeEmaAlphaDecay;
       _smoothedInputVol = _smoothedInputVol * (1 - alpha) + vol * alpha;
       _notifyMetersThrottled();
     }));
@@ -393,8 +404,8 @@ class AymaAudioService extends ChangeNotifier {
           unawaited(connect(userInitiated: true));
         }
       },
-      listenFor: const Duration(seconds: 8),
-      pauseFor: const Duration(seconds: 3),
+      listenFor: const Duration(seconds: AudioConfig.wakeWordListenForSeconds),
+      pauseFor: const Duration(seconds: AudioConfig.wakeWordPauseForSeconds),
       partialResults: true,
       onSoundLevelChange: null,
       cancelOnError: false,
@@ -403,7 +414,7 @@ class AymaAudioService extends ChangeNotifier {
     _speechToText.statusListener = (status) {
       if (status == 'done' || status == 'notListening') {
         if (_wakeWordListening && _state == SessionState.disconnected) {
-          Future.delayed(const Duration(milliseconds: 300), _listenForWakeWord);
+          Future.delayed(const Duration(milliseconds: AudioConfig.wakeWordDelayMs), _listenForWakeWord);
         }
       }
     };
@@ -494,7 +505,7 @@ class AymaAudioService extends ChangeNotifier {
       Map<String, dynamic> bootstrap = const <String, dynamic>{};
       try {
         bootstrap =
-            await _bootstrapForProvider().timeout(const Duration(seconds: 15));
+            await _bootstrapForProvider().timeout(const Duration(seconds: AudioConfig.bootstrapTimeoutSeconds));
       } catch (e) {
         debugPrint('DEBUG: Gemini bootstrap unavailable, using local fallback setup: $e');
       }
@@ -566,17 +577,19 @@ class AymaAudioService extends ChangeNotifier {
     _setState(SessionState.disconnected, notify: notify);
   }
 
+  /// Handles unexpected channel drops by starting a thread-safe reconnection loop 
+  /// using exponential backoff scaling (up to max reconnect attempts).
   void _handleUnexpectedDisconnect() {
     if (_userInitiatedDisconnect) return;
-    if (_reconnectAttempts >= 5) {
+    if (_reconnectAttempts >= AudioConfig.maxReconnectAttempts) {
       debugPrint('DEBUG: Max reconnect attempts reached. Giving up.');
       _setState(SessionState.disconnected);
       return;
     }
 
     _reconnectAttempts++;
-    final backoffMs = math.pow(2, _reconnectAttempts) * 500; // 1s, 2s, 4s, 8s, 16s...
-    debugPrint('DEBUG: Unexpected disconnect. Reconnecting in ${backoffMs}ms (attempt $_reconnectAttempts/5)...');
+    final backoffMs = math.pow(2, _reconnectAttempts) * AudioConfig.reconnectBackoffBaseMs;
+    debugPrint('DEBUG: Unexpected disconnect. Reconnecting in ${backoffMs}ms (attempt $_reconnectAttempts/${AudioConfig.maxReconnectAttempts})...');
 
     _reconnectTimer?.cancel();
     _reconnectTimer = Timer(Duration(milliseconds: backoffMs.toInt()), () async {
@@ -656,9 +669,10 @@ class AymaAudioService extends ChangeNotifier {
     } catch (_) {}
   }
 
+  /// Debounces transcript storage calls to prevent excessive SQLite disk I/O.
   void _schedulePersistTranscript() {
     _persistDebounce?.cancel();
-    _persistDebounce = Timer(const Duration(milliseconds: 900), () {
+    _persistDebounce = Timer(const Duration(milliseconds: AudioConfig.persistDebounceMs), () {
       unawaited(_persistTranscript());
     });
   }
@@ -677,7 +691,7 @@ class AymaAudioService extends ChangeNotifier {
       final last = _transcript.last;
       final isDuplicate = last.isUser == isUser &&
           last.text.trim() == normalized &&
-          DateTime.now().difference(last.time) < const Duration(seconds: 3);
+          DateTime.now().difference(last.time) < const Duration(seconds: AudioConfig.duplicatePreventSeconds);
       if (isDuplicate && !allowRecentDuplicate) return;
     }
 
@@ -696,8 +710,11 @@ class AymaAudioService extends ChangeNotifier {
     notifyListeners();
   }
 
+  /// Trims session context history to retain only the recent turns.
   void _trimHistory() {
-    if (_history.length > 60) _history.removeRange(0, _history.length - 60);
+    if (_history.length > AudioConfig.maxHistoryLength) {
+      _history.removeRange(0, _history.length - AudioConfig.maxHistoryLength);
+    }
   }
 
   void _trimTranscriptIfNeeded() {
@@ -849,9 +866,10 @@ class AymaAudioService extends ChangeNotifier {
       await connect(userInitiated: true);
     }
 
-    final deadline = DateTime.now().add(const Duration(seconds: 6));
+    final deadline = DateTime.now().add(const Duration(seconds: AudioConfig.retryDeadlineSeconds));
+    final delayDur = const Duration(milliseconds: AudioConfig.retryPollIntervalMs);
     while (_state == SessionState.connecting && DateTime.now().isBefore(deadline)) {
-      await Future<void>.delayed(const Duration(milliseconds: 120));
+      await Future<void>.delayed(delayDur);
     }
 
     if (!_client.isConnected || _state == SessionState.disconnected) return false;
@@ -864,7 +882,7 @@ class AymaAudioService extends ChangeNotifier {
   Future<Map<String, dynamic>> _bootstrapForProvider() async {
     if (Env.liveProvider != 'gemini' && Env.openAiApiKey.isNotEmpty) {
       try {
-        return await BackendService.bootstrap().timeout(const Duration(seconds: 15));
+        return await BackendService.bootstrap().timeout(const Duration(seconds: AudioConfig.bootstrapTimeoutSeconds));
       } catch (_) {
         return <String, dynamic>{};
       }
@@ -938,7 +956,7 @@ class AymaAudioService extends ChangeNotifier {
             'input': input,
           }),
         )
-        .timeout(const Duration(seconds: 30));
+        .timeout(const Duration(seconds: AudioConfig.httpImageQueryTimeoutSeconds));
 
     if (response.statusCode != 200) {
       debugPrint('OpenAI text chat failed: ${response.statusCode} ${response.body}');
@@ -1113,7 +1131,7 @@ class AymaAudioService extends ChangeNotifier {
         continue;
       }
       try {
-        final res = await http.get(Uri.parse(url)).timeout(const Duration(seconds: 12));
+        final res = await http.get(Uri.parse(url)).timeout(const Duration(seconds: AudioConfig.httpTimeoutSeconds));
         if (res.statusCode != 200 || res.bodyBytes.isEmpty) continue;
         if (res.bodyBytes.length > 4 * 1024 * 1024) continue;
         final mimeType = _detectImageMimeType(att, res.headers) ?? 'image/jpeg';
@@ -1196,7 +1214,7 @@ class AymaAudioService extends ChangeNotifier {
   void _notifyMetersThrottled() {
     if (_state == SessionState.disconnected) return;
     final now = DateTime.now();
-    if (now.difference(_lastMeterUiUpdate) < const Duration(milliseconds: 260)) return;
+    if (now.difference(_lastMeterUiUpdate) < const Duration(milliseconds: AudioConfig.uiMeterThrottledIntervalMs)) return;
     _lastMeterUiUpdate = now;
     notifyListeners();
   }
@@ -1233,7 +1251,7 @@ class AymaAudioService extends ChangeNotifier {
         lower.contains('bye, ayma') ||
         lower.contains('stop ayma')) {
       // Small delay so the transcript is committed first
-      Future.delayed(const Duration(milliseconds: 400), () {
+      Future.delayed(const Duration(milliseconds: AudioConfig.goodbyeDelayMs), () {
         if (_state != SessionState.disconnected) disconnect();
       });
     }
