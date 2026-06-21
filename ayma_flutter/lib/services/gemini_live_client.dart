@@ -95,7 +95,64 @@ class GeminiLiveClient {
 
     _wsSub = _channel!.stream.listen(
       (data) {
-        debugPrint('DEBUG: Received message from Gemini: $data');
+        try {
+          final String text;
+          if (data is String) {
+            text = data;
+          } else if (data is List<int>) {
+            text = utf8.decode(data);
+          } else {
+            text = '';
+          }
+          if (text.isNotEmpty) {
+            final msg = jsonDecode(text) as Map<String, dynamic>;
+            if (msg.containsKey('setupComplete')) {
+              debugPrint('DEBUG: Received from Gemini: SetupComplete');
+            } else if (msg.containsKey('serverContent')) {
+              final sc = msg['serverContent'] as Map<String, dynamic>?;
+              final mt = sc?['modelTurn'] as Map<String, dynamic>?;
+              final ot = sc?['outputTranscription'] as Map<String, dynamic>?;
+              final it = sc?['inputTranscription'] as Map<String, dynamic>?;
+              final done = sc?['turnComplete'] == true;
+              final interrupted = sc?['interrupted'] == true;
+              
+              if (mt != null) {
+                final parts = mt['parts'] as List?;
+                var bytesCount = 0;
+                if (parts != null) {
+                  for (final p in parts) {
+                    final inlineData = p['inlineData'] as Map?;
+                    final dataStr = inlineData?['data'] as String?;
+                    if (dataStr != null) {
+                      bytesCount += base64Decode(dataStr).length;
+                    }
+                  }
+                }
+                debugPrint('DEBUG: Received from Gemini: AudioChunk ($bytesCount bytes)');
+              }
+              if (ot != null) {
+                debugPrint('DEBUG: Received from Gemini: OutputTranscription "${ot['text']}"');
+              }
+              if (it != null) {
+                debugPrint('DEBUG: Received from Gemini: InputTranscription "${it['text']}"');
+              }
+              if (done) {
+                debugPrint('DEBUG: Received from Gemini: TurnComplete');
+              }
+              if (interrupted) {
+                debugPrint('DEBUG: Received from Gemini: Interrupted');
+              }
+            } else if (msg.containsKey('toolCall')) {
+              debugPrint('DEBUG: Received from Gemini: ToolCall');
+            } else {
+              debugPrint('DEBUG: Received from Gemini: ${msg.keys.toList()}');
+            }
+          } else {
+            debugPrint('DEBUG: Received from Gemini: Raw binary message');
+          }
+        } catch (_) {
+          debugPrint('DEBUG: Received from Gemini: Raw data payload');
+        }
         _onRawMessage(data);
       },
       onError: (e) {

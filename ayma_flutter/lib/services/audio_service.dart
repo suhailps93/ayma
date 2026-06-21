@@ -428,7 +428,7 @@ class AymaAudioService extends ChangeNotifier {
       Map<String, dynamic> bootstrap = const <String, dynamic>{};
       try {
         bootstrap =
-            await _bootstrapForProvider().timeout(const Duration(seconds: 4));
+            await _bootstrapForProvider().timeout(const Duration(seconds: 15));
       } catch (e) {
         debugPrint('DEBUG: Gemini bootstrap unavailable, using local fallback setup: $e');
       }
@@ -770,7 +770,7 @@ class AymaAudioService extends ChangeNotifier {
   Future<Map<String, dynamic>> _bootstrapForProvider() async {
     if (Env.liveProvider != 'gemini' && Env.openAiApiKey.isNotEmpty) {
       try {
-        return await BackendService.bootstrap().timeout(const Duration(seconds: 4));
+        return await BackendService.bootstrap().timeout(const Duration(seconds: 15));
       } catch (_) {
         return <String, dynamic>{};
       }
@@ -1100,6 +1100,7 @@ class AymaAudioService extends ChangeNotifier {
   }
 
   void _notifyMetersThrottled() {
+    if (_state == SessionState.disconnected) return;
     final now = DateTime.now();
     if (now.difference(_lastMeterUiUpdate) < const Duration(milliseconds: 260)) return;
     _lastMeterUiUpdate = now;

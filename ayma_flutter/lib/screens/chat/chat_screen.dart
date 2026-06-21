@@ -312,6 +312,7 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
     _textCtrl.dispose();
     _scrollCtrl.dispose();
     _focusNode.dispose();
+    _audioService.disconnect(notify: false);
     super.dispose();
   }
 

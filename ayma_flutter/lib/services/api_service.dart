@@ -71,7 +71,9 @@ class ApiService {
 
   static Future<UserProfile?> getProfile() async {
     final response = await _get('/profile');
-    if (response.statusCode != 200) return null;
+    if (response.statusCode != 200) {
+      throw Exception('Failed to load profile: ${response.statusCode}');
+    }
     final Map<String, dynamic> data = jsonDecode(response.body);
     return UserProfile.fromMap(data);
   }

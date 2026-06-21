@@ -215,8 +215,8 @@ Current emulator-specific note:
 
 ## Handoff State
 
-- Last completed: Fixed the preboarding/onboarding screen flashing, restart, and redirect loops for signed-in and newly onboarded users. Prevented redirects while onboarding status resolves, cached onboarding completion state locally immediately in SharedPreferences, invalidated all relevant providers upon completing onboarding, and added fallback immediate routing to `/chat` in onboarding if the profile is already completed.
-- Validated: `flutter analyze` runs successfully with no errors or warnings in application code.
+- Last completed: Fixed false "No profile found" displays by holding profileProvider in a loading state while auth initializes. Terminated persistent background voice connections by disconnecting the WebSocket/audio service if the app backgrounds and the floating overlay is unavailable, and automatically disconnecting when the user logs out. Fixed "Bad state: Cannot use 'ref' after the widget was disposed" and defunct widget element assertions during ChatScreen unmounting by calling disconnect(notify: false) during dispose, and adding disconnected state guards to volume meter updates. Added clean parsing and summaries for incoming Gemini Live WebSocket events to prevent debug console spam.
+- Validated: `flutter analyze` runs successfully with 0 errors and 0 warnings.
 - Blocked on: `pipeline_test.py` hit `429 ResourceExhausted` (Gemini free tier quota limits) during the `Scoring Priya <-> Fatima` stage. Physical device testing is still required for voice/chat.
 - Next action: Test text chat and voice on physical device; configure a paid Gemini API key or rotate keys to bypass the 429 quota exhaustion; review remaining audit gaps from `pipeline_test.py` (rate limiting, logging, etc.).
 

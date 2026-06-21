@@ -54,8 +54,11 @@ class _ShellScreenState extends ConsumerState<ShellScreen>
     if ((state == AppLifecycleState.hidden ||
          state == AppLifecycleState.paused) && connected) {
       OverlayService.showOverlay().then((shown) {
-        if (!shown && mounted) {
-          _pendingOverlayPermissionNeeded = true;
+        if (!shown) {
+          if (mounted) {
+            _pendingOverlayPermissionNeeded = true;
+          }
+          ref.read(audioServiceProvider).disconnect();
         }
       });
     } else if (state == AppLifecycleState.resumed) {

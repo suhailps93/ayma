@@ -18,6 +18,7 @@ void main() {
         .map((p) => p['text'] as String? ?? '')
         .join('')
         .trim();
-    print("Extracted: " + extracted);
+    // ignore: avoid_print
+    print('Extracted: $extracted');
   }
 }

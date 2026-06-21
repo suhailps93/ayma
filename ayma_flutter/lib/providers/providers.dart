@@ -83,7 +83,11 @@ final authSessionProvider = Provider<AuthUser?>((ref) {
 // ── Profile ───────────────────────────────────────────────────────────────────
 
 final profileProvider = FutureProvider<UserProfile?>((ref) async {
-  final user = ref.watch(currentUserProvider);
+  final userAsync = ref.watch(firebaseUserProvider);
+  if (userAsync.isLoading) {
+    return Completer<UserProfile?>().future;
+  }
+  final user = userAsync.valueOrNull;
   if (user == null) return null;
   return ApiService.getProfile();
 });
@@ -296,6 +300,11 @@ Future<void> updateProfile(Map<String, dynamic> fields, WidgetRef ref) async {
 final audioServiceProvider = ChangeNotifierProvider<AymaAudioService>((ref) {
   final svc = AymaAudioService();
   ref.onDispose(svc.dispose);
+  ref.listen<AuthUser?>(currentUserProvider, (previous, next) {
+    if (next == null) {
+      svc.disconnect();
+    }
+  });
   return svc;
 });
 
