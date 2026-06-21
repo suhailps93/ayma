@@ -1,3 +1,4 @@
+// Browse people: age/gender/distance filters, public profiles, and DM entry point.
 import 'dart:async';
 
 import 'package:flutter/material.dart';

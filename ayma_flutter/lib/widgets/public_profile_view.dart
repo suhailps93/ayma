@@ -1,3 +1,4 @@
+// Reusable public profile card: photos, bio, structured answers, and action buttons.
 import 'package:flutter/material.dart';
 
 import '../theme.dart';

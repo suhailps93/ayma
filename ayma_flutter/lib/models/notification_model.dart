@@ -1,3 +1,4 @@
+// In-app notification model (new match, agent update, profile suggestion, system).
 enum NotificationType { newMatch, agentUpdate, profileSuggestion, system }
 
 class NotificationModel {

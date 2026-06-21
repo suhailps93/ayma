@@ -1,3 +1,4 @@
+// App settings: voice/accent, privacy toggles, matching pause, and account management.
 import 'package:flutter/material.dart';
 import 'package:flutter_animate/flutter_animate.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';

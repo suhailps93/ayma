@@ -1,3 +1,4 @@
+// Voice and text chat orchestration: mic/speaker, Gemini Live or OpenAI Realtime, transcript, post-turn.
 import 'dart:async';
 import 'dart:convert';
 import 'dart:math' as math;
@@ -411,23 +412,13 @@ class AymaAudioService extends ChangeNotifier {
     if (Env.liveProvider == 'gemini' && Env.geminiApiKey.isNotEmpty) {
       debugPrint('DEBUG: Using Gemini API Key Bypass');
       _providerApiKey = Env.geminiApiKey;
-      final payload = {
-        // PERMANENT MODEL SELECTION - DO NOT CHANGE WITHOUT EXPLICIT USER DIRECTIVE
-        'model': 'models/gemini-3.1-flash-live-preview',
-        'generation_config': {
-          'response_modalities': ['AUDIO'],
-          'speech_config': {
-            'voice_config': {
-              'prebuilt_voice_config': {
-                'voice_name': 'Aoide',
-              }
-            }
-          }
-        }
-      };
-      // Switch to stable v1beta URL
-      const wsUrl = 'wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent';
-      await _client.connect(wsUrl, _providerApiKey!, payload);
+      final bootstrap = await _bootstrapForProvider();
+      final setup = bootstrap['setup'] as Map<String, dynamic>?;
+      _systemPrompt = _extractSystemPrompt(setup);
+      if (setup == null) throw Exception('Bootstrap did not return a setup payload');
+      final wsUrl = bootstrap['websocket_url'] as String?;
+      if (wsUrl == null || wsUrl.isEmpty) throw Exception('Bootstrap did not return websocket_url');
+      await _client.connect(wsUrl, _providerApiKey!, setup);
       return;
     }
 
@@ -455,22 +446,8 @@ class AymaAudioService extends ChangeNotifier {
           throw Exception('Missing Gemini Live bootstrap data (url=${liveWsUrl?.length}, key=${apiKey?.length})');
         }
 
-        final Map<String, dynamic> payload = setup != null
-            ? Map<String, dynamic>.from(setup)
-            : <String, dynamic>{
-                // PERMANENT MODEL SELECTION - DO NOT CHANGE WITHOUT EXPLICIT USER DIRECTIVE
-                'model': 'models/gemini-3.1-flash-live-preview',
-                'generation_config': {
-                  'response_modalities': ['AUDIO'],
-                  'speech_config': {
-                    'voice_config': {
-                      'prebuilt_voice_config': {
-                        'voice_name': 'Aoide',
-                      }
-                    }
-                  }
-                }
-              };
+        if (setup == null) throw Exception('Bootstrap did not return a setup payload');
+        final Map<String, dynamic> payload = Map<String, dynamic>.from(setup);
 
         await _client.connect(liveWsUrl, apiKey, payload);
         return;
@@ -486,7 +463,7 @@ class AymaAudioService extends ChangeNotifier {
           (bootstrap['openai_realtime_model'] as String?) ?? Env.openAiRealtimeModel;
       await _client.connect(
         apiKey: apiKey,
-        model: model.isEmpty ? 'gpt-realtime-2' : model,
+        model: model,
         session: _openAiSessionFromBootstrap(setup),
       );
     } catch (e) {
@@ -713,7 +690,6 @@ class AymaAudioService extends ChangeNotifier {
 
     Future<bool> trySend(String msg) async {
       try {
-        await _bootstrapTextChatIfNeeded();
         final reply = await _providerTextChat(msg, attachments: []);
         if (reply.isEmpty) {
           anyFailed = true;
@@ -777,17 +753,6 @@ class AymaAudioService extends ChangeNotifier {
     return true;
   }
 
-  Future<void> _bootstrapTextChatIfNeeded() async {
-    if ((_providerApiKey ?? '').isNotEmpty) return;
-    final bootstrap = await _bootstrapForProvider();
-    _providerApiKey = _credentialFromBootstrap(bootstrap);
-    final setup = bootstrap['setup'] as Map<String, dynamic>?;
-    _systemPrompt = _extractSystemPrompt(setup);
-    if ((_providerApiKey ?? '').isEmpty) {
-      throw Exception('Missing ${Env.liveProvider} API key from bootstrap/env');
-    }
-  }
-
   Future<Map<String, dynamic>> _bootstrapForProvider() async {
     if (Env.liveProvider != 'gemini' && Env.openAiApiKey.isNotEmpty) {
       try {
@@ -803,7 +768,6 @@ class AymaAudioService extends ChangeNotifier {
     String message, {
     List<Map<String, String>> attachments = const [],
   }) async {
-    await _bootstrapTextChatIfNeeded();
     return Env.liveProvider == 'gemini'
         ? _geminiTextChat(message, attachments: attachments)
         : _openAiTextChat(message, attachments: attachments);
@@ -813,47 +777,20 @@ class AymaAudioService extends ChangeNotifier {
     String message, {
     List<Map<String, String>> attachments = const [],
   }) async {
-    final key = _providerApiKey;
-    if (key == null || key.isEmpty) return '';
-
-    final userParts = await _buildUserParts(message: message, attachments: attachments);
-
-    final contents = [
+    final msgs = [
       for (final h in _history.sublist(0, math.max(0, _history.length - 1)))
-        {
-          'role': h['role'],
-          'parts': [
-            {'text': h['text']}
-          ]
-        },
-      {'role': 'user', 'parts': userParts},
+        {'role': h['role'] ?? 'user', 'text': h['text'] ?? ''},
+      {'role': 'user', 'text': message},
     ];
-
-    final response = await http
-        .post(
-          Uri.parse(
-              // PERMANENT MODEL SELECTION - DO NOT CHANGE WITHOUT EXPLICIT USER DIRECTIVE
-              'https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash:generateContent?key=$key'),
-          headers: {'Content-Type': 'application/json'},
-          body: jsonEncode({
-            'contents': contents,
-            if ((_systemPrompt ?? '').isNotEmpty)
-              'systemInstruction': {
-                'parts': [
-                  {'text': _systemPrompt}
-                ]
-              },
-          }),
-        )
-        .timeout(const Duration(seconds: 30));
-
-    if (response.statusCode == 429) throw const _QuotaExhaustedException();
-    if (response.statusCode != 200) throw _ServerErrorException(response.statusCode);
-    final body = jsonDecode(response.body) as Map<String, dynamic>;
-    final candidates = body['candidates'] as List<dynamic>? ?? [];
-    if (candidates.isEmpty) return '';
-    final parts = (candidates.first['content']?['parts'] as List<dynamic>? ?? []);
-    return parts.map((p) => (p['text'] as String? ?? '')).join(' ').trim();
+    try {
+      return await BackendService.chat(
+        messages: msgs,
+        systemPrompt: _systemPrompt,
+      );
+    } catch (e) {
+      if (e.toString().contains('quota_exhausted')) throw const _QuotaExhaustedException();
+      rethrow;
+    }
   }
 
   Future<String> _openAiTextChat(
@@ -901,35 +838,6 @@ class AymaAudioService extends ChangeNotifier {
     }
     final body = jsonDecode(response.body) as Map<String, dynamic>;
     return _extractOpenAiOutputText(body).trim();
-  }
-
-  Future<List<Map<String, dynamic>>> _buildUserParts({
-    required String message,
-    List<Map<String, String>> attachments = const [],
-  }) async {
-    final parts = <Map<String, dynamic>>[
-      {'text': message},
-    ];
-
-    var imageCount = 0;
-    for (final att in attachments) {
-      final kind = (att['kind'] ?? '').toLowerCase();
-      final url = att['url'] ?? '';
-      if (kind != 'image' || url.isEmpty || imageCount >= 3 || !url.startsWith('http')) {
-        continue;
-      }
-      try {
-        final res = await http.get(Uri.parse(url)).timeout(const Duration(seconds: 12));
-        if (res.statusCode != 200 || res.bodyBytes.isEmpty) continue;
-        if (res.bodyBytes.length > 4 * 1024 * 1024) continue;
-        final mimeType = _detectImageMimeType(att, res.headers) ?? 'image/jpeg';
-        parts.add({
-          'inlineData': {'mimeType': mimeType, 'data': base64Encode(res.bodyBytes)}
-        });
-        imageCount++;
-      } catch (_) {}
-    }
-    return parts;
   }
 
   List<Map<String, dynamic>> _openAiToolsFromGeminiSetup(Map<String, dynamic>? setup) {
@@ -1201,9 +1109,4 @@ class AymaAudioService extends ChangeNotifier {
 
 class _QuotaExhaustedException implements Exception {
   const _QuotaExhaustedException();
-}
-
-class _ServerErrorException implements Exception {
-  final int statusCode;
-  const _ServerErrorException(this.statusCode);
 }

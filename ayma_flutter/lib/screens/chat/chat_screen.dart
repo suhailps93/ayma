@@ -1,3 +1,4 @@
+// Main AI companion screen: live voice, text chat, transcript, and session controls.
 import 'dart:async';
 import 'dart:io';
 import 'dart:math' as math;

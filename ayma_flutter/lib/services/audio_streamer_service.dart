@@ -1,3 +1,4 @@
+// Speaker playback for live AI audio chunks (flutter_sound on mobile, WebPcmPlayer on web).
 // ignore_for_file: deprecated_member_use
 import 'dart:async';
 

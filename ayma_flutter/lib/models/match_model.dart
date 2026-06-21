@@ -1,3 +1,4 @@
+// MatchModel: compatibility score, rationale, synergy, and peer summaries from /matches.
 class MatchModel {
   final String id;
   final String userA;

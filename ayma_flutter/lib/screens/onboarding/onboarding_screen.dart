@@ -1,3 +1,4 @@
+// Multi-step onboarding: community selection, demographics, location, prefs, and photos.
 import 'dart:async';
 
 import 'package:flutter/material.dart';

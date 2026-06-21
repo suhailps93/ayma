@@ -1,3 +1,4 @@
+// OpenAI Realtime WebSocket client (alternative to Gemini Live when AYMA_LIVE_PROVIDER=openai).
 import 'dart:async';
 import 'dart:convert';
 

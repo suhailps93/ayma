@@ -1,3 +1,4 @@
+// Authenticated HTTP client for all backend data: profile, matches, explore, messages, questions.
 import 'dart:async';
 import 'dart:convert';
 
@@ -9,11 +10,14 @@ import '../models/community_profile.dart';
 import '../models/match_model.dart';
 import '../models/notification_model.dart';
 import '../models/profile.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 class ApiService {
   ApiService._();
 
   static String get _uid => FirebaseAuth.instance.currentUser?.uid ?? '';
+  static String _onboardingKey() => 'ayma.onboarding_complete.$_uid';
+  static String _preboardingKey() => 'ayma.preboarding_seen.$_uid';
   static String uidForClient() => FirebaseAuth.instance.currentUser?.uid ?? '';
 
   static Future<String?> _idToken() async =>
@@ -252,6 +256,9 @@ class ApiService {
       'profile_field_visibility': {},
       'raw_user_statements': [],
     });
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.remove(_onboardingKey());
+    await prefs.remove(_preboardingKey());
   }
 
   // ── Matches ────────────────────────────────────────────────────────────────
@@ -312,6 +319,10 @@ class ApiService {
   // ── Onboarding ─────────────────────────────────────────────────────────────
 
   static Future<bool> getOnboardingStatus() async {
+    // Check local cache first — survives backend cold starts
+    final prefs = await SharedPreferences.getInstance();
+    if (prefs.getBool(_onboardingKey()) == true) return true;
+
     final p = await getProfile();
     if (p == null) return false;
     final complete = inferOnboardingComplete({
@@ -325,25 +336,34 @@ class ApiService {
       'profile_private': p.profilePrivate,
       'profile_ai_observations': p.profileAnswers,
     });
-    if (complete && !p.onboardingComplete) {
-      await completeOnboarding();
+    if (complete) {
+      await prefs.setBool(_onboardingKey(), true);
+      if (!p.onboardingComplete) await completeOnboarding();
     }
     return complete;
   }
 
   static Future<void> completeOnboarding() async {
     await updateProfile({'onboarding_complete': true});
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setBool(_onboardingKey(), true);
   }
 
   static Future<void> markPreboardingSeen() async {
     await updateProfile({'preboarding_seen': true});
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setBool(_preboardingKey(), true);
   }
 
   static Future<bool> getPreboardingSeen() async {
+    final prefs = await SharedPreferences.getInstance();
+    if (prefs.getBool(_preboardingKey()) == true) return true;
     final response = await _get('/profile');
     if (response.statusCode != 200) return false;
     final data = jsonDecode(response.body) as Map<String, dynamic>;
-    return (data['preboarding_seen'] as bool?) ?? false;
+    final seen = (data['preboarding_seen'] as bool?) ?? false;
+    if (seen) await prefs.setBool(_preboardingKey(), true);
+    return seen;
   }
 
   static bool inferOnboardingComplete(Map<String, dynamic> data) {
@@ -993,7 +1013,7 @@ class ApiService {
     },
     {
       'id': 'religious_sect',
-      'text': 'What is your religious denomination or sect '  
+      'text': 'What is your religious denomination or sect '
               '(e.g. Sunni/Shia for Muslim; Brahmin/Kshatriya for Hindu)?',
       'section': 'values_religion_culture',
       'required': false,
@@ -1061,7 +1081,7 @@ class ApiService {
     },
     {
       'id': 'nikah_type',
-      'text': 'What type of marriage ceremony do you prefer '  
+      'text': 'What type of marriage ceremony do you prefer '
               '(civil + religious, religious only, etc.)?',
       'section': 'intent_readiness',
       'required': false,
@@ -1163,7 +1183,7 @@ class ApiService {
     },
     {
       'id': 'relationship_structure',
-      'text': 'What relationship structure works best for you '  
+      'text': 'What relationship structure works best for you '
               '(monogamous, polyamorous, open, etc.)?',
       'section': 'intent_readiness',
       'required': false,

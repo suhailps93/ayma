@@ -1,3 +1,4 @@
+// Sign-in and sign-up: email, phone OTP, Google, and Apple auth flows.
 import 'package:flutter/material.dart';
 import 'package:flutter_animate/flutter_animate.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';

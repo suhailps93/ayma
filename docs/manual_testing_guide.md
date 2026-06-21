@@ -15,21 +15,9 @@ pip install asyncpg google-generativeai fastapi uvicorn firebase-admin \
 
 ## 2. Start the backend
 
-### Option A — Mock DB (no Postgres needed, fastest)
-
-```bash
-cd ayma/functions/bootstrap
-USE_MOCK_DB=true uvicorn main:app --host 0.0.0.0 --port 8080
-```
-
-Data is in-memory only. Restarting the server wipes all profiles.
-
-### Option B — Real Postgres (production-like)
-
-Set up a local Postgres database and export connection details:
-
 ```bash
 export DATABASE_URL="postgresql://user:pass@localhost:5432/ayma"
+psql $DATABASE_URL -f schema.sql   # first time only
 cd ayma/functions/bootstrap
 uvicorn main:app --host 0.0.0.0 --port 8080
 ```

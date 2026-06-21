@@ -1,3 +1,4 @@
+// Locale-aware distance display: km vs miles based on user region/country.
 import 'package:flutter/widgets.dart';
 
 class DistanceUnits {

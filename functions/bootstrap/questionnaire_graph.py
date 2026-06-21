@@ -47,6 +47,8 @@ Storage contract
 """
 
 from enum import Enum
+import json
+from pathlib import Path
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -343,3 +345,32 @@ def all_fields_for_intent(intent: str) -> list[str]:
     except ValueError:
         key = IntentType.LONG_TERM
     return GLOBAL_FIELDS + INTENT_SPECIFIC_FIELDS.get(key, [])
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Profile question catalog (questionnaire_schema.json)
+# ─────────────────────────────────────────────────────────────────────────────
+
+_SCHEMA_PATH = Path(__file__).parent / "questionnaire_schema.json"
+
+
+def load_profile_schema() -> dict:
+    """Load the full profile question catalog, community configs, and storage policy."""
+    return json.loads(_SCHEMA_PATH.read_text())
+
+
+def get_profile_questions() -> list[dict]:
+    return load_profile_schema().get("questions", [])
+
+
+def get_community_extra_questions() -> list[dict]:
+    return load_profile_schema().get("community_extra_questions", [])
+
+
+def get_community_config() -> dict:
+    return load_profile_schema().get("communities", {})
+
+
+def get_public_payload_order() -> list[str]:
+    schema = load_profile_schema()
+    return schema.get("profile_storage_policy", {}).get("public_profile_payload_order", [])

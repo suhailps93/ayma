@@ -3,8 +3,8 @@
   "owner": "ayma",
   "objective": "Maximize profile completeness by collecting high-signal relationship data with explicit consent and safe handling of sensitive attributes.",
   "sync_contract": {
-    "markdown_file": "docs/ayma_profile_questions.md",
-    "rule": "Markdown must stay 1:1 with this JSON for field IDs, order, required, heuristic_usable, sensitive_flag, default_visibility, and llm_wiki_bucket."
+    "source": "functions/bootstrap/questionnaire_graph.py",
+    "rule": "Schema is loaded via load_profile_schema() in questionnaire_graph.py. Matching field routing uses GLOBAL_FIELDS and INTENT_SPECIFIC_FIELDS in the same module."
   },
   "scoring_model": {
     "profile_completeness_weights": {
@@ -833,5 +833,119 @@
       "bio_relationship_offer",
       "bio_relationship_need"
     ]
+  },
+  "community_extra_questions": [
+    {"id": "mother_tongue", "section": "cultural_identity", "question_text": "What language do you speak at home (mother tongue)?", "required": false, "sensitive_flag": false, "heuristic_usable": false},
+    {"id": "gotra", "section": "sensitive_attributes", "question_text": "What is your gotra (ancestral lineage)?", "required": false, "sensitive_flag": true, "heuristic_usable": false},
+    {"id": "manglik_status", "section": "sensitive_attributes", "question_text": "Are you Manglik (Mangal Dosha in your horoscope)?", "required": false, "sensitive_flag": true, "heuristic_usable": false},
+    {"id": "kundali_match_required", "section": "values_religion_culture", "question_text": "Is horoscope (kundali) matching required for your marriage?", "required": false, "sensitive_flag": true, "heuristic_usable": false},
+    {"id": "nri_status", "section": "cultural_identity", "question_text": "Are you an NRI (Non-Resident Indian) or based in India?", "required": false, "sensitive_flag": false, "heuristic_usable": false},
+    {"id": "state_of_origin", "section": "cultural_identity", "question_text": "Which Indian state are you originally from?", "required": false, "sensitive_flag": false, "heuristic_usable": false},
+    {"id": "family_income_band", "section": "financial_compatibility", "question_text": "What is your approximate family income band (annual)?", "required": false, "sensitive_flag": true, "heuristic_usable": false},
+    {"id": "family_type_preference", "section": "family_background", "question_text": "Do you prefer a joint family or nuclear family setup after marriage?", "required": false, "sensitive_flag": false, "heuristic_usable": false},
+    {"id": "religious_sect", "section": "values_religion_culture", "question_text": "What is your religious denomination or sect (e.g. Sunni/Shia for Muslim; Brahmin/Kshatriya for Hindu)?", "required": false, "sensitive_flag": true, "heuristic_usable": false},
+    {"id": "hijab_preference", "section": "values_religion_culture", "question_text": "Do you wear hijab / observe purdah?", "required": false, "sensitive_flag": false, "heuristic_usable": false},
+    {"id": "beard_preference", "section": "values_religion_culture", "question_text": "Do you keep a beard (for men) / prefer a bearded partner?", "required": false, "sensitive_flag": false, "heuristic_usable": false},
+    {"id": "prayer_frequency", "section": "values_religion_culture", "question_text": "How often do you pray (salah)?", "required": false, "sensitive_flag": false, "heuristic_usable": false},
+    {"id": "halal_diet_strict", "section": "physical_lifestyle", "question_text": "Do you strictly observe halal dietary requirements?", "required": false, "sensitive_flag": false, "heuristic_usable": false},
+    {"id": "mahram_required", "section": "values_religion_culture", "question_text": "Do you require a mahram (chaperone) when meeting a potential spouse?", "required": false, "sensitive_flag": true, "heuristic_usable": false},
+    {"id": "nikah_type", "section": "intent_and_readiness", "question_text": "What type of marriage ceremony do you prefer (civil + religious, religious only, etc.)?", "required": false, "sensitive_flag": false, "heuristic_usable": false},
+    {"id": "polygamy_openness", "section": "sensitive_attributes", "question_text": "Are you open to polygamous marriage arrangements?", "required": false, "sensitive_flag": true, "heuristic_usable": false},
+    {"id": "tribe_ethnicity", "section": "cultural_identity", "question_text": "What is your tribal or ethnic background?", "required": false, "sensitive_flag": true, "heuristic_usable": false},
+    {"id": "lobola_expectation", "section": "family_background", "question_text": "What are your thoughts or expectations around bride price / lobola?", "required": false, "sensitive_flag": true, "heuristic_usable": false},
+    {"id": "family_approval_importance", "section": "family_background", "question_text": "How important is family approval in your marriage decision?", "required": false, "sensitive_flag": false, "heuristic_usable": false},
+    {"id": "language_spoken", "section": "cultural_identity", "question_text": "What language(s) do you primarily speak?", "required": false, "sensitive_flag": false, "heuristic_usable": false},
+    {"id": "sexual_orientation", "section": "basic_identity", "question_text": "How would you describe your sexual orientation?", "required": false, "sensitive_flag": true, "heuristic_usable": false},
+    {"id": "pronouns", "section": "basic_identity", "question_text": "What are your pronouns?", "required": false, "sensitive_flag": false, "heuristic_usable": false},
+    {"id": "transition_status", "section": "basic_identity", "question_text": "Are you comfortable sharing your transition journey or status?", "required": false, "sensitive_flag": true, "heuristic_usable": false},
+    {"id": "relationship_structure", "section": "intent_and_readiness", "question_text": "What relationship structure works best for you (monogamous, polyamorous, open, etc.)?", "required": false, "sensitive_flag": false, "heuristic_usable": false}
+  ],
+  "communities": {
+    "dating_western": {
+      "label": "Western Dating",
+      "agent_personality": "Be warm, casual, witty, and open-minded. Celebrate individuality. Avoid assumptions about gender roles or family expectations.",
+      "notes": "Prioritize autonomy, modern dating norms, and individual compatibility over family-led criteria.",
+      "question_ids": [
+        "age", "location_city", "height_cm", "education_level", "occupation",
+        "relationship_intent", "timeline_for_commitment", "marital_status",
+        "has_children", "wants_children", "smoking_status", "alcohol_status",
+        "diet", "family_type", "communication_style", "conflict_style",
+        "bio_relationship_offer", "bio_relationship_need",
+        "partner_non_negotiables", "partner_must_haves",
+        "preferred_age_range", "gender_identity", "sexual_orientation",
+        "religion", "religious_practice_level", "income_band", "career_stage",
+        "friends_social_style", "has_pets", "past_relationship_learnings",
+        "preferred_religion", "max_distance_km", "willing_to_relocate"
+      ]
+    },
+    "arranged_india": {
+      "label": "Indian Arranged Marriage",
+      "agent_personality": "Be respectful, dignified, and family-aware. Use warm, formal language when needed. Handle religion, caste, and horoscope topics gently and always as optional.",
+      "notes": "Prioritize long-term compatibility, family alignment, religion, caste-sensitive handling, and India/NRI context.",
+      "question_ids": [
+        "age", "location_city", "height_cm", "education_level", "occupation",
+        "career_stage", "income_band", "family_income_band", "nri_status",
+        "state_of_origin", "mother_tongue", "religion", "religious_sect",
+        "caste", "sub_caste", "gotra", "manglik_status",
+        "kundali_match_required", "marital_status", "has_children",
+        "wants_children", "family_type", "family_type_preference",
+        "family_values", "diet", "smoking_status", "alcohol_status",
+        "relationship_intent", "timeline_for_commitment", "communication_style",
+        "partner_non_negotiables", "partner_must_haves", "preferred_age_range",
+        "preferred_religion", "preferred_caste", "preferred_sub_caste",
+        "skin_tone", "max_distance_km", "willing_to_relocate"
+      ]
+    },
+    "matrimonial_muslim": {
+      "label": "Muslim Matrimonial",
+      "agent_personality": "Be respectful, dignified, and nikah-focused. Use Islamic-values-aware language and treat practice, halal lifestyle, and family approval as important context.",
+      "notes": "Prioritize nikah-focused compatibility, sect and practice alignment, halal lifestyle, and family/community approval.",
+      "question_ids": [
+        "age", "location_city", "height_cm", "education_level", "occupation",
+        "career_stage", "income_band", "religion", "religious_sect",
+        "religious_practice_level", "prayer_frequency", "hijab_preference",
+        "beard_preference", "halal_diet_strict", "mahram_required",
+        "nikah_type", "marital_status", "has_children", "wants_children",
+        "family_type", "family_values", "diet", "smoking_status",
+        "alcohol_status", "relationship_intent", "timeline_for_commitment",
+        "communication_style", "partner_non_negotiables",
+        "partner_must_haves", "preferred_age_range", "max_distance_km",
+        "willing_to_relocate", "polygamy_openness"
+      ]
+    },
+    "arranged_africa_west": {
+      "label": "West African Marriage",
+      "agent_personality": "Be warm, respectful of elders and community, and culturally aware. Treat marriage as a union of families as well as individuals.",
+      "notes": "Prioritize family and community approval, faith, ethnic identity, and culturally respectful discussion of bride price traditions.",
+      "question_ids": [
+        "age", "location_city", "height_cm", "education_level", "occupation",
+        "career_stage", "income_band", "religion", "religious_practice_level",
+        "tribe_ethnicity", "language_spoken", "lobola_expectation",
+        "family_approval_importance", "marital_status", "has_children",
+        "wants_children", "family_type", "family_values", "diet",
+        "smoking_status", "alcohol_status", "relationship_intent",
+        "timeline_for_commitment", "communication_style",
+        "partner_non_negotiables", "partner_must_haves",
+        "preferred_age_range", "max_distance_km", "willing_to_relocate"
+      ]
+    },
+    "dating_lgbtq": {
+      "label": "LGBTQ+ Dating",
+      "agent_personality": "Be deeply affirming, identity-aware, and fully inclusive. Use chosen names and pronouns naturally and never make heteronormative assumptions.",
+      "notes": "Prioritize identity safety, pronouns, relationship structure, and fully inclusive language without assumptions.",
+      "question_ids": [
+        "age", "location_city", "height_cm", "education_level", "occupation",
+        "career_stage", "income_band", "gender_identity", "sexual_orientation",
+        "pronouns", "relationship_intent", "relationship_structure",
+        "timeline_for_commitment", "marital_status", "has_children",
+        "wants_children", "smoking_status", "alcohol_status", "diet",
+        "communication_style", "conflict_style", "bio_relationship_offer",
+        "bio_relationship_need", "partner_non_negotiables",
+        "partner_must_haves", "preferred_age_range", "religion",
+        "religious_practice_level", "friends_social_style", "has_pets",
+        "past_relationship_learnings", "max_distance_km",
+        "willing_to_relocate", "transition_status"
+      ]
+    }
   }
 }

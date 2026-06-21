@@ -1,3 +1,4 @@
+// Riverpod providers: auth, profile, matches, notifications, chat audio, and app state.
 import 'dart:async';
 
 import 'package:connectivity_plus/connectivity_plus.dart';

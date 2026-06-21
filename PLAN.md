@@ -33,7 +33,7 @@ This repo is in an active transition state.
 
 - The Flutter app remains the user-facing client in `ayma_flutter/`.
 - The active backend for profile/bootstrap/matching work is `functions/bootstrap/main.py`.
-- The backend now targets PostgreSQL first, with a local SQLite mock fallback for local bootstrap.
+- The backend stores all application data in PostgreSQL via `DATABASE_URL`.
 - Community-specific onboarding and question selection are in progress and partially implemented on this branch.
 - Some older docs still describe Supabase, Mem0, or old local-backend flows. Treat those as stale unless they are explicitly reconciled here.
 
@@ -41,7 +41,7 @@ This repo is in an active transition state.
 
 - [ ] Stabilize the new community-profile onboarding flow end-to-end
 - [ ] Keep backend question seeding, post-turn extraction, and profile metadata aligned with community selection
-- [ ] Reconcile stale architecture/testing docs with the actual branch state
+- [x] Reconcile stale architecture/testing docs with the actual branch state
 - [ ] Re-establish repeatable validation commands for backend, Flutter analysis, and emulator/device runs
 - [ ] Run emulator or device-based smoke coverage for onboarding, chat, profile, matches, notifications
 
@@ -50,7 +50,7 @@ This repo is in an active transition state.
 - [x] Broken onboarding file from prior agent repaired
 - [x] `community_profile` persists from Flutter onboarding
 - [x] Backend bootstrap now seeds questions from community-specific question sets
-- [x] SQLite fallback pool supports `executemany`
+- [x] Removed automatic SQLite fallback on Postgres connection failure (`main.py` lifespan now requires Postgres unless `USE_MOCK_DB=true`)
 - [x] Onboarding `location_coords` now persists through backend profile update path
 - [x] Server no longer treats onboarding-populated age/gender/location/age-range as unanswered on first bootstrap
 - [x] Flutter completeness scoring now respects community-specific question sets
@@ -60,14 +60,14 @@ This repo is in an active transition state.
 - [x] Fixed first-time `/profile` writes so onboarding no longer drops data when the user row does not exist yet
 - [x] `python3 -m py_compile functions/bootstrap/main.py functions/bootstrap/mock_db.py` passes
 - [x] `python3 -m unittest functions/bootstrap/test_main_logic.py` passes
-- [x] Cloud Run redeployed with upsert fix (revision 00013, includes mock_db.py in Docker image)
+- [x] Cloud Run redeployed with upsert fix (revision 00013); Postgres required via `DATABASE_URL`
 - [x] Emulator smoke pass: all 8 screens pass (chat, matches, explore, signals, profile-public, profile-private, settings, onboarding-flow)
 - [x] Onboarding submit confirmed landing on /chat (upsert fix verified in production)
 - [x] `FirestoreService` renamed to `ApiService` across all 10 consumer files
 - [x] `cloud_firestore` removed from pubspec.yaml (was unused — all data goes through backend HTTP)
-- [x] Dockerfile updated to COPY mock_db.py (required for SQLite fallback in Cloud Run)
+- [x] Dockerfile includes `mock_db.py` (for explicit `USE_MOCK_DB=true` local dev only — not used on Cloud Run)
 - [x] Stale docs/agent.md updated (removed Firestore schema, updated service names, added postgres schema reference)
-- [x] Bad-named doc `# Ayma: Production-Scale Matchmaking OS.md` renamed to `docs/postgres_rearch_plan.md`
+- [x] Bad-named doc `# Ayma: Production-Scale Matchmaking OS.md` removed (superseded by `docs/ARCHITECTURE.md`)
 - [ ] `flutter analyze` re-run on this branch (Flutter CLI unavailable in agent shell)
 - [ ] Text chat integration test (adb cannot type into Flutter TextField; requires device keyboard or flutter_driver)
 
@@ -131,10 +131,10 @@ When stopping, append/update these items in this file:
 - [x] Establish a passing emulator/device smoke checklist (all major screens verified)
 - [x] Remove unused `cloud_firestore` package from pubspec.yaml
 - [x] Remove misleading `FirestoreService` name (renamed to `ApiService`)
-- [x] Fix Dockerfile to include mock_db.py
+- [x] Dockerfile includes `mock_db.py` for opt-in local dev only
 - [x] Rename bad-named doc file
 - [x] Re-run Flutter static validation (`flutter analyze`) — completed: 0 issues found.
-- [ ] Remove or quarantine any remaining obsolete artifacts
+- [x] Remove or quarantine any remaining obsolete artifacts (deleted stale docs: data.md, memory.md, matching.md, app_audit_and_data_map.md, laptop_backend_server.md, pixel_wifi_test_runbook.md)
 
 ### Workstream C — Shared Agent Discipline
 
@@ -385,3 +385,26 @@ Each step has:
 **-> Step 1.8 — Wire Supabase Auth into the backend**
 
 Thin-client auth is the active architecture rule. Do not add new direct database or auth logic to the clients.
+
+---
+
+## Security Fixes Needed
+
+> Audited: 2026-06-20. Fix all Critical and High items before production launch.
+
+| Severity | Location | Issue | Fix |
+|---|---|---|---|
+| Critical | `functions/bootstrap/main.py:828` | Raw Google API key (`GOOGLE_API_KEY`) returned directly to the Flutter client in the `"token"` field of the bootstrap response. Any authenticated user can extract this key and make unlimited calls to all Gemini services with no per-user quota enforcement. | Replace with short-lived ephemeral credentials. Use Gemini's token generation endpoint or a Firebase App Check–gated token exchange. Never return the raw `GOOGLE_API_KEY` to any client. |
+| Critical | `functions/bootstrap/main.py:168–173` | `allow_origins=["*"]` is combined with `allow_credentials=True`. The CORS spec prohibits this combination; browsers reject it, but the configuration is still invalid and signals a misconfigured security boundary. Any web client can attempt credentialed cross-origin requests. | Replace `allow_origins=["*"]` with an explicit allowlist of trusted origins (e.g. the Flutter app deep-link domain or any web admin panel). Remove `allow_credentials=True` if credentials are not needed from a browser context. |
+| High | `functions/bootstrap/main.py:2260` | `/vibe-check` endpoint triggers 2–3 expensive LLM calls per request (conversation simulation + scoring) but has no `@limiter.limit()` decorator. Any authenticated user can call it in a tight loop, rapidly exhausting Gemini API quota. | Add `@limiter.limit(RATE_RUN_MATCHING)` (or a dedicated tighter limit) to `/vibe-check`. Also consider per-user-ID limiting in addition to IP-based limiting. |
+| High | `functions/bootstrap/main.py:139` | `limiter = Limiter(key_func=get_remote_address)` — all rate limits are per source IP. Behind mobile carrier NAT, many real users share one IP and get collectively throttled. Conversely, an attacker with multiple IPs (VPN, cloud VMs) trivially bypasses the limit. | Add a second limiter key function that uses the authenticated `uid` for all endpoints that call `Depends(verify_token)`. Apply both IP and user-ID limits. |
+| High | `functions/bootstrap/main.py:931–932` | `PostTurnRequest.messages: list[dict]` has no Pydantic schema on individual items. No constraint on `role` values, no max length on `text`, no cap on list length. A user can send arbitrary role values (e.g. `role="model"`) to poison the conversation history fed to Gemini, or send megabytes of text per call. | Define a `MessageItem(BaseModel)` with `role: Literal["user","model"]` and `text: str = Field(max_length=4000)`. Add `messages: list[MessageItem] = Field(max_items=50)` to `PostTurnRequest`. |
+| High | `functions/bootstrap/main.py:1647–1673` | `MessageBody.text: str` in `POST /messages` has no length validation. A user can send a multi-megabyte DM body that gets stored in the DB and partially embedded in a push notification preview. | Add `text: str = Field(max_length=2000)` to `MessageBody`. |
+| High | `functions/bootstrap/main.py:1412–1427` | `POST /profile/answers` accepts any `field_id` string. Unknown field IDs (not in `PROFILE_FIELD_META`) are stored as `sensitive=False` (public) by default. This allows users to inject arbitrary key-value pairs into their profile JSONB columns and mark them public, polluting downstream matching and LLM prompts. | Validate `field_id` against `PROFILE_FIELD_META` at the top of the handler: `if field_id not in PROFILE_FIELD_META: raise HTTPException(400, "Unknown field_id")`. |
+| High | `functions/bootstrap/main.py:1165–1183` | `ProfileUpdateBody` fields `age`, `display_name`, `community_profile`, and `agent_name` have no Pydantic constraints (min/max, allowed values, max length). A user can set `age=-1` or `age=999`, a 10 000-character display name, or an invalid `community_profile` string that causes silent fallback to the full question bank. | Add `age: int = Field(None, ge=1, le=120)`, `display_name: str = Field(None, max_length=80)`, `agent_name: str = Field(None, max_length=40)`, and validate `community_profile` against `COMMUNITY_CONFIG.keys()`. |
+| Medium | `functions/bootstrap/main.py:1466–1474` | `POST /questions/followup` accepts arbitrary text and inserts it verbatim into the `user_questions` table. The text is later embedded in the Gemini system prompt as a follow-up reminder. A user can inject adversarial instructions (e.g. `"IGNORE PREVIOUS INSTRUCTIONS…"`) that manipulate Ayma's behavior in future sessions. | Add `question: str = Field(max_length=300)` to `FollowupQuestionBody`. Strip or escape any content that looks like system-prompt control sequences before storing. |
+| Medium | `storage.rules:5` | `allow read: if request.auth != null` on `media/{uid}/{allPaths=**}` allows any authenticated user to read any other user's media files, not just their own matches. A bad actor can enumerate and download all user photos. | Restrict reads to the owner or to users who have an active match with the media owner. At minimum, add `request.auth.uid == uid` as an alternative condition gated on a separate "match verified" lookup, or scope reads to `request.auth.uid == uid` and serve match media through a signed-URL API endpoint instead. |
+| Medium | `firestore.rules:6` | `allow read: if request.auth != null && resource.data.onboarding_complete == true` lets any authenticated user read the full Firestore user document of any onboarded user. Depending on what fields are stored in Firestore, this can expose private profile data. | Tighten to `request.auth.uid == uid` for self-reads and provide an explicit, field-masked public-read rule that exposes only safe fields (e.g. `display_name`, `profile_public`). |
+| Medium | `functions/bootstrap/main.py:1485–1508` | The `query` parameter in `GET /explore` is passed directly into an `ILIKE` clause with `%…%` wrapping. There is no length validation. Very long query strings cause expensive sequential scans and can degrade DB performance. The parameter is properly parameterized so SQL injection is not possible, but resource exhaustion is. | Add `query: str = Query(None, max_length=100)` in the function signature. |
+| Medium | `functions/bootstrap/config.py:18–19` | The `DATABASE_URL` default value is `postgresql://postgres:postgres@localhost:5432/ayma` — a plaintext credential embedded in source code. If this default is ever reached in a non-local environment (e.g. a CI container without the env var set), it will attempt to connect with the default postgres superuser password. | Remove the default value entirely: `DATABASE_URL = os.environ["DATABASE_URL"]` (will raise `KeyError` at startup if unset, which is the correct fail-fast behavior). |
+| Low | `functions/bootstrap/main.py:193` | `logger.info(f"FCM sent: {title!r} → {fcm_token[:20]}…")` logs the first 20 characters of an FCM device token. FCM tokens are sensitive; even a partial token should not appear in logs that may be exported to observability platforms. | Replace with `logger.info(f"FCM sent: {title!r} → [token redacted]")` or log only a hash of the token for correlation. |

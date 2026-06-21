@@ -1,6 +1,6 @@
+// No-op audio stubs for iOS/Android — real implementation is in web_audio_impl.dart on web.
 import 'dart:typed_data';
 
-// Stub for non-web platforms — flutter_sound is used instead.
 class WebMicCapture {
   Future<void> start(void Function(Uint8List pcm16) onData) async {}
   void stop() {}

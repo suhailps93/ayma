@@ -35,7 +35,7 @@ Run these first:
 ```bash
 ./ayma_flutter/scripts/check-flutter-env
 python3 -m unittest functions/bootstrap/test_main_logic.py
-python3 -m py_compile functions/bootstrap/main.py functions/bootstrap/mock_db.py functions/bootstrap/test_main_logic.py
+python3 -m py_compile functions/bootstrap/main.py functions/bootstrap/test_main_logic.py
 ```
 
 If Flutter is runnable:

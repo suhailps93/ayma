@@ -1,3 +1,4 @@
+// Gemini Live WebSocket client: setup, bidirectional audio, tool calls, turn events.
 import 'dart:async';
 import 'dart:convert';
 

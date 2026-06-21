@@ -1,3 +1,4 @@
+// UserProfile model and fromMap parsing for backend /profile responses.
 class UserProfile {
   final String id;
   final String displayName;

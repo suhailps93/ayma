@@ -1,3 +1,4 @@
+// Build-time config: Cloud Run URL, live AI provider (Gemini/OpenAI), and API keys.
 class Env {
   Env._();
 

@@ -1,7 +1,4 @@
-// Thin client for the Cloud Run bootstrap function.
-// All data (profiles, matches, notifications) goes via Firestore directly.
-// Only bootstrap and post-turn memory extraction go through here.
-
+// Cloud Run AI and media client: bootstrap, post-turn, matching, vibe-check, Firebase Storage uploads.
 import 'dart:convert';
 import 'dart:io' as io;
 import 'dart:typed_data';
@@ -99,6 +96,34 @@ class BackendService {
       throw Exception('Vibe check failed: ${response.body}');
     }
     return jsonDecode(response.body) as Map<String, dynamic>;
+  }
+
+  static Future<String> chat({
+    required List<Map<String, String>> messages,
+    String? systemPrompt,
+  }) async {
+    final token = await _idToken();
+    if (token == null) throw Exception('Not authenticated');
+
+    final response = await http
+        .post(
+          Uri.parse('${Env.bootstrapUrl}/chat'),
+          headers: {
+            'Content-Type': 'application/json',
+            'Authorization': 'Bearer $token',
+          },
+          body: jsonEncode({
+            'messages': messages,
+            if (systemPrompt != null && systemPrompt.isNotEmpty)
+              'system_prompt': systemPrompt,
+          }),
+        )
+        .timeout(const Duration(seconds: 30));
+
+    if (response.statusCode == 429) throw Exception('quota_exhausted');
+    if (response.statusCode != 200) throw Exception('Chat failed: ${response.statusCode}');
+    final body = jsonDecode(response.body) as Map<String, dynamic>;
+    return (body['reply'] as String?) ?? '';
   }
 
   static Future<String> uploadMedia(Uint8List bytes, String filename) async {

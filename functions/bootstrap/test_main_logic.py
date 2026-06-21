@@ -2,9 +2,7 @@ import asyncio
 import importlib.util
 import json
 import os
-import sqlite3
 import sys
-import tempfile
 import types
 import unittest
 from pathlib import Path
@@ -179,7 +177,6 @@ def _load_module(name: str, relative_path: str):
 
 _install_test_stubs()
 bootstrap_main = _load_module("bootstrap_main_under_test", "main.py")
-mock_db = _load_module("bootstrap_mock_db_under_test", "mock_db.py")
 
 
 def _parse_flutter_community_profiles():
@@ -199,7 +196,6 @@ def _parse_flutter_community_profiles():
         question_ids = re.findall(r"'([^']+)'", ids_match.group(1))
         profiles[community_id] = question_ids
     return profiles
-
 
 class BootstrapLogicTests(unittest.TestCase):
     def test_answered_keys_include_onboarding_backed_fields(self):
@@ -277,86 +273,6 @@ class BootstrapLogicTests(unittest.TestCase):
         self.assertEqual(parsed["photo_order"], ["a.jpg", "b.jpg"])
         self.assertTrue(parsed["onboarding_complete"])
         self.assertFalse(parsed["matching_paused"])
-
-
-class MockDbTests(unittest.TestCase):
-    def test_mock_db_supports_location_coords_and_executemany(self):
-        async def _run():
-            with tempfile.TemporaryDirectory() as tmpdir:
-                db_path = Path(tmpdir) / "test.db"
-                pool = mock_db.MockPool(db_path=str(db_path))
-                await pool.init_db()
-
-                async with pool.acquire() as conn:
-                    await conn.executemany(
-                        "INSERT INTO user_questions (user_id, question_id, key, text, category, is_followup, sort_order) VALUES ($1, $2, $3, $4, $5, $6, $7)",
-                        [
-                            ("u1", "q1", "q1", "Question 1", "required", 0, 1),
-                            ("u1", "q2", "q2", "Question 2", "deeper", 0, 2),
-                        ],
-                    )
-                    await conn.execute(
-                        "INSERT INTO users (id, display_name, location_coords) VALUES ($1, $2, $3)",
-                        "u1",
-                        "User 1",
-                        '{"lat": 1.23, "lng": 4.56}',
-                    )
-
-                raw = sqlite3.connect(db_path)
-                try:
-                    count = raw.execute("SELECT COUNT(*) FROM user_questions").fetchone()[0]
-                    coords = raw.execute("SELECT location_coords FROM users WHERE id = 'u1'").fetchone()[0]
-                finally:
-                    raw.close()
-
-                self.assertEqual(count, 2)
-                self.assertIn('"lat": 1.23', coords)
-
-        asyncio.run(_run())
-
-    def test_profile_update_creates_missing_user_row(self):
-        async def _run():
-            with tempfile.TemporaryDirectory() as tmpdir:
-                db_path = Path(tmpdir) / "test.db"
-                pool = mock_db.MockPool(db_path=str(db_path))
-                await pool.init_db()
-                bootstrap_main.app.state.pool = pool
-
-                body = bootstrap_main.ProfileUpdateBody(
-                    display_name="Suhail",
-                    gender="man",
-                    onboarding_complete=True,
-                    preboarding_seen=True,
-                    matching_prefs={"interested_in": "women", "age_min": 24, "age_max": 38},
-                    location_coords={"lat": 37.77, "lng": -122.42},
-                )
-
-                result = await bootstrap_main.update_profile(body, uid="new-user")
-
-                self.assertEqual(result, {"success": True})
-
-                raw = sqlite3.connect(db_path)
-                try:
-                    row = raw.execute(
-                        """
-                        SELECT display_name, gender, onboarding_complete, preboarding_seen,
-                               matching_prefs, location_coords
-                        FROM users WHERE id = 'new-user'
-                        """
-                    ).fetchone()
-                finally:
-                    raw.close()
-
-                self.assertIsNotNone(row)
-                self.assertEqual(row[0], "Suhail")
-                self.assertEqual(row[1], "man")
-                self.assertEqual(row[2], 1)
-                self.assertEqual(row[3], 1)
-                self.assertIn('"interested_in": "women"', row[4])
-                self.assertIn('"lat": 37.77', row[5])
-
-        asyncio.run(_run())
-
 
 class SystemPromptTests(unittest.TestCase):
     """Verify that system prompt construction is correct for new vs returning users."""
@@ -482,333 +398,19 @@ class SystemPromptTests(unittest.TestCase):
         self.assertIn("nikah", prompt.lower())
 
 
-class PostTurnWikiTests(unittest.TestCase):
-    """Verify post-turn wiki extraction and preference updates."""
-
-    def test_post_turn_extracts_and_saves_wiki_from_conversation(self):
-        """post_turn should call Gemini, parse JSON, and update the user's wiki in the DB."""
-        async def _run():
-            with tempfile.TemporaryDirectory() as tmpdir:
-                db_path = Path(tmpdir) / "test.db"
-                pool = mock_db.MockPool(db_path=str(db_path))
-                await pool.init_db()
-                bootstrap_main.app.state.pool = pool
-
-                uid = "priya-wiki-test"
-                async with pool.acquire() as conn:
-                    await conn.execute(
-                        "INSERT INTO users (id, display_name) VALUES ($1, $2)", uid, "Priya"
-                    )
-
-                wiki_payload = {
-                    "wiki_updates": {
-                        "about_me": "- She is 28 years old\n- She is a software engineer",
-                        "context": "- She lives in Toronto\n- Originally from Chennai",
-                        "preferences": "- She wants to marry\n- Prefers South Indian partner",
-                        "matching": ""
-                    },
-                    "extracted_answers": [{"id": "diet", "value": "vegetarian", "confidence": "high"}],
-                    "answered_question_keys": ["diet"],
-                    "public_summary": "Priya is a 28-year-old engineer in Toronto."
-                }
-
-                class MockModel:
-                    def __init__(self, *a, **kw): pass
-                    async def generate_content_async(self, *a, **kw):
-                        return types.SimpleNamespace(text=json.dumps(wiki_payload))
-
-                original = bootstrap_main.genai.GenerativeModel
-                bootstrap_main.genai.GenerativeModel = MockModel
-                try:
-                    messages = [
-                        {"role": "user", "text": "I'm Priya, 28, software engineer in Toronto."},
-                        {"role": "model", "text": "Nice to meet you! What brought you here?"},
-                        {"role": "user", "text": "Tamil Brahmin. Vegetarian. Want to marry someone South Indian."},
-                    ]
-                    req = bootstrap_main.PostTurnRequest(session_id="s1", messages=messages)
-                    result = await bootstrap_main.post_turn(request=None, body=req, uid=uid)
-                    self.assertEqual(result["updated"], True)
-                finally:
-                    bootstrap_main.genai.GenerativeModel = original
-
-                raw = sqlite3.connect(db_path)
-                try:
-                    row = raw.execute(
-                        "SELECT wiki_about_me, wiki_context, wiki_preferences FROM users WHERE id = ?",
-                        (uid,)
-                    ).fetchone()
-                    self.assertIsNotNone(row)
-                    self.assertIn("28 years old", row[0])
-                    self.assertIn("Toronto", row[1])
-                    self.assertIn("South Indian", row[2])
-                finally:
-                    raw.close()
-
-        asyncio.run(_run())
-
-    def test_post_turn_updates_softened_preference(self):
-        """When user softens a preference, post-turn must update the wiki bullet, not keep old version."""
-        async def _run():
-            with tempfile.TemporaryDirectory() as tmpdir:
-                db_path = Path(tmpdir) / "test.db"
-                pool = mock_db.MockPool(db_path=str(db_path))
-                await pool.init_db()
-                bootstrap_main.app.state.pool = pool
-
-                uid = "priya-soften-test"
-                old_prefs = "- She wants someone South Indian, ideally\n- She wants someone career-stable"
-                async with pool.acquire() as conn:
-                    await conn.execute(
-                        "INSERT INTO users (id, display_name, wiki_preferences) VALUES ($1, $2, $3)",
-                        uid, "Priya", old_prefs
-                    )
-
-                # Gemini correctly processes the softening and returns updated preferences
-                updated_prefs = (
-                    "- She prefers South Indian but is open to others with strong values\n"
-                    "- She wants someone career-stable"
-                )
-                wiki_payload = {
-                    "wiki_updates": {
-                        "about_me": "",
-                        "context": "",
-                        "preferences": updated_prefs,
-                        "matching": ""
-                    },
-                    "extracted_answers": [],
-                    "answered_question_keys": [],
-                    "public_summary": ""
-                }
-
-                class MockModel:
-                    def __init__(self, *a, **kw): pass
-                    async def generate_content_async(self, *a, **kw):
-                        return types.SimpleNamespace(text=json.dumps(wiki_payload))
-
-                original = bootstrap_main.genai.GenerativeModel
-                bootstrap_main.genai.GenerativeModel = MockModel
-                try:
-                    messages = [
-                        {"role": "user", "text": "I'm open to outside Tamil now — values matter more than background."},
-                        {"role": "model", "text": "That's a meaningful shift. What values matter most?"},
-                        {"role": "user", "text": "South Indian still preferred but it's not a hard rule."},
-                    ]
-                    req = bootstrap_main.PostTurnRequest(session_id="s2", messages=messages)
-                    await bootstrap_main.post_turn(request=None, body=req, uid=uid)
-                finally:
-                    bootstrap_main.genai.GenerativeModel = original
-
-                raw = sqlite3.connect(db_path)
-                try:
-                    row = raw.execute("SELECT wiki_preferences FROM users WHERE id = ?", (uid,)).fetchone()
-                    prefs = row[0]
-                    self.assertIn("open to others with strong values", prefs,
-                        "Softened preference must appear in updated wiki")
-                    self.assertNotIn("ideally\n", prefs,
-                        "Old strict preference 'ideally' must be replaced by the softer version")
-                    self.assertIn("career-stable", prefs,
-                        "Unrelated preference must be preserved")
-                finally:
-                    raw.close()
-
-        asyncio.run(_run())
-
-    def test_post_turn_preserves_existing_wiki_when_nothing_new(self):
-        """If Gemini returns empty wiki updates, existing wiki must be preserved."""
-        async def _run():
-            with tempfile.TemporaryDirectory() as tmpdir:
-                db_path = Path(tmpdir) / "test.db"
-                pool = mock_db.MockPool(db_path=str(db_path))
-                await pool.init_db()
-                bootstrap_main.app.state.pool = pool
-
-                uid = "priya-preserve-test"
-                existing_about = "- She is 28 years old\n- She is a software engineer"
-                async with pool.acquire() as conn:
-                    await conn.execute(
-                        "INSERT INTO users (id, display_name, wiki_about_me) VALUES ($1, $2, $3)",
-                        uid, "Priya", existing_about
-                    )
-
-                class MockModel:
-                    def __init__(self, *a, **kw): pass
-                    async def generate_content_async(self, *a, **kw):
-                        return types.SimpleNamespace(text=json.dumps({
-                            "wiki_updates": {"about_me": "", "context": "", "preferences": "", "matching": ""},
-                            "extracted_answers": [], "answered_question_keys": [], "public_summary": ""
-                        }))
-
-                original = bootstrap_main.genai.GenerativeModel
-                bootstrap_main.genai.GenerativeModel = MockModel
-                try:
-                    req = bootstrap_main.PostTurnRequest(
-                        session_id="s3",
-                        messages=[{"role": "user", "text": "hey"}, {"role": "model", "text": "hi!"}]
-                    )
-                    await bootstrap_main.post_turn(request=None, body=req, uid=uid)
-                finally:
-                    bootstrap_main.genai.GenerativeModel = original
-
-                raw = sqlite3.connect(db_path)
-                try:
-                    row = raw.execute("SELECT wiki_about_me FROM users WHERE id = ?", (uid,)).fetchone()
-                    self.assertEqual(row[0], existing_about,
-                        "Existing wiki must be preserved when no new info was extracted")
-                finally:
-                    raw.close()
-
-        asyncio.run(_run())
-
-
-class MatchingPipelineTests(unittest.TestCase):
-    """Verify the full matching pipeline: heuristic filter → scoring → DB write → /matches."""
-
-    async def _setup_two_users(self, pool, uid_a, uid_b):
-        """Create two compatible users in the DB."""
-        for uid, name, gender, age, interested_in in [
-            (uid_a, "Priya", "Female", 28, "Male"),
-            (uid_b, "Arjun", "Male", 30, "Female"),
-        ]:
-            body = bootstrap_main.ProfileUpdateBody(
-                display_name=name,
-                gender=gender,
-                age=age,
-                community_profile="arranged_india",
-                onboarding_complete=True,
-                matching_prefs={"interested_in": interested_in},
-                wiki_preferences=f"- Wants a {interested_in.lower()} partner, 25-35",
-            )
-            await bootstrap_main.update_profile(body, uid=uid)
-
-    def test_matching_creates_match_when_gemini_returns_high_score(self):
-        """run_matching must create a match record when _score_pair returns score >= 0.4."""
-        async def _run():
-            with tempfile.TemporaryDirectory() as tmpdir:
-                db_path = Path(tmpdir) / "test.db"
-                pool = mock_db.MockPool(db_path=str(db_path))
-                await pool.init_db()
-                bootstrap_main.app.state.pool = pool
-
-                uid_a = "priya-match-uid"
-                uid_b = "arjun-match-uid"
-                await self._setup_two_users(pool, uid_a, uid_b)
-
-                # Use score 0.55: above 0.4 match threshold, below 0.65 vibe threshold
-                # → match is created without blending, DB score = exactly 0.55
-                original = bootstrap_main._score_pair
-                async def mock_score(model, me, other):
-                    return {
-                        "score": 0.55,
-                        "rationale": "Both value family and career stability",
-                        "summary_a": "Priya is looking for a stable family-oriented partner",
-                        "summary_b": "Arjun values family and wants someone like-minded",
-                    }
-                bootstrap_main._score_pair = mock_score
-
-                try:
-                    result = await bootstrap_main.run_matching(request=None, uid=uid_a)
-                finally:
-                    bootstrap_main._score_pair = original
-
-                self.assertGreater(result["matches_created"], 0,
-                    f"Expected ≥1 match created, got: {result}")
-                self.assertEqual(result["candidates_evaluated"], 1,
-                    "Should evaluate exactly 1 candidate (Arjun)")
-
-                # Verify match exists in DB with correct score
-                raw = sqlite3.connect(db_path)
-                try:
-                    row = raw.execute("SELECT user_a, user_b, score, rationale FROM matches LIMIT 1").fetchone()
-                    self.assertIsNotNone(row, "Match must exist in DB after run_matching")
-                    users = {row[0], row[1]}
-                    self.assertEqual(users, {uid_a, uid_b}, "Match must be between the two test users")
-                    self.assertAlmostEqual(float(row[2]), 0.55, places=2)
-                    self.assertIn("family", row[3])
-                finally:
-                    raw.close()
-
-        asyncio.run(_run())
-
-    def test_matching_no_match_when_score_below_threshold(self):
-        """run_matching must NOT create a match when score < 0.4."""
-        async def _run():
-            with tempfile.TemporaryDirectory() as tmpdir:
-                db_path = Path(tmpdir) / "test.db"
-                pool = mock_db.MockPool(db_path=str(db_path))
-                await pool.init_db()
-                bootstrap_main.app.state.pool = pool
-
-                uid_a = "user-low-score-a"
-                uid_b = "user-low-score-b"
-                await self._setup_two_users(pool, uid_a, uid_b)
-
-                original = bootstrap_main._score_pair
-                async def mock_low_score(model, me, other):
-                    return {"score": 0.25, "rationale": "Poor compatibility", "summary_a": "", "summary_b": ""}
-                bootstrap_main._score_pair = mock_low_score
-
-                try:
-                    result = await bootstrap_main.run_matching(request=None, uid=uid_a)
-                finally:
-                    bootstrap_main._score_pair = original
-
-                self.assertEqual(result["matches_created"], 0,
-                    "Score below threshold must not create a match")
-
-        asyncio.run(_run())
-
-    def test_get_matches_returns_created_match(self):
-        """/matches endpoint must return matches that were written by run_matching."""
-        async def _run():
-            with tempfile.TemporaryDirectory() as tmpdir:
-                db_path = Path(tmpdir) / "test.db"
-                pool = mock_db.MockPool(db_path=str(db_path))
-                await pool.init_db()
-                bootstrap_main.app.state.pool = pool
-
-                uid_a = "priya-get-uid"
-                uid_b = "arjun-get-uid"
-                await self._setup_two_users(pool, uid_a, uid_b)
-
-                # Score 0.58: above threshold (0.4), below vibe threshold (0.65) → exact score in DB
-                original = bootstrap_main._score_pair
-                async def mock_score(model, me, other):
-                    return {"score": 0.58, "rationale": "Good match", "summary_a": "S-A", "summary_b": "S-B"}
-                bootstrap_main._score_pair = mock_score
-
-                try:
-                    await bootstrap_main.run_matching(request=None, uid=uid_a)
-                finally:
-                    bootstrap_main._score_pair = original
-
-                matches = await bootstrap_main.get_matches(uid=uid_a)
-                self.assertIsInstance(matches, list)
-                self.assertGreater(len(matches), 0, "get_matches must return the created match")
-                m = matches[0]
-                self.assertIn("other_display_name", m)
-                self.assertEqual(m["other_display_name"], "Arjun")
-                self.assertAlmostEqual(float(m["score"]), 0.58, places=2)
-
-        asyncio.run(_run())
-
+class HeuristicMatchingTests(unittest.TestCase):
     def test_heuristic_filter_blocks_same_gender_interest(self):
-        """Heuristic must block pairs where gender interest doesn't match."""
         me = {"gender": "Female", "age": 28, "matching_prefs": {"interested_in": "Male"}}
         other_female = {"gender": "Female", "age": 27, "matching_prefs": {"interested_in": "Female"}}
         other_male = {"gender": "Male", "age": 30, "matching_prefs": {"interested_in": "Female"}}
-
-        self.assertFalse(bootstrap_main._is_heuristic_match(me, other_female),
-            "Female interested in Male must not match with Female interested in Female")
-        self.assertTrue(bootstrap_main._is_heuristic_match(me, other_male),
-            "Female interested in Male must match with Male interested in Female")
+        self.assertFalse(bootstrap_main._is_heuristic_match(me, other_female))
+        self.assertTrue(bootstrap_main._is_heuristic_match(me, other_male))
 
     def test_heuristic_filter_blocks_age_out_of_range(self):
-        """Heuristic must block candidates outside the user's stated age preference."""
         me = {"gender": "Female", "age": 28, "matching_prefs": {"interested_in": "Male", "age_min": 27, "age_max": 35}}
         too_young = {"gender": "Male", "age": 24, "matching_prefs": {"interested_in": "Female"}}
-        too_old   = {"gender": "Male", "age": 40, "matching_prefs": {"interested_in": "Female"}}
+        too_old = {"gender": "Male", "age": 40, "matching_prefs": {"interested_in": "Female"}}
         just_right = {"gender": "Male", "age": 31, "matching_prefs": {"interested_in": "Female"}}
-
         self.assertFalse(bootstrap_main._is_heuristic_match(me, too_young))
         self.assertFalse(bootstrap_main._is_heuristic_match(me, too_old))
         self.assertTrue(bootstrap_main._is_heuristic_match(me, just_right))

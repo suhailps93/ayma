@@ -1,3 +1,4 @@
+// Styled text field matching Ayma theme for forms and auth inputs.
 import 'package:flutter/material.dart';
 
 import '../theme.dart';

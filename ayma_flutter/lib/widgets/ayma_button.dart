@@ -1,3 +1,4 @@
+// Primary branded button with loading and outlined variants.
 import 'package:flutter/material.dart';
 
 import '../theme.dart';

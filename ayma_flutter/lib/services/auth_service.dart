@@ -1,3 +1,4 @@
+// Firebase Auth wrapper: email, phone, Google, Apple sign-in and session lifecycle.
 import 'dart:async';
 
 import 'package:firebase_auth/firebase_auth.dart';

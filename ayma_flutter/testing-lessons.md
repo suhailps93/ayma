@@ -112,3 +112,13 @@ Each entry:
 - Lesson 5: To interact with Flutter web buttons, the flutter-view must receive the pointer events. Canvas/document dispatch is insufficient — only `document.querySelector('flutter-view').dispatchEvent(new PointerEvent(...))` works
 - Screenshots: /tmp/web_01_load.png (initial), /tmp/web_02_flutter.png (overlay dialog), /tmp/web_03_login.png (clean login screen), /tmp/web_07_flutter_view_click.png (dialog dismissed), /tmp/web_11_email_signin_form.png (email auth form)
 - Screens covered: login/auth screen ✓, overlay permission dialog ✓ (fires on web — bug), Email form navigation ✓, CORS to backend ✓
+### 2026-06-20 Gemini model fix + onboarding SharedPreferences cache
+- Tested: Gemini WebSocket model name (gemini-2.0-flash-live-001 vs gemini-3.1-flash-live-preview) + onboarding SharedPreferences skip; device 10.0.0.203:43723 (Pixel phone); rebuilt debug APK from source and installed via adb install
+- Outcome:
+  - Fix 1 (Voice model): FAIL — runtime logs still show `"model":"models/gemini-3.1-flash-live-preview"` and `WebSocket closed (code: 1011)` reconnect loop. Root cause: the Flutter-side fallback in audio_service.dart (line 416/462) was updated to `gemini-2.0-flash-live-001`, but this fallback is only used when `setup == null`. The backend bootstrap server (`config.py` line 25: `LIVE_MODEL = os.environ.get("LIVE_MODEL", "gemini-3.1-flash-live-preview")`) returns a non-null `setup` including the old model name, which overrides the Flutter fallback. The backend config.py default needs to change for the Flutter fix to take effect.
+  - Fix 2 (Onboarding SharedPreferences cache): PASS — screenshot confirmed app goes directly to `/chat` screen on relaunch, bypassing onboarding. `getOnboardingStatus()` in api_service.dart (line 320-323) returns true from SharedPreferences cache without a network round-trip.
+- New failure patterns:
+  - `gemini-3.1-flash-live-preview` model returns 1011 "Internal error encountered" consistently — may be model availability/key issue
+  - flutter run -d <device> times out at 120s on this machine (build takes ~12s but full attach+install takes longer); use `flutter build apk --debug && adb install -r` instead for reliable CI installs
+  - debugPrint logs (I/flutter : DEBUG:) only appear in logcat when voice is actively triggered (Gemini connect attempt); they do not appear on startup startup routing — route checks are silent
+- Screens covered: chat screen direct navigation (onboarding skip) ✓; voice connect attempt logs ✓

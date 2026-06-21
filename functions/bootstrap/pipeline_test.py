@@ -9,15 +9,13 @@ Creates 4 Western-dating profiles, runs the full matching pipeline:
 Prints a full report and flags any production-readiness gaps.
 
 Run:
-  USE_MOCK_DB=true python3 pipeline_test.py
+  DATABASE_URL=postgresql://... python3 pipeline_test.py
 """
 
 import asyncio
 import json
 import os
 import sys
-
-os.environ.setdefault("USE_MOCK_DB", "true")
 
 # Lazy-import main so env is set first
 import main as M
@@ -369,9 +367,9 @@ def audit_production_readiness():
         (root / "../../schema.sql").exists(),
         "schema.sql present")
 
-    chk("Mock DB for local dev",
-        (root / "mock_db.py").exists(),
-        "USE_MOCK_DB=true switches to SQLite")
+    chk("Questionnaire schema bundled",
+        (root / "questionnaire_schema.json").exists(),
+        "question field catalog + community configs")
 
     chk("Questionnaire graph in code",
         (root / "questionnaire_graph.py").exists(),
@@ -457,12 +455,12 @@ async def main():
     print("  AYMA PIPELINE END-TO-END TEST")
     print("═"*60)
 
-    pool = M.app.state.pool if hasattr(M.app.state, "pool") else None
-    if pool is None:
-        # Boot the mock pool directly
-        from mock_db import MockPool
-        pool = MockPool()
-        await pool.init_db()
+    db_url = os.environ.get("DATABASE_URL")
+    if not db_url:
+        sys.exit("Set DATABASE_URL to a Postgres instance with schema.sql applied")
+
+    import asyncpg
+    pool = await asyncpg.create_pool(db_url, min_size=1, max_size=5)
 
     async with pool.acquire() as conn:
         await seed_profiles(conn)

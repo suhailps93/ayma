@@ -1,3 +1,4 @@
+// Mic capture to PCM16 for live voice sessions (flutter_sound on mobile, WebMicCapture on web).
 // ignore_for_file: deprecated_member_use
 import 'dart:async';
 import 'dart:math' as math;

@@ -1,3 +1,4 @@
+// App entry point: Firebase init, Riverpod root, go_router, and overlay mini-app.
 import 'package:firebase_core/firebase_core.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';

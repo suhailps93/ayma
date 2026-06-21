@@ -1,5 +1,4 @@
-// AuthUser is a thin wrapper used throughout the app.
-// Firebase Auth is the source of truth — this is populated from FirebaseAuth.instance.currentUser.
+// Thin auth user wrapper populated from FirebaseAuth.instance.currentUser.
 class AuthUser {
   final String id;
   final String? email;

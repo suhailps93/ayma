@@ -1,3 +1,4 @@
+// Android floating overlay window for voice chat while using other apps.
 import 'package:flutter/foundation.dart';
 import 'package:flutter_overlay_window/flutter_overlay_window.dart';
 

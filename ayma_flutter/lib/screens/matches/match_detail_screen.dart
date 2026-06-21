@@ -1,3 +1,4 @@
+// Match detail: score, rationale, vibe-check transcript, accept/reject, and peer profile.
 import 'package:flutter/material.dart';
 import 'package:flutter_animate/flutter_animate.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';

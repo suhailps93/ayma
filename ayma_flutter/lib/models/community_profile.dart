@@ -1,3 +1,4 @@
+// Community profile configs: question sets, prompt tone, and completeness weights per matchmaking context.
 /// Community Profile System
 ///
 /// Each CommunityProfile defines the cultural/contextual configuration

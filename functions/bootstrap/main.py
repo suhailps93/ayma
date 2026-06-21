@@ -30,7 +30,7 @@ import asyncio
 import json
 import logging
 import os
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from contextlib import asynccontextmanager
 from typing import Any
@@ -63,6 +63,7 @@ from questionnaire_graph import (
     get_heuristic_weights,
     get_llm_prompts,
     INTENT_SPECIFIC_FIELDS,
+    load_profile_schema,
 )
 from config import (
     FIREBASE_PROJECT_ID,
@@ -143,16 +144,15 @@ GEMINI_LIVE_WS = (
     "google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent"
 )
 
+GEMINI_LIVE_WS_V1ALPHA = (
+    "wss://generativelanguage.googleapis.com/"
+    "google.ai.generativelanguage.v1alpha.GenerativeService.BidiStreaming"
+)
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    try:
-        app.state.pool = await asyncpg.create_pool(DATABASE_URL, min_size=1, max_size=10)
-        logger.info("PostgreSQL connected.")
-    except Exception as e:
-        logger.warning(f"PostgreSQL connection failed: {e}. Falling back to SQLite MockPool.")
-        from mock_db import MockPool
-        app.state.pool = MockPool()
-        await app.state.pool.init_db()
+    app.state.pool = await asyncpg.create_pool(DATABASE_URL, min_size=1, max_size=10)
+    logger.info("PostgreSQL connected.")
     yield
     try:
         await app.state.pool.close()
@@ -298,153 +298,17 @@ How to do this well:
 - Prioritize: required profile fields first, then lifestyle/values, then matching preferences
 - When all required fields are filled, you can have more open-ended conversations — but keep deepening what you know"""
 
-def _load_profile_schema() -> dict:
-    try:
-        base = Path(__file__).resolve().parents[2]  # repo root in dev; /app in container
-        p = base / "docs" / "ayma_profile_questions.json"
-        return json.loads(p.read_text())
-    except Exception:
-        return {"questions": [], "profile_storage_policy": {}}
-
-PROFILE_SCHEMA = _load_profile_schema()
+PROFILE_SCHEMA = load_profile_schema()
 PROFILE_QUESTIONS = PROFILE_SCHEMA.get("questions", [])
 PUBLIC_PAYLOAD_ORDER = (
     PROFILE_SCHEMA.get("profile_storage_policy", {}).get("public_profile_payload_order", [])
 )
 
-COMMUNITY_EXTRA_QUESTIONS = [
-    {"id": "mother_tongue", "section": "cultural_identity", "question_text": "What language do you speak at home (mother tongue)?", "required": False, "sensitive_flag": False},
-    {"id": "gotra", "section": "sensitive_attributes", "question_text": "What is your gotra (ancestral lineage)?", "required": False, "sensitive_flag": True},
-    {"id": "manglik_status", "section": "sensitive_attributes", "question_text": "Are you Manglik (Mangal Dosha in your horoscope)?", "required": False, "sensitive_flag": True},
-    {"id": "kundali_match_required", "section": "values_religion_culture", "question_text": "Is horoscope (kundali) matching required for your marriage?", "required": False, "sensitive_flag": True},
-    {"id": "nri_status", "section": "cultural_identity", "question_text": "Are you an NRI (Non-Resident Indian) or based in India?", "required": False, "sensitive_flag": False},
-    {"id": "state_of_origin", "section": "cultural_identity", "question_text": "Which Indian state are you originally from?", "required": False, "sensitive_flag": False},
-    {"id": "family_income_band", "section": "financial_compatibility", "question_text": "What is your approximate family income band (annual)?", "required": False, "sensitive_flag": True},
-    {"id": "family_type_preference", "section": "family_background", "question_text": "Do you prefer a joint family or nuclear family setup after marriage?", "required": False, "sensitive_flag": False},
-    {"id": "religious_sect", "section": "values_religion_culture", "question_text": "What is your religious denomination or sect (e.g. Sunni/Shia for Muslim; Brahmin/Kshatriya for Hindu)?", "required": False, "sensitive_flag": True},
-    {"id": "hijab_preference", "section": "values_religion_culture", "question_text": "Do you wear hijab / observe purdah?", "required": False, "sensitive_flag": False},
-    {"id": "beard_preference", "section": "values_religion_culture", "question_text": "Do you keep a beard (for men) / prefer a bearded partner?", "required": False, "sensitive_flag": False},
-    {"id": "prayer_frequency", "section": "values_religion_culture", "question_text": "How often do you pray (salah)?", "required": False, "sensitive_flag": False},
-    {"id": "halal_diet_strict", "section": "physical_lifestyle", "question_text": "Do you strictly observe halal dietary requirements?", "required": False, "sensitive_flag": False},
-    {"id": "mahram_required", "section": "values_religion_culture", "question_text": "Do you require a mahram (chaperone) when meeting a potential spouse?", "required": False, "sensitive_flag": True},
-    {"id": "nikah_type", "section": "intent_and_readiness", "question_text": "What type of marriage ceremony do you prefer (civil + religious, religious only, etc.)?", "required": False, "sensitive_flag": False},
-    {"id": "polygamy_openness", "section": "sensitive_attributes", "question_text": "Are you open to polygamous marriage arrangements?", "required": False, "sensitive_flag": True},
-    {"id": "tribe_ethnicity", "section": "cultural_identity", "question_text": "What is your tribal or ethnic background?", "required": False, "sensitive_flag": True},
-    {"id": "lobola_expectation", "section": "family_background", "question_text": "What are your thoughts or expectations around bride price / lobola?", "required": False, "sensitive_flag": True},
-    {"id": "family_approval_importance", "section": "family_background", "question_text": "How important is family approval in your marriage decision?", "required": False, "sensitive_flag": False},
-    {"id": "language_spoken", "section": "cultural_identity", "question_text": "What language(s) do you primarily speak?", "required": False, "sensitive_flag": False},
-    {"id": "sexual_orientation", "section": "basic_identity", "question_text": "How would you describe your sexual orientation?", "required": False, "sensitive_flag": True},
-    {"id": "pronouns", "section": "basic_identity", "question_text": "What are your pronouns?", "required": False, "sensitive_flag": False},
-    {"id": "transition_status", "section": "basic_identity", "question_text": "Are you comfortable sharing your transition journey or status?", "required": False, "sensitive_flag": True},
-    {"id": "relationship_structure", "section": "intent_and_readiness", "question_text": "What relationship structure works best for you (monogamous, polyamorous, open, etc.)?", "required": False, "sensitive_flag": False},
-]
-
+COMMUNITY_EXTRA_QUESTIONS = PROFILE_SCHEMA.get("community_extra_questions", [])
 ACTIVE_QUESTION_BANK = PROFILE_QUESTIONS + COMMUNITY_EXTRA_QUESTIONS
 PROFILE_FIELD_META = {q.get("id"): q for q in ACTIVE_QUESTION_BANK if q.get("id")}
 
-COMMUNITY_CONFIG = {
-    "dating_western": {
-        "label": "Western Dating",
-        "agent_personality": (
-            "Be warm, casual, witty, and open-minded. Celebrate individuality. "
-            "Avoid assumptions about gender roles or family expectations."
-        ),
-        "notes": "Prioritize autonomy, modern dating norms, and individual compatibility over family-led criteria.",
-        "question_ids": [
-            "age", "location_city", "height_cm", "education_level", "occupation",
-            "relationship_intent", "timeline_for_commitment", "marital_status",
-            "has_children", "wants_children", "smoking_status", "alcohol_status",
-            "diet", "family_type", "communication_style", "conflict_style",
-            "bio_relationship_offer", "bio_relationship_need",
-            "partner_non_negotiables", "partner_must_haves",
-            "preferred_age_range", "gender_identity", "sexual_orientation",
-            "religion", "religious_practice_level", "income_band", "career_stage",
-            "friends_social_style", "has_pets", "past_relationship_learnings",
-            "preferred_religion", "max_distance_km", "willing_to_relocate",
-        ],
-    },
-    "arranged_india": {
-        "label": "Indian Arranged Marriage",
-        "agent_personality": (
-            "Be respectful, dignified, and family-aware. Use warm, formal language when needed. "
-            "Handle religion, caste, and horoscope topics gently and always as optional."
-        ),
-        "notes": "Prioritize long-term compatibility, family alignment, religion, caste-sensitive handling, and India/NRI context.",
-        "question_ids": [
-            "age", "location_city", "height_cm", "education_level", "occupation",
-            "career_stage", "income_band", "family_income_band", "nri_status",
-            "state_of_origin", "mother_tongue", "religion", "religious_sect",
-            "caste", "sub_caste", "gotra", "manglik_status",
-            "kundali_match_required", "marital_status", "has_children",
-            "wants_children", "family_type", "family_type_preference",
-            "family_values", "diet", "smoking_status", "alcohol_status",
-            "relationship_intent", "timeline_for_commitment", "communication_style",
-            "partner_non_negotiables", "partner_must_haves", "preferred_age_range",
-            "preferred_religion", "preferred_caste", "preferred_sub_caste",
-            "skin_tone", "max_distance_km", "willing_to_relocate",
-        ],
-    },
-    "matrimonial_muslim": {
-        "label": "Muslim Matrimonial",
-        "agent_personality": (
-            "Be respectful, dignified, and nikah-focused. Use Islamic-values-aware language and "
-            "treat practice, halal lifestyle, and family approval as important context."
-        ),
-        "notes": "Prioritize nikah-focused compatibility, sect and practice alignment, halal lifestyle, and family/community approval.",
-        "question_ids": [
-            "age", "location_city", "height_cm", "education_level", "occupation",
-            "career_stage", "income_band", "religion", "religious_sect",
-            "religious_practice_level", "prayer_frequency", "hijab_preference",
-            "beard_preference", "halal_diet_strict", "mahram_required",
-            "nikah_type", "marital_status", "has_children", "wants_children",
-            "family_type", "family_values", "diet", "smoking_status",
-            "alcohol_status", "relationship_intent", "timeline_for_commitment",
-            "communication_style", "partner_non_negotiables",
-            "partner_must_haves", "preferred_age_range", "max_distance_km",
-            "willing_to_relocate", "polygamy_openness",
-        ],
-    },
-    "arranged_africa_west": {
-        "label": "West African Marriage",
-        "agent_personality": (
-            "Be warm, respectful of elders and community, and culturally aware. "
-            "Treat marriage as a union of families as well as individuals."
-        ),
-        "notes": "Prioritize family and community approval, faith, ethnic identity, and culturally respectful discussion of bride price traditions.",
-        "question_ids": [
-            "age", "location_city", "height_cm", "education_level", "occupation",
-            "career_stage", "income_band", "religion", "religious_practice_level",
-            "tribe_ethnicity", "language_spoken", "lobola_expectation",
-            "family_approval_importance", "marital_status", "has_children",
-            "wants_children", "family_type", "family_values", "diet",
-            "smoking_status", "alcohol_status", "relationship_intent",
-            "timeline_for_commitment", "communication_style",
-            "partner_non_negotiables", "partner_must_haves",
-            "preferred_age_range", "max_distance_km", "willing_to_relocate",
-        ],
-    },
-    "dating_lgbtq": {
-        "label": "LGBTQ+ Dating",
-        "agent_personality": (
-            "Be deeply affirming, identity-aware, and fully inclusive. "
-            "Use chosen names and pronouns naturally and never make heteronormative assumptions."
-        ),
-        "notes": "Prioritize identity safety, pronouns, relationship structure, and fully inclusive language without assumptions.",
-        "question_ids": [
-            "age", "location_city", "height_cm", "education_level", "occupation",
-            "career_stage", "income_band", "gender_identity", "sexual_orientation",
-            "pronouns", "relationship_intent", "relationship_structure",
-            "timeline_for_commitment", "marital_status", "has_children",
-            "wants_children", "smoking_status", "alcohol_status", "diet",
-            "communication_style", "conflict_style", "bio_relationship_offer",
-            "bio_relationship_need", "partner_non_negotiables",
-            "partner_must_haves", "preferred_age_range", "religion",
-            "religious_practice_level", "friends_social_style", "has_pets",
-            "past_relationship_learnings", "max_distance_km",
-            "willing_to_relocate", "transition_status",
-        ],
-    },
-}
+COMMUNITY_CONFIG = PROFILE_SCHEMA.get("communities", {})
 
 
 def _question_category(question: dict) -> str:
@@ -823,12 +687,58 @@ async def bootstrap(request: Request, uid: str = Depends(verify_token)):
         }],
     }
 
+    # Generate a short-lived ephemeral token — never return the master API key to the client
+    _now = datetime.now(timezone.utc)
+    _eph_client = google_genai.Client(api_key=_active_key())
+    _eph_token = _eph_client.auth_tokens.create(
+        config={
+            "uses": 1,
+            "expire_time": (_now + timedelta(minutes=30)).isoformat(),
+            "new_session_expire_time": (_now + timedelta(minutes=2)).isoformat(),
+        }
+    )
+
     return {
-        "websocket_url": GEMINI_LIVE_WS,
-        "token": _active_key(),   # always returns whichever key is currently active
+        "websocket_url": GEMINI_LIVE_WS_V1ALPHA,
+        "token": _eph_token.name,
         "setup": setup,
         "model": LIVE_MODEL,
+        "text_model": TEXT_MODEL,
     }
+
+class ChatBody(BaseModel):
+    messages: list[dict]
+    system_prompt: str | None = None
+
+@app.post("/chat")
+@limiter.limit(RATE_CHAT_TEXT)
+async def chat_text(body: ChatBody, request: Request, uid: str = Depends(verify_token)):
+    contents = []
+    for m in body.messages:
+        role = "user" if m.get("role") == "user" else "model"
+        text = m.get("text", "")
+        if text:
+            contents.append({"role": role, "parts": [{"text": text}]})
+    if not contents:
+        raise HTTPException(status_code=400, detail="No messages provided")
+
+    client = google_genai.Client(api_key=_active_key())
+    def _generate():
+        return client.models.generate_content(
+            model=TEXT_MODEL,
+            contents=contents,
+            config=google_genai_types.GenerateContentConfig(
+                system_instruction=body.system_prompt or None,
+            ),
+        )
+    try:
+        response = await asyncio.to_thread(_generate)
+        return {"reply": response.text or ""}
+    except Exception as e:
+        if _is_quota_error(e):
+            _rotate_key()
+            raise HTTPException(status_code=429, detail="Quota exhausted")
+        raise HTTPException(status_code=500, detail=str(e))
 
 # ── Consolidated Post-turn Synthesis ──────────────────────────────────────────
 

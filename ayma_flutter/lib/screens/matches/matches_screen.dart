@@ -1,3 +1,4 @@
+// Matches list: view compatibility results and trigger /run-matching.
 import 'package:flutter/material.dart';
 import 'package:flutter_animate/flutter_animate.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
