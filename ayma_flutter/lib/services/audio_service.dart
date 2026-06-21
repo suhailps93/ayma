@@ -825,7 +825,7 @@ class AymaAudioService extends ChangeNotifier {
             'Authorization': 'Bearer $key',
           },
           body: jsonEncode({
-            'model': Env.openAiTextModel.isEmpty ? 'gpt-5.5' : Env.openAiTextModel,
+            'model': Env.openAiTextModel.isEmpty ? 'gpt-4o-mini' : Env.openAiTextModel,
             if ((_systemPrompt ?? '').isNotEmpty) 'instructions': _systemPrompt,
             'input': input,
           }),

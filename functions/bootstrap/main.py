@@ -145,8 +145,8 @@ GEMINI_LIVE_WS = (
 )
 
 GEMINI_LIVE_WS_V1ALPHA = (
-    "wss://generativelanguage.googleapis.com/"
-    "google.ai.generativelanguage.v1alpha.GenerativeService.BidiStreaming"
+    "wss://generativelanguage.googleapis.com/ws/"
+    "google.ai.generativelanguage.v1alpha.GenerativeService.BidiGenerateContentConstrained"
 )
 
 @asynccontextmanager
@@ -665,6 +665,7 @@ async def bootstrap(request: Request, uid: str = Depends(verify_token)):
                 }
             },
         },
+        "input_audio_transcription": {},
         "tools": [{
             "functionDeclarations": [{
                 "name": "add_followup_question",
@@ -689,12 +690,24 @@ async def bootstrap(request: Request, uid: str = Depends(verify_token)):
 
     # Generate a short-lived ephemeral token — never return the master API key to the client
     _now = datetime.now(timezone.utc)
-    _eph_client = google_genai.Client(api_key=_active_key())
+    _eph_client = google_genai.Client(
+        api_key=_active_key(),
+        http_options={"api_version": "v1alpha"}
+    )
     _eph_token = _eph_client.auth_tokens.create(
         config={
             "uses": 1,
             "expire_time": (_now + timedelta(minutes=30)).isoformat(),
             "new_session_expire_time": (_now + timedelta(minutes=2)).isoformat(),
+            "live_connect_constraints": {
+                "model": f"models/{LIVE_MODEL}",
+                "config": {
+                    "system_instruction": setup["system_instruction"],
+                    "generation_config": setup["generation_config"],
+                    "tools": setup["tools"],
+                    "input_audio_transcription": setup["input_audio_transcription"],
+                }
+            }
         }
     )
 

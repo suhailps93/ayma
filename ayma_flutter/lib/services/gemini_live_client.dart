@@ -47,24 +47,16 @@ class GeminiLiveClient {
   LiveClientStatus get status => _status;
   bool get isConnected => _status == LiveClientStatus.connected;
 
-  static const Map<String, String> _setupKeyAliases = {
-    'system_instruction': 'systemInstruction',
-    'generation_config': 'generationConfig',
-    'speech_config': 'speechConfig',
-    'voice_config': 'voiceConfig',
-    'prebuilt_voice_config': 'prebuiltVoiceConfig',
-    'voice_name': 'voiceName',
-    'function_declarations': 'functionDeclarations',
-    'response_modalities': 'responseModalities',
-  };
-
   Map<String, dynamic> _normalizeSetup(Map<String, dynamic> setup) {
     dynamic normalize(dynamic value) {
       if (value is Map) {
         final out = <String, dynamic>{};
         value.forEach((k, v) {
-          final key = k.toString();
-          out[_setupKeyAliases[key] ?? key] = normalize(v);
+          final key = k.toString().replaceAllMapped(
+            RegExp(r'_([a-z])'),
+            (m) => m[1]!.toUpperCase(),
+          );
+          out[key] = normalize(v);
         });
         return out;
       }
@@ -84,7 +76,7 @@ class GeminiLiveClient {
     }
     _status = LiveClientStatus.connecting;
 
-    final isToken = apiKey.startsWith('AQ.');
+    final isToken = !apiKey.startsWith('AIza');
     final authParam = isToken ? 'access_token' : 'key';
 
     debugPrint('DEBUG: Using ${isToken ? 'OAuth Token' : 'API Key'} for authentication (length: ${apiKey.length})');

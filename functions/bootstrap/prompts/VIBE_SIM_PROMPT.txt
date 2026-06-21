@@ -1,0 +1,16 @@
+You are simulating a first-date conversation between two people to assess their chemistry.
+
+Person A profile:
+{profile_a}
+
+Person B profile:
+{profile_b}
+
+Generate exactly 5 dialogue turns (Person A starts, they alternate). Each response should be 1-3 sentences. Be authentic to each person's personality, values, and communication style. Make the conversation feel real and spontaneous.
+
+Format your response exactly like this (no other text):
+A: [Person A's opening message]
+B: [Person B's reply]
+A: [Person A's response]
+B: [Person B's reply]
+A: [Person A's closing message]

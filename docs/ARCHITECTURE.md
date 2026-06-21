@@ -50,7 +50,8 @@ flowchart TB
   ApiSvc -->|Bearer JWT| CR
   BackendSvc -->|Bearer JWT| CR
   AudioSvc -->|POST /bootstrap| CR
-  AudioSvc -->|WebSocket direct| Live
+  AudioSvc -->|Voice WebSocket| Live
+  AudioSvc -->|Text POST /chat| CR
   AudioSvc -->|POST /post-turn| CR
   CR --> PG
   CR --> Text & Embed
@@ -362,7 +363,8 @@ Single FastAPI service: `functions/bootstrap/main.py`. All endpoints verify Fire
 | POST | `/profile/analyze-photos` | Gemini photo analysis → profile hints |
 | POST | `/device-token` | Store FCM push token |
 | POST/GET | `/messages`, `/messages/{other_user_id}` | Direct messaging |
-| POST | `/chat/text` | Server-side text chat (alternative to client-side Gemini) |
+| POST | `/chat` | Text chat via REST (used by Flutter client) |
+| POST | `/chat/text` | Server-side text chat (alternative fallback endpoint) |
 | GET | `/matches` | List user's matches |
 | POST | `/matches/{match_id}/status` | Accept/reject match |
 | POST | `/run-matching` | On-demand matching for current user |
@@ -444,14 +446,14 @@ Optional: OpenAI Realtime provider via `--dart-define=AYMA_LIVE_PROVIDER=openai`
 
 ### 4. Text Chat
 
-Two paths:
+Text chat is handled by the backend REST API (unlike Voice, which uses a direct WebSocket):
 
-- **Client-side:** `AudioService.sendText()` → Gemini REST with conversation history → `/post-turn` on completion.
-- **Server-side:** `POST /chat/text` — backend runs Gemini with full profile context.
+- **Primary (Flutter Client):** `AudioService.sendText()` bundles the recent transcript history and calls `BackendService.chat()` which hits the `POST /chat` endpoint. Cloud Run then makes a standard REST call to `TEXT_MODEL` (default `gemini-3.5-flash`).
+- **Server-side (Fallback):** `POST /chat/text` rebuilds the system prompt from Postgres and runs Gemini on the backend (useful for testing).
 
-Both trigger the same post-turn memory pipeline.
+Both voice and text chat trigger the exact same `/post-turn` memory pipeline when a conversational turn is complete.
 
-Client path: `AudioService.sendText()` → Gemini REST with history + system prompt from `/bootstrap` cache → `/post-turn`. Server path: `POST /chat/text` rebuilds prompt from Postgres. History capped at 60 turns; transcript capped at 180 lines in SharedPreferences.
+Local transcript history is capped at 60 turns or 180 lines in SharedPreferences.
 
 ### 5. Memory & Profile Wiki
 

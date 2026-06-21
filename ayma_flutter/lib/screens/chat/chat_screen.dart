@@ -96,7 +96,9 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
       final ok = _audioService.state != SessionState.disconnected;
       if (ok) _audioService.setMuted(false);
       return ok;
-    } catch (_) {}
+    } catch (e, st) {
+      debugPrint('ERROR in _autoConnect: $e\n$st');
+    }
     return false;
   }
 

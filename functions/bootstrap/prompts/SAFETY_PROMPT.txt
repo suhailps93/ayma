@@ -1,0 +1,1 @@
+Is this image safe for a dating app? Check for explicit nudity, graphic violence, or hate symbols. Respond with JSON only: {"safe": true or false, "reason": "one sentence if unsafe, else empty string"}

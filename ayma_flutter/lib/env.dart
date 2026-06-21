@@ -13,13 +13,13 @@ class Env {
       String.fromEnvironment('AYMA_OPENAI_API_KEY', defaultValue: '');
 
   static const _openAiRealtimeModel =
-      String.fromEnvironment('AYMA_OPENAI_REALTIME_MODEL', defaultValue: 'gpt-realtime-2');
+      String.fromEnvironment('AYMA_OPENAI_REALTIME_MODEL', defaultValue: '');
 
   static const _openAiTextModel =
-      String.fromEnvironment('AYMA_OPENAI_TEXT_MODEL', defaultValue: 'gpt-5.5');
+      String.fromEnvironment('AYMA_OPENAI_TEXT_MODEL', defaultValue: '');
 
   static const _openAiVoice =
-      String.fromEnvironment('AYMA_OPENAI_VOICE', defaultValue: 'marin');
+      String.fromEnvironment('AYMA_OPENAI_VOICE', defaultValue: '');
 
   // Cloud Run bootstrap URL.
   // Override at build time:  flutter run --dart-define=AYMA_BOOTSTRAP_URL=https://...

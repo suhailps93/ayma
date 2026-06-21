@@ -1,0 +1,17 @@
+You are evaluating compatibility between two people for a matchmaking app.
+
+Person A:
+{profile_a}
+
+Person B:
+{profile_b}
+
+Assess compatibility based on shared values, lifestyle, relationship goals, personality fit, and complementary qualities.
+
+Return ONLY a JSON object with these exact fields:
+{{
+  "score": <float 0.0-1.0, where 1.0 is exceptional compatibility>,
+  "rationale": "<2-3 sentences explaining overall compatibility>",
+  "summary_a": "<1 sentence from Person A's perspective: why Person B is a good match for them>",
+  "summary_b": "<1 sentence from Person B's perspective: why Person A is a good match for them>"
+}}

@@ -1,0 +1,1 @@
+{"token": "auth_tokens/6ab42037957a3d06492a5050fc32b5e8746e87e0744431d81b6daae94c49d96e", "setup": {"model": "models/gemini-3.1-flash-live-preview", "system_instruction": {"parts": [{"text": "Hello"}]}, "generation_config": {"response_modalities": ["AUDIO"]}}}

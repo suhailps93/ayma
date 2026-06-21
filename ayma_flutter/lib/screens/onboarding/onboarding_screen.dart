@@ -229,11 +229,110 @@ class _OnboardingScreenState extends ConsumerState<OnboardingScreen> {
   void initState() {
     super.initState();
     _locationCtrl.addListener(_syncLocationFromController);
+
+    // Synchronously check if cached profile/preboarding values exist to avoid flashing Step 0
+    final preSeen = ref.read(preboardingSeenProvider).valueOrNull ?? false;
+    final profile = ref.read(profileProvider).valueOrNull;
+
+    if (profile != null) {
+      if (profile.displayName.isNotEmpty) {
+        _nameCtrl.text = profile.displayName;
+      }
+      if (profile.gender != null && profile.gender!.isNotEmpty) {
+        _gender = profile.gender;
+      }
+      if (profile.age != null) {
+        _age = profile.age!;
+      }
+      final prefs = profile.matchingPrefs;
+      if (prefs.containsKey('interested_in')) {
+        _interestedIn = prefs['interested_in'] as String?;
+      }
+      if (prefs.containsKey('age_min')) {
+        _minAge = prefs['age_min'] as int;
+      }
+      if (prefs.containsKey('age_max')) {
+        _maxAge = prefs['age_max'] as int;
+      }
+      if (profile.locationRegion != null && profile.locationRegion!.isNotEmpty) {
+        _setLocationText(profile.locationRegion!, updateController: true);
+      }
+      if (profile.communityProfile.isNotEmpty) {
+        _communityProfile = CommunityProfiles.forId(profile.communityProfile);
+      }
+    }
+
+    if (preSeen) {
+      if (profile != null) {
+        final hasCommunity = profile.communityProfile.isNotEmpty && profile.communityProfile != 'dating_standard';
+        final hasAboutYou = profile.displayName.isNotEmpty && profile.gender != null;
+        final hasPrefs = (profile.matchingPrefs['interested_in'] as String?)?.isNotEmpty == true;
+
+        if (hasAboutYou && hasPrefs) {
+          _step = 4;
+        } else if (hasAboutYou) {
+          _step = 3;
+        } else if (hasCommunity) {
+          _step = 2;
+        } else {
+          _step = 1;
+        }
+      } else {
+        _step = 1;
+      }
+    } else {
+      _step = 0;
+    }
+
     WidgetsBinding.instance.addPostFrameCallback((_) async {
-      // Skip the welcome step if this user has already seen the preboard once.
+      // Async fetch to verify latest backend values
       final alreadySeen = await ref.read(preboardingSeenProvider.future);
+      final latestProfile = await ref.read(profileProvider.future);
       if (!mounted) return;
-      if (alreadySeen && _step == 0) setState(() => _step = 1);
+
+      setState(() {
+        if (latestProfile != null) {
+          if (_nameCtrl.text.isEmpty && latestProfile.displayName.isNotEmpty) {
+            _nameCtrl.text = latestProfile.displayName;
+          }
+          _gender ??= (latestProfile.gender?.isNotEmpty == true ? latestProfile.gender : null);
+          if (latestProfile.age != null) {
+            _age = latestProfile.age!;
+          }
+          final prefs = latestProfile.matchingPrefs;
+          _interestedIn ??= prefs['interested_in'] as String?;
+          if (prefs.containsKey('age_min')) {
+            _minAge = prefs['age_min'] as int;
+          }
+          if (prefs.containsKey('age_max')) {
+            _maxAge = prefs['age_max'] as int;
+          }
+          if (_locationCtrl.text.isEmpty && latestProfile.locationRegion != null && latestProfile.locationRegion!.isNotEmpty) {
+            _setLocationText(latestProfile.locationRegion!, updateController: true);
+          }
+          if (_communityProfile == null && latestProfile.communityProfile.isNotEmpty) {
+            _communityProfile = CommunityProfiles.forId(latestProfile.communityProfile);
+          }
+        }
+
+        if (alreadySeen && _step == 0) {
+          int nextStep = 1;
+          if (latestProfile != null) {
+            final hasCommunity = latestProfile.communityProfile.isNotEmpty && latestProfile.communityProfile != 'dating_standard';
+            final hasAboutYou = latestProfile.displayName.isNotEmpty && latestProfile.gender != null;
+            final hasPrefs = (latestProfile.matchingPrefs['interested_in'] as String?)?.isNotEmpty == true;
+
+            if (hasAboutYou && hasPrefs) {
+              nextStep = 4;
+            } else if (hasAboutYou) {
+              nextStep = 3;
+            } else if (hasCommunity) {
+              nextStep = 2;
+            }
+          }
+          _step = nextStep;
+        }
+      });
       unawaited(ApiService.markPreboardingSeen());
     });
   }

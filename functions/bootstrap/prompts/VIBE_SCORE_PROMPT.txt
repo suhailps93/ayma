@@ -1,0 +1,14 @@
+Rate the chemistry and compatibility between Person A and Person B based on their profiles and conversation.
+
+Person A profile:
+{profile_a}
+
+Person B profile:
+{profile_b}
+
+Their simulated first-date conversation:
+{conversation}
+
+Consider: natural rapport, shared interests, complementary values, conversational energy, emotional connection.
+
+Return JSON only: {{"synergyScore": <integer 0-100>, "synergySummary": "<one concise sentence describing their chemistry>"}}
