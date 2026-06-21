@@ -215,8 +215,8 @@ Current emulator-specific note:
 
 ## Handoff State
 
-- Last completed: Ran `flutter analyze` (0 issues). Fixed signature bugs (`request` arg) in test logic and SQL `f-string` interpolation bug in `main.py` for `LIMIT {MATCH_CANDIDATE_POOL}` causing `sqlite3.OperationalError` during tests. Re-ran `unittest` and it fully passes. Ran `pipeline_test.py` end-to-end simulation.
-- Validated: `python3 -m unittest functions/bootstrap/test_main_logic.py` (25 tests pass). `flutter analyze` reports `No issues found!`.
+- Last completed: Fixed the preboarding/onboarding screen flashing, restart, and redirect loops for signed-in and newly onboarded users. Prevented redirects while onboarding status resolves, cached onboarding completion state locally immediately in SharedPreferences, invalidated all relevant providers upon completing onboarding, and added fallback immediate routing to `/chat` in onboarding if the profile is already completed.
+- Validated: `flutter analyze` runs successfully with no errors or warnings in application code.
 - Blocked on: `pipeline_test.py` hit `429 ResourceExhausted` (Gemini free tier quota limits) during the `Scoring Priya <-> Fatima` stage. Physical device testing is still required for voice/chat.
 - Next action: Test text chat and voice on physical device; configure a paid Gemini API key or rotate keys to bypass the 429 quota exhaustion; review remaining audit gaps from `pipeline_test.py` (rate limiting, logging, etc.).
 

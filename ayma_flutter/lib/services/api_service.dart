@@ -411,7 +411,9 @@ class ApiService {
     if (prefs.getBool(_onboardingKey()) == true) return true;
 
     final p = await getProfile();
-    if (p == null) return false;
+    if (p == null) {
+      throw Exception('Failed to fetch user profile for onboarding check');
+    }
     final complete = inferOnboardingComplete({
       'onboarding_complete': p.onboardingComplete,
       'display_name': p.displayName,
@@ -428,6 +430,11 @@ class ApiService {
       if (!p.onboardingComplete) await completeOnboarding();
     }
     return complete;
+  }
+
+  static Future<void> markOnboardingCompleteLocal() async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setBool(_onboardingKey(), true);
   }
 
   static Future<void> completeOnboarding() async {

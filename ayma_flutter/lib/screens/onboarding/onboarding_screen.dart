@@ -290,6 +290,11 @@ class _OnboardingScreenState extends ConsumerState<OnboardingScreen> {
       final latestProfile = await ref.read(profileProvider.future);
       if (!mounted) return;
 
+      if (latestProfile != null && latestProfile.onboardingComplete) {
+        if (mounted) context.go('/chat');
+        return;
+      }
+
       setState(() {
         if (latestProfile != null) {
           if (_nameCtrl.text.isEmpty && latestProfile.displayName.isNotEmpty) {
@@ -460,10 +465,13 @@ class _OnboardingScreenState extends ConsumerState<OnboardingScreen> {
           },
         'onboarding_complete': true,
       });
+      await ApiService.markOnboardingCompleteLocal();
       await ApiService.initializeQuestions(
         alreadyAnswered: {'name', 'age', 'gender', 'interested_in', 'location'},
       );
+      ref.invalidate(profileProvider);
       ref.invalidate(onboardingStatusProvider);
+      await ref.read(onboardingStatusProvider.future);
       if (mounted) context.go('/chat');
     } catch (e) {
       if (mounted) {

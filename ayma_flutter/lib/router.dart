@@ -40,6 +40,7 @@ final routerProvider = Provider<GoRouter>((ref) {
       if (path == '/auth') return '/chat';
 
       final onboarding = ref.read(onboardingStatusProvider);
+      if (onboarding.isLoading) return null;
       if (onboarding.hasValue) {
         final complete = onboarding.valueOrNull ?? false;
         if (!complete && path != '/onboarding') return '/onboarding';
