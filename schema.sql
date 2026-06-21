@@ -14,6 +14,7 @@ CREATE TABLE IF NOT EXISTS users (
     age INT,
     gender VARCHAR(50),
     location_region VARCHAR(100),
+    location_coords JSONB DEFAULT '{}'::jsonb,
     onboarding_complete BOOLEAN DEFAULT FALSE,
     matching_paused BOOLEAN DEFAULT FALSE,
     preboarding_seen BOOLEAN DEFAULT FALSE,
@@ -44,8 +45,11 @@ CREATE TABLE IF NOT EXISTS users (
     raw_user_statements JSONB DEFAULT '[]'::jsonb,
     
     -- Embeddings for matching similarity
-    matching_embedding vector(1536), -- text-embedding-3
-    
+    matching_embedding vector(1536), -- gemini-embedding-2 with output_dimensionality=1536
+
+    -- FCM push token (updated by /device-token on app launch)
+    fcm_token VARCHAR(512),
+
     created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
     updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
 );

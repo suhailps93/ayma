@@ -1,5 +1,8 @@
 # Ayma App Audit And Data Map
 
+> Historical audit note: this document reflects an older API/backend shape in several sections.
+> Read `PLAN.md` first and treat this file as historical context unless a section has been explicitly reconciled with the current branch.
+
 Audit date: 2026-04-18
 
 This document is a codebase audit of the current Ayma app. It focuses on:

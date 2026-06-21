@@ -1,3 +1,4 @@
+import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
@@ -30,8 +31,11 @@ class _ShellScreenState extends ConsumerState<ShellScreen>
     )..repeat(reverse: true);
     _pulse = CurvedAnimation(parent: _pulseCtrl, curve: Curves.easeInOut);
     WidgetsBinding.instance.addObserver(this);
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      OverlayService.requestPermission();
+    WidgetsBinding.instance.addPostFrameCallback((_) async {
+      if (kIsWeb) return; // overlay window is Android-only
+      if (!await OverlayService.isGranted()) {
+        if (mounted) _showOverlayPermissionDialog();
+      }
     });
   }
 

@@ -20,7 +20,7 @@
 users/{uid}
   display_name, profile_public, profile_private, profile_ai_observations
   agent_name, voice_preference, matching_prefs (map)
-  age, gender, location_region
+  age, gender, location_region, location_coords
   community_profile, onboarding_complete, matching_paused
 
 users/{uid}/memories/{id}
@@ -127,3 +127,30 @@ flutter run --dart-define=AYMA_BOOTSTRAP_URL=https://YOUR_CLOUD_RUN_URL
 ## Security Note
 
 The bootstrap endpoint returns the Gemini API key to authenticated clients. This is acceptable for internal apps but should be replaced with short-lived OAuth tokens (Vertex AI) before public release.
+
+## Migration — 2026-06-19: FCM, rate limiting, structured logging
+
+### Run on existing Postgres DB
+
+```sql
+-- Add FCM token column (safe to run multiple times)
+ALTER TABLE users ADD COLUMN IF NOT EXISTS fcm_token VARCHAR(512);
+```
+
+### New environment variables (Cloud Run)
+
+```bash
+gcloud run services update ayma-bootstrap --region=us-central1 \
+  --update-env-vars="GOOGLE_API_KEY_BACKUP=<your-backup-key>,CRON_SECRET=<random-hex>"
+```
+
+### Firebase Storage rules (requires re-auth)
+
+```bash
+firebase login --reauth
+firebase deploy --only storage --project ayma-ai
+```
+
+### Cloud Scheduler (one-time)
+
+See `docs/cloud-scheduler.md` for setup instructions.

@@ -5,7 +5,7 @@ import 'package:flutter_animate/flutter_animate.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../providers/providers.dart';
-import '../../services/firestore_service.dart';
+import '../../services/api_service.dart';
 import '../../theme.dart';
 import '../../utils/distance_units.dart';
 import '../../widgets/public_profile_view.dart';
@@ -876,7 +876,7 @@ class _ExploreProfileScreenState extends State<_ExploreProfileScreen> {
     final id = widget.profile['id'] as String?;
     _profileFuture = id == null
         ? Future.value(widget.profile)
-        : FirestoreService.getPublicProfile(id);
+        : ApiService.getPublicProfile(id);
   }
 
   @override
@@ -976,7 +976,7 @@ class _ProfileActionsState extends State<_ProfileActions> {
     if (_liked || widget.busy || widget.userId.isEmpty) return;
     widget.onBusyChanged(true);
     try {
-      await FirestoreService.sendPoke(widget.userId);
+      await ApiService.sendPoke(widget.userId);
       if (mounted) setState(() => _liked = true);
     } finally {
       widget.onBusyChanged(false);
@@ -999,7 +999,7 @@ class _ProfileActionsState extends State<_ProfileActions> {
     if (widget.busy || widget.userId.isEmpty) return;
     widget.onBusyChanged(true);
     try {
-      final s = await FirestoreService.generateMatchScore(widget.userId);
+      final s = await ApiService.generateMatchScore(widget.userId);
       if (mounted) widget.onScoreGenerated(s);
     } finally {
       widget.onBusyChanged(false);

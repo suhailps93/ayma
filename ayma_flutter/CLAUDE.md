@@ -1,5 +1,8 @@
 # Orchestration Rules — Flutter Project
 
+Read `/home/suhailps/latest_claude/ayma/PLAN.md` first. It is the canonical shared plan and handoff document for every agent working in this repo.
+This file only defines Flutter-specific orchestration details after that.
+
 Claude acts as **planner and orchestrator only**. Never write Dart/Flutter code inline.
 All coding is delegated to agents via MCP tools. The main thread stays alive as the orchestrator throughout the entire session.
 

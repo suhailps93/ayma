@@ -35,7 +35,7 @@ Cap at 100 candidates before passing to Stage 2.
 
 ## Stage 2 — LLM Scoring
 
-**Model:** `gemini-2.5-flash`
+**Model:** `gemini-3.5-flash`
 **Cost:** ~negligible per run (short profiles, small JSON output)
 
 For each candidate (cap at 20 per run):

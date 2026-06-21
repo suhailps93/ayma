@@ -22,11 +22,11 @@ class TestMatchingEndpoints(unittest.TestCase):
         self.mock_pool.acquire.return_value.__aenter__.return_value = self.mock_conn
         app.state.pool = self.mock_pool
 
+    @patch("functions.bootstrap.main._embed_text_with_gemini_v2")
     @patch("google.generativeai.GenerativeModel")
-    @patch("google.generativeai.embed_content")
-    def test_run_matching_success(self, mock_embed, mock_gen_model_class):
+    def test_run_matching_success(self, mock_gen_model_class, mock_embed):
         # Mock embedding return value
-        mock_embed.return_value = {"embedding": [0.05] * 1536}
+        mock_embed.return_value = [0.05] * 1536
         
         # Mock Gemini Model responses
         mock_model = MagicMock()

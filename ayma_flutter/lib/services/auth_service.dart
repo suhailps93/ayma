@@ -5,7 +5,7 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:google_sign_in/google_sign_in.dart';
 import 'package:sign_in_with_apple/sign_in_with_apple.dart';
-import 'firestore_service.dart';
+import 'api_service.dart';
 import '../providers/providers.dart';
 
 class AuthService extends ChangeNotifier {
@@ -27,14 +27,14 @@ class AuthService extends ChangeNotifier {
             ? user.displayName!.trim()
             : (user.email?.split('@').first ?? 'User'));
 
-    final profile = await FirestoreService.getProfile();
+    final profile = await ApiService.getProfile();
     if (profile != null) {
       final fields = <String, dynamic>{};
       if (profile.displayName.isEmpty || profile.displayName == 'User') {
         fields['display_name'] = fallbackName;
       }
       if (fields.isNotEmpty) {
-        await FirestoreService.updateProfile(fields);
+        await ApiService.updateProfile(fields);
       }
     }
   }
@@ -175,7 +175,7 @@ class AuthService extends ChangeNotifier {
     if (user == null) return;
 
     // 1. Delete Firestore data while we still have a valid token
-    await FirestoreService.deleteUserData();
+    await ApiService.deleteUserData();
 
     // 2. Delete Auth user
     try {

@@ -64,6 +64,8 @@ class AymaApp extends ConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
+    // Eagerly activate FCM token registration whenever user auth changes.
+    ref.watch(fcmRegistrationProvider);
     final router = ref.watch(routerProvider);
     final themeMode = ref.watch(themeModeProvider);
     return MaterialApp.router(

@@ -5,7 +5,7 @@ import 'package:go_router/go_router.dart';
 
 import '../../models/match_model.dart';
 import '../../providers/providers.dart';
-import '../../services/firestore_service.dart';
+import '../../services/api_service.dart';
 import '../../theme.dart';
 
 String _userLabel(Map<String, dynamic> data) {
@@ -691,7 +691,7 @@ class _VibeCheckSectionState extends ConsumerState<_VibeCheckSection> {
     if (!mounted) return;
     setState(() => _loadingTranscript = true);
     try {
-      final t = await FirestoreService.getMatchSimulation(widget.match.id);
+      final t = await ApiService.getMatchSimulation(widget.match.id);
       if (mounted) {
         setState(() {
           _transcript = t;

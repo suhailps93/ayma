@@ -9,7 +9,7 @@ All items below are implemented and code-complete. No blocking issues remain.
   - Chat opens in `disconnected` state; voice only starts on explicit mic tap.
 
 - [x] "Your Story" / Private Profile population works end-to-end
-  - Wiki fields (`wiki_about_me`, `wiki_context`, `wiki_preferences`, `wiki_matching`) saved by backend post-turn, fetched via `FirestoreService.getInsights()`, rendered in both `InsightsScreen` and the Private Profile tab of `ProfileScreen`.
+  - Wiki fields (`wiki_about_me`, `wiki_context`, `wiki_preferences`, `wiki_matching`) saved by backend post-turn, fetched via `ApiService.getInsights()`, rendered in the Private Profile tab of `ProfileScreen`.
 
 - [x] AI partial speech persists on barge-in interrupt
   - `_flushPendingAgentText()` is called before stopping playback on `interrupted` event, so partial AI text is committed to transcript before barge-in clears state.

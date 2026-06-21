@@ -28,6 +28,7 @@ Endpoints:
 
 import asyncio
 import json
+import logging
 import os
 from datetime import datetime, timezone
 from pathlib import Path
@@ -37,23 +38,105 @@ from typing import Any
 import asyncpg
 import firebase_admin
 import google.generativeai as genai
-from fastapi import Depends, FastAPI, HTTPException
+from google import genai as google_genai
+from google.genai import types as google_genai_types
+from fastapi import Depends, FastAPI, Header, HTTPException, Request
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
-from firebase_admin import auth
+from firebase_admin import auth, messaging
 from pydantic import BaseModel
+from slowapi import Limiter, _rate_limit_exceeded_handler
+from slowapi.errors import RateLimitExceeded
+from slowapi.util import get_remote_address
+
+# ── Logging ───────────────────────────────────────────────────────────────────
+logging.basicConfig(
+    level=logging.INFO,
+    format='{"time":"%(asctime)s","level":"%(levelname)s","logger":"%(name)s","msg":%(message)r}',
+    datefmt="%Y-%m-%dT%H:%M:%SZ",
+)
+logger = logging.getLogger("ayma")
+
+from questionnaire_graph import (
+    IntentType,
+    get_hard_filters,
+    get_heuristic_weights,
+    get_llm_prompts,
+    INTENT_SPECIFIC_FIELDS,
+)
+from config import (
+    FIREBASE_PROJECT_ID,
+    DATABASE_URL,
+    LIVE_MODEL,
+    TEXT_MODEL,
+    EMBEDDING_MODEL,
+    RATE_BOOTSTRAP,
+    RATE_POST_TURN,
+    RATE_CHAT_TEXT,
+    RATE_ANALYZE_PHOTOS,
+    RATE_RUN_MATCHING,
+    MATCH_SCORE_MIN,
+    VIBE_CHECK_THRESHOLD,
+    MATCH_CANDIDATE_POOL,
+    MATCH_SCORE_TOP_K,
+    VIBE_CHECK_TOP_K,
+    CRON_CANDIDATE_POOL,
+    CRON_SCORE_TOP_K,
+    FINAL_SCORE_COMPAT_WEIGHT,
+    MESSAGES_LIMIT,
+    NOTIFICATIONS_LIMIT,
+    EXPLORE_LIMIT,
+    INSIGHTS_MEDIA_LIMIT,
+    MATCHES_MEDIA_LIMIT,
+    PHOTO_ANALYSIS_MAX,
+    PUSH_PREVIEW_LEN,
+    CRON_SECRET,
+)
 
 # ── Init ──────────────────────────────────────────────────────────────────────
 
-FIREBASE_PROJECT_ID = os.environ.get("FIREBASE_PROJECT_ID", "ayma-ai")
 if not firebase_admin._apps:
     firebase_admin.initialize_app(options={"projectId": FIREBASE_PROJECT_ID})
 
-GOOGLE_API_KEY = os.environ["GOOGLE_API_KEY"]
-LIVE_MODEL = os.environ.get("LIVE_MODEL", "gemini-3.1-flash-live-preview")
-TEXT_MODEL = os.environ.get("TEXT_MODEL", "gemini-3-flash-preview")
-DATABASE_URL = os.environ.get("DATABASE_URL", "postgresql://postgres:postgres@localhost:5432/ayma")
+# ── API key pool with automatic quota-fallback ────────────────────────────────
+# Primary key is required. Backup is optional — set GOOGLE_API_KEY_BACKUP to
+# enable automatic rotation when the primary key hits its daily quota.
+_API_KEYS: list[str] = [k for k in [
+    os.environ["GOOGLE_API_KEY"],
+    os.environ.get("GOOGLE_API_KEY_BACKUP", ""),
+] if k]
+_active_key_idx: int = 0
+_EMBEDDING_OUTPUT_DIMENSIONALITY = 1536
+_EMBEDDING_TASK_PREFIX = "task: sentence similarity | query: "
 
+def _active_key() -> str:
+    return _API_KEYS[_active_key_idx % len(_API_KEYS)]
+
+def _rotate_key() -> str:
+    """Switch to the next key in the pool. Called on quota exhaustion (HTTP 429)."""
+    global _active_key_idx, _embedding_client
+    prev_idx = _active_key_idx % len(_API_KEYS)
+    _active_key_idx += 1
+    new_idx = _active_key_idx % len(_API_KEYS)
+    if new_idx == prev_idx:
+        logger.warning("[key-pool] Only one key configured — cannot rotate.")
+        return _API_KEYS[new_idx]
+    key = _API_KEYS[new_idx]
+    genai.configure(api_key=key)
+    _embedding_client = google_genai.Client(api_key=key)
+    logger.warning(f"[key-pool] Quota exhausted on key[{prev_idx}] — rotated to key[{new_idx}].")
+    return key
+
+def _is_quota_error(exc: Exception) -> bool:
+    msg = str(exc).lower()
+    return "429" in msg or "quota" in msg or "resource_exhausted" in msg
+
+GOOGLE_API_KEY = _active_key()  # kept for bootstrap token response
 genai.configure(api_key=GOOGLE_API_KEY)
+_embedding_client = google_genai.Client(api_key=GOOGLE_API_KEY)
+
+# ── Rate limiting ─────────────────────────────────────────────────────────────
+limiter = Limiter(key_func=get_remote_address)
 
 GEMINI_LIVE_WS = (
     "wss://generativelanguage.googleapis.com/ws/"
@@ -62,17 +145,83 @@ GEMINI_LIVE_WS = (
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Setup PostgreSQL connection pool
-    app.state.pool = await asyncpg.create_pool(
-        DATABASE_URL,
-        min_size=1,
-        max_size=10
-    )
+    try:
+        app.state.pool = await asyncpg.create_pool(DATABASE_URL, min_size=1, max_size=10)
+        logger.info("PostgreSQL connected.")
+    except Exception as e:
+        logger.warning(f"PostgreSQL connection failed: {e}. Falling back to SQLite MockPool.")
+        from mock_db import MockPool
+        app.state.pool = MockPool()
+        await app.state.pool.init_db()
     yield
-    # Close connection pool
-    await app.state.pool.close()
+    try:
+        await app.state.pool.close()
+    except Exception:
+        pass
+
 
 app = FastAPI(title="ayma-bootstrap", lifespan=lifespan)
+
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# ── FCM push helper ───────────────────────────────────────────────────────────
+
+async def _send_push(fcm_token: str, title: str, body: str, data: dict | None = None) -> None:
+    """Fire-and-forget FCM push notification. Silently fails if token missing."""
+    if not fcm_token:
+        return
+    try:
+        msg = messaging.Message(
+            notification=messaging.Notification(title=title, body=body),
+            data={k: str(v) for k, v in (data or {}).items()},
+            token=fcm_token,
+            android=messaging.AndroidConfig(priority="high"),
+            apns=messaging.APNSConfig(
+                payload=messaging.APNSPayload(aps=messaging.Aps(sound="default"))
+            ),
+        )
+        await asyncio.to_thread(messaging.send, msg)
+        logger.info(f"FCM sent: {title!r} → {fcm_token[:20]}…")
+    except Exception as e:
+        logger.warning(f"FCM send failed: {e}")
+
+async def _get_fcm_token(uid: str, conn) -> str:
+    row = await conn.fetchrow("SELECT fcm_token FROM users WHERE id = $1", uid)
+    return (row["fcm_token"] or "") if row else ""
+
+# ── Auto-embed wiki after updates ─────────────────────────────────────────────
+
+async def _refresh_wiki_embedding(uid: str, pool) -> None:
+    """Background task: re-embed matching wiki so pgvector stays fresh."""
+    try:
+        async with pool.acquire() as conn:
+            row = await conn.fetchrow(
+                "SELECT wiki_matching, wiki_preferences FROM users WHERE id = $1", uid
+            )
+            if not row:
+                return
+            text = f"{row['wiki_preferences'] or ''}\n{row['wiki_matching'] or ''}".strip()
+            if not text:
+                return
+            embedding = await _generate_embedding(text)
+            if embedding:
+                vec = f"[{','.join(map(str, embedding))}]"
+                await conn.execute(
+                    "UPDATE users SET matching_embedding = $1::vector WHERE id = $2", vec, uid
+                )
+                logger.info(f"[embedding] refreshed for {uid}")
+    except Exception as e:
+        logger.warning(f"[embedding] refresh failed for {uid}: {e}")
+
 security = HTTPBearer()
 
 # ── Auth ──────────────────────────────────────────────────────────────────────
@@ -90,25 +239,42 @@ MATCHMAKER_SKILL = """## Who You Are
 
 Your name is Ayma. You are Ayma — a personal AI companion and matchmaker. You are not Gemini, not an AI assistant, not any product made by Google or any other company. If anyone asks who made you, who you are, or what you are — you are Ayma, full stop. Never break this identity under any circumstances.
 
-You are warm, perceptive, and genuinely curious about people. You have a natural, charming way of making people feel comfortable opening up. You're the kind of friend who asks the deep, meaningful questions that others might avoid, and makes it feel easy to answer them.
+You are warm, perceptive, and genuinely curious about people. You have the gift of making someone feel truly seen — like they're talking to a friend who actually listens. You're the kind of person who asks the questions others are afraid to ask, and somehow makes it feel completely natural.
 
 ## How You Talk
 
-- Talk like a close friend who is fascinated by people's stories
-- Be warm and engaging — use wit and light humor, but prioritize genuine connection
-- Never be formal, robotic, or clinical
-- Show intense curiosity — follow up on what they say and explore the "why" behind their answers
-- Read the room — prioritize presence and empathy over banter, especially when they share something personal
-- Short responses in casual conversation, longer when they need space to open up"""
+- Talk like a close friend who is fascinated by this particular person's story
+- Be warm and genuine — use wit and lightness when it fits, but never at the expense of real connection
+- Never be formal, robotic, or clinical — you're a person, not a form
+- Show real curiosity — follow the thread of what they say before pivoting to a new topic
+- One question per turn. Never pile on multiple questions — pick the one that matters most right now
+- Short responses in casual conversation, longer when they're opening up about something personal
+- When they say something surprising or vulnerable, sit with it for a moment before moving on
+- Never lecture, moralize, or give unsolicited advice about their choices
+- Read the room — if they're being light, be light back; if they go deep, go deep with them
+- Anti-repetition rule: If you already know something from the profile data below, NEVER ask about it again. Build on what you know instead.
+- Strict factual grounding: Only reference facts the person has explicitly shared. NEVER invent, assume, or fabricate details about their life, job, family, or interests that aren't in the profile above. If you don't know something, ask — don't guess.
+- Honest appearance feedback: If someone asks you to rate or assess their looks, be genuinely honest — not flattering. Give a real score (e.g. "7.2/10"), name specific strengths AND specific areas to work on (skin, grooming, hair, posture, style). Use the appearance notes from the profile if available. A good matchmaker tells the truth kindly — they don't just say "you're gorgeous." Frame it as a friend who wants them to present their best self to matches."""
 
-DEEP_RECALL_SKILL = """## Deep Recall
+DEEP_RECALL_SKILL = """## Deep Recall — You Remember Everything
 
-You have a detailed profile of this person built from all previous conversations.
-Use this memory actively, not just when directly asked:
-- Reference past topics naturally when relevant ("last time you mentioned...")
-- Notice patterns and changes over time
-- Never make the user re-explain things they've already told you
-- Don't recite their profile back — weave it into conversation naturally"""
+You have a detailed profile of this person built from all previous conversations. This memory is sacred — use it to make them feel genuinely known, not like they're starting from scratch every time.
+
+How to use memory:
+- Reference past topics naturally when they become relevant: "When you mentioned your family is traditional..." or "You told me before that..."
+- Notice when new information updates or contradicts what you knew — acknowledge the change naturally
+- NEVER make them re-explain something they've already told you — this is the single most important rule
+- Before asking any question, check if the answer is already in the profile above. If it is, skip that question entirely and move on
+- Weave memory into conversation naturally — don't recite their profile back like a list"""
+
+NEW_USER_LISTEN_SKILL = """## Listen and Learn — This Is Your First Conversation
+
+You are meeting this person for the very first time. You know almost nothing about them yet.
+- Do NOT say "good to hear from you", "again", or any phrase implying you've met before — this is conversation #1
+- Do NOT invent facts about their career, background, family, or interests — you don't know these yet
+- Only reference what the person explicitly tells you in this conversation
+- Listen actively and build your understanding from scratch
+- Your goal is to make them feel immediately comfortable and curious to keep talking"""
 
 TONE_MIRROR_SKILL = """## Tone Mirroring
 
@@ -118,18 +284,19 @@ Match the user's communication style naturally:
 - Mirror their punctuation and capitalization habits loosely
 - Never be more enthusiastic than they are"""
 
-PROFILE_COMPLETION_SKILL = """## Core Objective: Complete Match Profile Fast (Without Sounding Like A Form)
+PROFILE_COMPLETION_SKILL = """## Profile Building — Natural, Never Interview-Style
 
-Your primary objective is to collect complete matching data across all profile fields as quickly as possible through natural conversation.
+Your underlying goal is to build a complete matchmaking profile through conversation. But the user should feel like they're having a great conversation with a curious friend, not filling out a form.
 
-Rules:
-- Do not run a rigid questionnaire.
-- Extract facts from free-flow conversation whenever possible.
-- Ask only 1 focused follow-up at a time to fill high-priority gaps.
-- Prioritize unanswered required fields first, then preferences, then deeper context.
-- If the user gives partial info, confirm briefly and continue.
-- Keep momentum: every turn should either deepen rapport or close a missing profile field.
-- For sensitive topics, ask gently and make it clear they can keep it private or skip."""
+How to do this well:
+- Extract facts from what they naturally share — don't always ask directly
+- When you do ask, make it feel like genuine curiosity, not data collection. Instead of "What's your career stage?", try "What's your work life like right now — are you in a groove with it or still figuring out your direction?"
+- Only ask one thing at a time. If they answer three things, note them all, then follow the most interesting thread
+- Stay on a topic long enough that it feels like a real conversation before pivoting
+- For sensitive topics (religion, family, finances, past relationships), always make it feel safe: "You don't have to go into this if you'd rather not, but..."
+- If they deflect or give a one-liner, note the gap mentally, don't push, come back later
+- Prioritize: required profile fields first, then lifestyle/values, then matching preferences
+- When all required fields are filled, you can have more open-ended conversations — but keep deepening what you know"""
 
 def _load_profile_schema() -> dict:
     try:
@@ -141,25 +308,232 @@ def _load_profile_schema() -> dict:
 
 PROFILE_SCHEMA = _load_profile_schema()
 PROFILE_QUESTIONS = PROFILE_SCHEMA.get("questions", [])
-PROFILE_FIELD_META = {q.get("id"): q for q in PROFILE_QUESTIONS if q.get("id")}
 PUBLIC_PAYLOAD_ORDER = (
     PROFILE_SCHEMA.get("profile_storage_policy", {}).get("public_profile_payload_order", [])
 )
+
+COMMUNITY_EXTRA_QUESTIONS = [
+    {"id": "mother_tongue", "section": "cultural_identity", "question_text": "What language do you speak at home (mother tongue)?", "required": False, "sensitive_flag": False},
+    {"id": "gotra", "section": "sensitive_attributes", "question_text": "What is your gotra (ancestral lineage)?", "required": False, "sensitive_flag": True},
+    {"id": "manglik_status", "section": "sensitive_attributes", "question_text": "Are you Manglik (Mangal Dosha in your horoscope)?", "required": False, "sensitive_flag": True},
+    {"id": "kundali_match_required", "section": "values_religion_culture", "question_text": "Is horoscope (kundali) matching required for your marriage?", "required": False, "sensitive_flag": True},
+    {"id": "nri_status", "section": "cultural_identity", "question_text": "Are you an NRI (Non-Resident Indian) or based in India?", "required": False, "sensitive_flag": False},
+    {"id": "state_of_origin", "section": "cultural_identity", "question_text": "Which Indian state are you originally from?", "required": False, "sensitive_flag": False},
+    {"id": "family_income_band", "section": "financial_compatibility", "question_text": "What is your approximate family income band (annual)?", "required": False, "sensitive_flag": True},
+    {"id": "family_type_preference", "section": "family_background", "question_text": "Do you prefer a joint family or nuclear family setup after marriage?", "required": False, "sensitive_flag": False},
+    {"id": "religious_sect", "section": "values_religion_culture", "question_text": "What is your religious denomination or sect (e.g. Sunni/Shia for Muslim; Brahmin/Kshatriya for Hindu)?", "required": False, "sensitive_flag": True},
+    {"id": "hijab_preference", "section": "values_religion_culture", "question_text": "Do you wear hijab / observe purdah?", "required": False, "sensitive_flag": False},
+    {"id": "beard_preference", "section": "values_religion_culture", "question_text": "Do you keep a beard (for men) / prefer a bearded partner?", "required": False, "sensitive_flag": False},
+    {"id": "prayer_frequency", "section": "values_religion_culture", "question_text": "How often do you pray (salah)?", "required": False, "sensitive_flag": False},
+    {"id": "halal_diet_strict", "section": "physical_lifestyle", "question_text": "Do you strictly observe halal dietary requirements?", "required": False, "sensitive_flag": False},
+    {"id": "mahram_required", "section": "values_religion_culture", "question_text": "Do you require a mahram (chaperone) when meeting a potential spouse?", "required": False, "sensitive_flag": True},
+    {"id": "nikah_type", "section": "intent_and_readiness", "question_text": "What type of marriage ceremony do you prefer (civil + religious, religious only, etc.)?", "required": False, "sensitive_flag": False},
+    {"id": "polygamy_openness", "section": "sensitive_attributes", "question_text": "Are you open to polygamous marriage arrangements?", "required": False, "sensitive_flag": True},
+    {"id": "tribe_ethnicity", "section": "cultural_identity", "question_text": "What is your tribal or ethnic background?", "required": False, "sensitive_flag": True},
+    {"id": "lobola_expectation", "section": "family_background", "question_text": "What are your thoughts or expectations around bride price / lobola?", "required": False, "sensitive_flag": True},
+    {"id": "family_approval_importance", "section": "family_background", "question_text": "How important is family approval in your marriage decision?", "required": False, "sensitive_flag": False},
+    {"id": "language_spoken", "section": "cultural_identity", "question_text": "What language(s) do you primarily speak?", "required": False, "sensitive_flag": False},
+    {"id": "sexual_orientation", "section": "basic_identity", "question_text": "How would you describe your sexual orientation?", "required": False, "sensitive_flag": True},
+    {"id": "pronouns", "section": "basic_identity", "question_text": "What are your pronouns?", "required": False, "sensitive_flag": False},
+    {"id": "transition_status", "section": "basic_identity", "question_text": "Are you comfortable sharing your transition journey or status?", "required": False, "sensitive_flag": True},
+    {"id": "relationship_structure", "section": "intent_and_readiness", "question_text": "What relationship structure works best for you (monogamous, polyamorous, open, etc.)?", "required": False, "sensitive_flag": False},
+]
+
+ACTIVE_QUESTION_BANK = PROFILE_QUESTIONS + COMMUNITY_EXTRA_QUESTIONS
+PROFILE_FIELD_META = {q.get("id"): q for q in ACTIVE_QUESTION_BANK if q.get("id")}
+
+COMMUNITY_CONFIG = {
+    "dating_western": {
+        "label": "Western Dating",
+        "agent_personality": (
+            "Be warm, casual, witty, and open-minded. Celebrate individuality. "
+            "Avoid assumptions about gender roles or family expectations."
+        ),
+        "notes": "Prioritize autonomy, modern dating norms, and individual compatibility over family-led criteria.",
+        "question_ids": [
+            "age", "location_city", "height_cm", "education_level", "occupation",
+            "relationship_intent", "timeline_for_commitment", "marital_status",
+            "has_children", "wants_children", "smoking_status", "alcohol_status",
+            "diet", "family_type", "communication_style", "conflict_style",
+            "bio_relationship_offer", "bio_relationship_need",
+            "partner_non_negotiables", "partner_must_haves",
+            "preferred_age_range", "gender_identity", "sexual_orientation",
+            "religion", "religious_practice_level", "income_band", "career_stage",
+            "friends_social_style", "has_pets", "past_relationship_learnings",
+            "preferred_religion", "max_distance_km", "willing_to_relocate",
+        ],
+    },
+    "arranged_india": {
+        "label": "Indian Arranged Marriage",
+        "agent_personality": (
+            "Be respectful, dignified, and family-aware. Use warm, formal language when needed. "
+            "Handle religion, caste, and horoscope topics gently and always as optional."
+        ),
+        "notes": "Prioritize long-term compatibility, family alignment, religion, caste-sensitive handling, and India/NRI context.",
+        "question_ids": [
+            "age", "location_city", "height_cm", "education_level", "occupation",
+            "career_stage", "income_band", "family_income_band", "nri_status",
+            "state_of_origin", "mother_tongue", "religion", "religious_sect",
+            "caste", "sub_caste", "gotra", "manglik_status",
+            "kundali_match_required", "marital_status", "has_children",
+            "wants_children", "family_type", "family_type_preference",
+            "family_values", "diet", "smoking_status", "alcohol_status",
+            "relationship_intent", "timeline_for_commitment", "communication_style",
+            "partner_non_negotiables", "partner_must_haves", "preferred_age_range",
+            "preferred_religion", "preferred_caste", "preferred_sub_caste",
+            "skin_tone", "max_distance_km", "willing_to_relocate",
+        ],
+    },
+    "matrimonial_muslim": {
+        "label": "Muslim Matrimonial",
+        "agent_personality": (
+            "Be respectful, dignified, and nikah-focused. Use Islamic-values-aware language and "
+            "treat practice, halal lifestyle, and family approval as important context."
+        ),
+        "notes": "Prioritize nikah-focused compatibility, sect and practice alignment, halal lifestyle, and family/community approval.",
+        "question_ids": [
+            "age", "location_city", "height_cm", "education_level", "occupation",
+            "career_stage", "income_band", "religion", "religious_sect",
+            "religious_practice_level", "prayer_frequency", "hijab_preference",
+            "beard_preference", "halal_diet_strict", "mahram_required",
+            "nikah_type", "marital_status", "has_children", "wants_children",
+            "family_type", "family_values", "diet", "smoking_status",
+            "alcohol_status", "relationship_intent", "timeline_for_commitment",
+            "communication_style", "partner_non_negotiables",
+            "partner_must_haves", "preferred_age_range", "max_distance_km",
+            "willing_to_relocate", "polygamy_openness",
+        ],
+    },
+    "arranged_africa_west": {
+        "label": "West African Marriage",
+        "agent_personality": (
+            "Be warm, respectful of elders and community, and culturally aware. "
+            "Treat marriage as a union of families as well as individuals."
+        ),
+        "notes": "Prioritize family and community approval, faith, ethnic identity, and culturally respectful discussion of bride price traditions.",
+        "question_ids": [
+            "age", "location_city", "height_cm", "education_level", "occupation",
+            "career_stage", "income_band", "religion", "religious_practice_level",
+            "tribe_ethnicity", "language_spoken", "lobola_expectation",
+            "family_approval_importance", "marital_status", "has_children",
+            "wants_children", "family_type", "family_values", "diet",
+            "smoking_status", "alcohol_status", "relationship_intent",
+            "timeline_for_commitment", "communication_style",
+            "partner_non_negotiables", "partner_must_haves",
+            "preferred_age_range", "max_distance_km", "willing_to_relocate",
+        ],
+    },
+    "dating_lgbtq": {
+        "label": "LGBTQ+ Dating",
+        "agent_personality": (
+            "Be deeply affirming, identity-aware, and fully inclusive. "
+            "Use chosen names and pronouns naturally and never make heteronormative assumptions."
+        ),
+        "notes": "Prioritize identity safety, pronouns, relationship structure, and fully inclusive language without assumptions.",
+        "question_ids": [
+            "age", "location_city", "height_cm", "education_level", "occupation",
+            "career_stage", "income_band", "gender_identity", "sexual_orientation",
+            "pronouns", "relationship_intent", "relationship_structure",
+            "timeline_for_commitment", "marital_status", "has_children",
+            "wants_children", "smoking_status", "alcohol_status", "diet",
+            "communication_style", "conflict_style", "bio_relationship_offer",
+            "bio_relationship_need", "partner_non_negotiables",
+            "partner_must_haves", "preferred_age_range", "religion",
+            "religious_practice_level", "friends_social_style", "has_pets",
+            "past_relationship_learnings", "max_distance_km",
+            "willing_to_relocate", "transition_status",
+        ],
+    },
+}
+
+
+def _question_category(question: dict) -> str:
+    if question.get("required"):
+        return "required"
+    if question.get("section") in (
+        "lifestyle_compatibility",
+        "intent_and_readiness",
+        "physical_lifestyle",
+    ):
+        return "matching_prefs"
+    return "deeper"
+
+
+def _active_questions_for_profile(profile: dict) -> list[dict]:
+    community_id = (profile.get("community_profile") or "dating_standard").strip()
+    if community_id == "dating_standard":
+        community_id = "dating_western"
+    config = COMMUNITY_CONFIG.get(community_id)
+    if not config:
+        return ACTIVE_QUESTION_BANK
+    bank = {q.get("id"): q for q in ACTIVE_QUESTION_BANK if q.get("id")}
+    return [bank[qid] for qid in config["question_ids"] if qid in bank]
+
+
+def _parse_json_field(value) -> dict:
+    """Return a dict from a field that may already be a dict or may be a JSON string."""
+    if isinstance(value, dict):
+        return value
+    if isinstance(value, str):
+        try:
+            parsed = json.loads(value)
+            return parsed if isinstance(parsed, dict) else {}
+        except Exception:
+            return {}
+    return {}
+
+
+def _answered_question_keys_from_profile(profile: dict) -> set[str]:
+    answered = set()
+
+    profile_answers = _parse_json_field(profile.get("profile_answers"))
+    for key, value in profile_answers.items():
+        if value not in (None, "", [], {}):
+            answered.add(key)
+
+    if profile.get("age") is not None:
+        answered.add("age")
+    if profile.get("gender"):
+        answered.add("gender_identity")
+    if profile.get("location_region"):
+        answered.add("location_city")
+
+    matching_prefs = _parse_json_field(profile.get("matching_prefs"))
+    if matching_prefs.get("age_min") is not None and matching_prefs.get("age_max") is not None:
+        answered.add("preferred_age_range")
+    if matching_prefs.get("interested_in"):
+        answered.add("gender_identity")  # they set who they're looking for
+
+    return answered
 
 def _build_system_prompt(
     profile: dict, skills: list[dict], pending_questions: list[dict]
 ) -> str:
     name = profile.get("display_name") or "User"
     agent_name = profile.get("agent_name") or "Ayma"
+    active_questions = _active_questions_for_profile(profile)
+    community_id = (profile.get("community_profile") or "dating_standard").strip()
+    if community_id == "dating_standard":
+        community_id = "dating_western"
+    community = COMMUNITY_CONFIG.get(community_id)
 
+    has_wiki = bool(profile.get("wiki_about_me") or profile.get("wiki_context") or profile.get("wiki_preferences"))
     parts = [
         MATCHMAKER_SKILL.replace("{agent_name}", agent_name),
-        DEEP_RECALL_SKILL,
+        DEEP_RECALL_SKILL if has_wiki else NEW_USER_LISTEN_SKILL,
         TONE_MIRROR_SKILL,
         PROFILE_COMPLETION_SKILL,
     ]
 
-    # Demographics
+    if community:
+        parts.append(
+            f"## Matchmaking Context\n"
+            f"Community: {community['label']}\n"
+            f"Notes: {community['notes']}\n"
+            f"How to show up: {community['agent_personality']}"
+        )
+
+    # Demographics — explicitly list onboarding answers so Ayma never re-asks
     demo = []
     if profile.get("age"):
         demo.append(f"Age: {profile['age']}")
@@ -167,6 +541,11 @@ def _build_system_prompt(
         demo.append(f"Gender: {profile['gender']}")
     if profile.get("location_region"):
         demo.append(f"Location: {profile['location_region']}")
+    mp = _parse_json_field(profile.get("matching_prefs"))
+    if mp.get("interested_in"):
+        demo.append(f"Looking for: {mp['interested_in']}")
+    if mp.get("age_min") is not None and mp.get("age_max") is not None:
+        demo.append(f"Partner age range: {mp['age_min']}–{mp['age_max']}")
     if demo:
         parts.append(f"## Demographics\n{', '.join(demo)}")
 
@@ -200,30 +579,21 @@ def _build_system_prompt(
     if profile.get("profile_private"):
         parts.append(f"## {name}'s Private Notes\n{profile['profile_private']}")
 
-    if profile.get("matching_prefs"):
-        matching_prefs = {}
-        try:
-            matching_prefs = json.loads(profile["matching_prefs"]) if isinstance(profile["matching_prefs"], str) else profile["matching_prefs"]
-        except Exception:
-            pass
-        if matching_prefs:
-            parts.append(
-                f"## Matching Preferences\n{json.dumps(matching_prefs, indent=2)}"
-            )
+    matching_prefs = _parse_json_field(profile.get("matching_prefs"))
+    if matching_prefs:
+        parts.append(
+            f"## Matching Preferences\n{json.dumps(matching_prefs, indent=2)}"
+        )
 
     if profile.get("wiki_profile_structured"):
         parts.append(f"## Structured Match Profile\n{profile['wiki_profile_structured']}")
 
-    profile_answers = {}
-    if profile.get("profile_answers"):
-        try:
-            profile_answers = json.loads(profile["profile_answers"]) if isinstance(profile["profile_answers"], str) else profile["profile_answers"]
-        except Exception:
-            pass
+    profile_answers = _parse_json_field(profile.get("profile_answers"))
+    answered_keys = _answered_question_keys_from_profile(profile)
     missing_required = [
         q["id"]
-        for q in PROFILE_QUESTIONS
-        if q.get("required") and q.get("id") and q["id"] not in profile_answers
+        for q in active_questions
+        if q.get("required") and q.get("id") and q["id"] not in answered_keys
     ]
     if missing_required:
         parts.append(
@@ -278,11 +648,41 @@ def _build_system_prompt(
             "Now deepen the conversation and update what you know as things change."
         )
 
-    parts.append(
-        f"\nThe user's name is {name}. "
-        "When the conversation starts, greet them warmly as a friend. "
-        "One short opening line, then ask something genuine."
-    )
+    # Narrative depth prompts from the questionnaire graph.
+    # These are the open-ended LLM questions for the user's intent type.
+    # Ayma should weave them in naturally — one per conversation, never as a list.
+    intent = (matching_prefs.get("intent_type") or "long_term").lower()
+    llm_prompts = get_llm_prompts(intent)
+    if llm_prompts:
+        profile_answers_snapshot = _parse_json_field(profile.get("profile_answers"))
+        pending_narratives = [p for p in llm_prompts if not profile_answers_snapshot.get(p["id"])]
+        if pending_narratives:
+            narrative_lines = [
+                "## Narrative Depth — Weave These In",
+                "",
+                "These open-ended questions surface the deep context that powers matching. "
+                "Work them into conversation naturally — one per session, never recited as a list. "
+                "Wait for an emotionally resonant moment before asking each one. "
+                "When the user gives a real answer, reflect on it briefly, then move on.",
+                "",
+            ]
+            for p in pending_narratives:
+                narrative_lines.append(f'- "{p["prompt"]}"  [narrative_id: {p["id"]}]')
+            parts.append("\n".join(narrative_lines))
+
+    # Personalized opener
+    if profile.get("wiki_about_me") or profile.get("wiki_context"):
+        parts.append(
+            f"\nThe user's name is {name}. You've talked before — greet them warmly as the friend you've become. "
+            "Reference something specific from the profile above to show you remember. "
+            "Then continue deepening the conversation naturally."
+        )
+    else:
+        parts.append(
+            f"\nThe user's name is {name}. This is your first conversation. "
+            "Greet them warmly and start with one genuine, open-ended question — something that invites them to share something real about themselves, "
+            "not just facts. Make them feel immediately comfortable and curious to keep talking."
+        )
 
     return "\n\n---\n\n".join(parts)
 
@@ -295,18 +695,26 @@ def _parse_row(row) -> dict:
     # Parse JSONB fields
     for field in ["matching_prefs", "profile_answers", "profile_answers_public", 
                   "profile_answers_private", "profile_answers_sensitive", 
-                  "profile_field_visibility", "photo_order", "voice_settings"]:
+                  "profile_field_visibility", "photo_order", "voice_settings",
+                  "location_coords"]:
         if field in res:
             try:
                 res[field] = json.loads(res[field]) if isinstance(res[field], str) else res[field]
             except Exception:
-                res[field] = {}
+                res[field] = [] if field == "photo_order" else {}
+    # Convert SQLite boolean integer fields to actual booleans
+    for field in ["onboarding_complete", "matching_paused", "preboarding_seen", 
+                  "profile_public_locked", "profile_public_user_edited", 
+                  "show_simulation_transcript"]:
+        if field in res and res[field] is not None:
+            res[field] = bool(res[field])
     return res
 
 # ── Bootstrap ─────────────────────────────────────────────────────────────────
 
 @app.post("/bootstrap")
-async def bootstrap(uid: str = Depends(verify_token)):
+@limiter.limit(RATE_BOOTSTRAP)
+async def bootstrap(request: Request, uid: str = Depends(verify_token)):
     pool = app.state.pool
     async with pool.acquire() as conn:
         profile_row = await conn.fetchrow("SELECT * FROM users WHERE id = $1", uid)
@@ -326,6 +734,8 @@ async def bootstrap(uid: str = Depends(verify_token)):
             profile_row = await conn.fetchrow("SELECT * FROM users WHERE id = $1", uid)
         
         profile = _parse_row(profile_row)
+        active_questions = _active_questions_for_profile(profile)
+        answered_keys = _answered_question_keys_from_profile(profile)
 
         # Fetch custom skills
         skills_rows = await conn.fetch(
@@ -341,17 +751,16 @@ async def bootstrap(uid: str = Depends(verify_token)):
         )
         if not questions_exist:
             to_insert = []
-            for q in PROFILE_QUESTIONS:
+            for q in active_questions:
                 qid = q.get("id")
                 qtext = q.get("question_text", "")
-                category = "deeper"
-                if q.get("required"):
-                    category = "required"
-                elif q.get("section") in ("lifestyle_compatibility", "intent_and_readiness"):
-                    category = "matching_prefs"
+                category = _question_category(q)
+                answered = qid in answered_keys
                 
                 to_insert.append((
-                    uid, qid, qid, qtext, category, 99, False, None, False
+                    uid, qid, qid, qtext, category, 99, answered,
+                    datetime.now(timezone.utc).isoformat() if answered else None,
+                    False
                 ))
             
             if to_insert:
@@ -416,73 +825,106 @@ async def bootstrap(uid: str = Depends(verify_token)):
 
     return {
         "websocket_url": GEMINI_LIVE_WS,
-        "token": GOOGLE_API_KEY,
+        "token": _active_key(),   # always returns whichever key is currently active
         "setup": setup,
         "model": LIVE_MODEL,
     }
 
 # ── Consolidated Post-turn Synthesis ──────────────────────────────────────────
 
-CONSOLIDATED_POST_TURN_PROMPT = """You are the backend brain of an AI matchmaking application called Ayma.
-Your job is to process a conversation snippet and update the user's matchmaking profile, wiki memories, and checklist status.
+CONSOLIDATED_POST_TURN_PROMPT = """You are the memory and profile engine for Ayma, an AI matchmaking companion.
 
-Conversation:
+Your job: process this conversation and extract what was learned, updating the user's profile wiki and structured fields.
+
+## Conversation
 {conversation}
 
 ---
 
-## Part 1: Wiki Memories Update
-You maintain 4 separate markdown fact lists for this user.
-RULES:
-- Only record facts the USER explicitly stated. Ignore what the AI/assistant said.
-- Do NOT infer or extrapolate. Write exactly what was said, no elaboration.
-- Max size: About Me (20 bullets), Life Context (10 bullets), Partner Preferences (20 bullets), Matching Specs (20 bullets).
-- If nothing new was learned for a section, return the current list unchanged.
+## Part 1: Wiki Memory Update
 
-Current Wiki Blocks:
-[About Me]:
+You maintain 4 running markdown bullet lists for {user_name}. Each is a synthesized, deduplicated fact list.
+
+STRICT RULES:
+- Only include facts the USER explicitly stated. Not what the AI said, not inferences.
+- Merge new facts with existing ones — don't duplicate. If a fact is already captured, don't write it again.
+- If new info UPDATES a previous fact (e.g. they said they're vegetarian now but previously said flexible), update it — don't keep both.
+- If the user SOFTENS or EXPANDS a previous preference (e.g. "I used to want only X but now I'm open to Y too"), update the bullet to reflect the evolved stance. Remove the old strict version and write the nuanced one.
+  Examples of softening you MUST capture:
+  • "ideally South Indian" + "open to outside Tamil if values align" → "prefers South Indian but open to others with strong values"
+  • "must be religious" + "not a hard requirement anymore" → "prefer someone religious, but not a dealbreaker"
+  • "wants to stay in [city]" + "open to relocation" → "open to relocation for the right person"
+- Write in bullet point format: "- [fact]"
+- Max sizes: About Me (25 bullets), Life Context (15 bullets), Partner Preferences (25 bullets), Matching Specs (20 bullets)
+- Quality bar: each bullet must be a concrete, specific fact. Not vague summaries.
+- If nothing new was learned for a section, return the existing list UNCHANGED.
+
+Current Wiki (update these):
+
+[About {user_name}]:
 {wiki_about_me}
 
-[Life Context]:
+[{user_name}'s Life Context]:
 {wiki_context}
 
-[Partner Preferences]:
+[What {user_name} Is Looking For]:
 {wiki_preferences}
 
-[Matching Specs]:
+[{user_name}'s Matching Specs]:
 {wiki_matching}
 
 ---
 
 ## Part 2: Structured Field Extraction
-Extract answers to the following structured profile questions if explicitly stated:
+
+Extract values for these profile fields if the user explicitly stated them:
 {field_catalog}
+
+Only extract if the user clearly stated the value. Confidence "high" = they said it directly. "medium" = it can be reasonably inferred from what they said.
 
 ---
 
-## Part 3: Answered Questions Checklist
-Check if any of these unanswered questions have now been explicitly answered:
+## Part 3: Question Coverage
+
+Check which of these unanswered questions were addressed (even partially) in this conversation:
 {unanswered_questions_list}
 
 ---
 
-You MUST return a JSON object with this exact JSON schema:
+## Part 4: Narrative Depth Answers
+
+The following open-ended narrative prompts power the semantic matching engine. Check if the user gave a
+meaningful answer to any of them in this conversation. Only capture an answer if the user responded
+substantively (2+ sentences of real personal content). A short deflection or "I don't know" is NOT an answer.
+
+{narrative_prompts_list}
+
+For each prompt that received a real answer, capture the user's response as a single coherent paragraph
+(preserve their voice — don't over-sanitize). Return the narrative_id and the captured answer.
+
+---
+
+EXAMPLE OUTPUT (replace all values with real data — do not copy these strings):
 {{
   "wiki_updates": {{
-    "about_me": "updated about me markdown bullet list",
-    "context": "updated life context markdown bullet list",
-    "preferences": "updated preferences markdown bullet list",
-    "matching": "updated matching specs markdown bullet list"
+    "about_me": "- She is 28 years old\\n- She is a software engineer at a fintech startup\\n- She is Tamil Brahmin and vegetarian",
+    "context": "- She is based in Toronto and plans to stay long-term\\n- Her family is traditional and will be involved in major decisions",
+    "preferences": "- She wants to marry someone South Indian, ideally Tamil\\n- Horoscope matching is important to her and her family",
+    "matching": "- Age preference: 28-35\\n- Location: Toronto or willing to relocate within Canada"
   }},
   "extracted_answers": [
-    {{"id": "field_id", "value": <string|number|boolean|array|object>, "confidence": "high|medium"}}
+    {{"id": "diet", "value": "vegetarian", "confidence": "high"}},
+    {{"id": "alcohol_status", "value": "no", "confidence": "high"}}
   ],
-  "sensitive_public_opt_in": ["field_id"],
-  "public_summary": "1-3 sentences for a public profile summary, only if conversation has enough non-sensitive detail; else empty string",
-  "answered_question_keys": ["key1", "key2"]
+  "sensitive_public_opt_in": [],
+  "public_summary": "Priya is a 28-year-old software engineer in Toronto looking for a serious relationship with a South Indian partner who values family.",
+  "answered_question_keys": ["diet", "alcohol_status", "religion"],
+  "narrative_answers": [
+    {{"id": "lt_crisis_response", "answer": "She said she'd want to face any crisis practically first — make a plan, assign roles, deal with emotions after the dust settles. She imagines her partner being the one who keeps her grounded when she goes into fix-it mode and forgets to feel things."}}
+  ]
 }}
 
-Only include field IDs that are explicitly allowed. Do not output any prose, markdown wrapping outside the JSON, or comments. Just return raw JSON.
+Now return ONLY the real JSON for this conversation. No prose, no markdown wrapping, no copying of example values.
 """
 
 class PostTurnRequest(BaseModel):
@@ -498,7 +940,7 @@ def _render_structured_wiki(profile_answers: dict) -> str:
 
     # Keep schema order for sections/fields
     section_order = PUBLIC_PAYLOAD_ORDER or list(by_section.keys())
-    q_order = [q.get("id") for q in PROFILE_QUESTIONS]
+    q_order = [q.get("id") for q in ACTIVE_QUESTION_BANK]
 
     parts: list[str] = []
     for section in section_order:
@@ -517,7 +959,8 @@ def _render_structured_wiki(profile_answers: dict) -> str:
     return "\n".join(parts).strip()
 
 @app.post("/post-turn")
-async def post_turn(body: PostTurnRequest, uid: str = Depends(verify_token)):
+@limiter.limit(RATE_POST_TURN)
+async def post_turn(request: Request, body: PostTurnRequest, uid: str = Depends(verify_token)):
     if not body.messages:
         return {"updated": False}
 
@@ -531,6 +974,8 @@ async def post_turn(body: PostTurnRequest, uid: str = Depends(verify_token)):
         if not profile_row:
             return {"updated": False}
         profile = _parse_row(profile_row)
+        active_questions = _active_questions_for_profile(profile)
+        user_name = profile.get("display_name") or "User"
 
         # Store verbatim statements
         user_lines = [m["text"] for m in body.messages[-10:] if m.get("role") == "user" and m.get("text", "").strip()]
@@ -554,38 +999,56 @@ async def post_turn(body: PostTurnRequest, uid: str = Depends(verify_token)):
 
         # Assemble catalog & pending lists
         field_catalog = "\n".join(
-            f"- {q.get('id')}: {q.get('question_text')}" for q in PROFILE_QUESTIONS if q.get("id")
+            f"- {q.get('id')}: {q.get('question_text')}"
+            for q in active_questions
+            if q.get("id")
         )
         unanswered_questions_list = "\n".join(
             f"- {q['key']}: {q['text']}" for q in pending_questions
         )
 
+        # Narrative prompts from questionnaire graph — only include ones not yet answered
+        intent = (_parse_json_field(profile.get("matching_prefs")).get("intent_type") or "long_term").lower()
+        all_narratives = get_llm_prompts(intent)
+        profile_answers_now = _parse_json_field(profile.get("profile_answers"))
+        pending_narratives = [p for p in all_narratives if not profile_answers_now.get(p["id"])]
+        if pending_narratives:
+            narrative_prompts_list = "\n".join(
+                f'- [narrative_id: {p["id"]}] "{p["prompt"]}"'
+                for p in pending_narratives
+            )
+        else:
+            narrative_prompts_list = "(all narrative prompts answered — no action needed)"
+
         prompt = CONSOLIDATED_POST_TURN_PROMPT.format(
             conversation=conversation,
+            user_name=user_name,
             wiki_about_me=profile.get("wiki_about_me") or "(empty)",
             wiki_context=profile.get("wiki_context") or "(empty)",
             wiki_preferences=profile.get("wiki_preferences") or "(empty)",
             wiki_matching=profile.get("wiki_matching") or "(empty)",
             field_catalog=field_catalog,
-            unanswered_questions_list=unanswered_questions_list
+            unanswered_questions_list=unanswered_questions_list,
+            narrative_prompts_list=narrative_prompts_list,
         )
 
-        # Call Gemini (Single consolidated extraction)
-        model = genai.GenerativeModel(TEXT_MODEL)
+        # Call Gemini with automatic key-rotation fallback on quota exhaustion
+        payload = {}
         try:
-            resp = await model.generate_content_async(
-                prompt,
-                generation_config={"response_mime_type": "application/json"}
+            raw = await _gemini_call(
+                TEXT_MODEL, prompt,
+                generation_config={"response_mime_type": "application/json"},
             )
-            payload = json.loads(resp.text)
-        except Exception:
-            payload = {}
+            payload = json.loads(raw)
+        except Exception as e:
+            logger.warning(f"[post-turn] Gemini extraction failed: {type(e).__name__}: {e}")
 
         wiki_updates = payload.get("wiki_updates") or {}
-        wiki_about_me = wiki_updates.get("about_me", profile.get("wiki_about_me") or "")
-        wiki_context = wiki_updates.get("context", profile.get("wiki_context") or "")
-        wiki_preferences = wiki_updates.get("preferences", profile.get("wiki_preferences") or "")
-        wiki_matching = wiki_updates.get("matching", profile.get("wiki_matching") or "")
+        # Use `or` fallback so an empty string from Gemini preserves existing wiki
+        wiki_about_me = wiki_updates.get("about_me") or profile.get("wiki_about_me") or ""
+        wiki_context = wiki_updates.get("context") or profile.get("wiki_context") or ""
+        wiki_preferences = wiki_updates.get("preferences") or profile.get("wiki_preferences") or ""
+        wiki_matching = wiki_updates.get("matching") or profile.get("wiki_matching") or ""
 
         extracted_answers = payload.get("extracted_answers") or []
         sensitive_public_opt_in = set(payload.get("sensitive_public_opt_in") or [])
@@ -622,6 +1085,22 @@ async def post_turn(body: PostTurnRequest, uid: str = Depends(verify_token)):
                 visibility_map[field_id] = "public"
                 public_map[field_id] = value
                 private_map.pop(field_id, None)
+
+        # Save narrative answers from questionnaire graph prompts.
+        # These go into profile_answers keyed by narrative_id, and are also
+        # appended to wiki_matching so the matching engine can embed them.
+        narrative_answers = payload.get("narrative_answers") or []
+        valid_narrative_ids = {p["id"] for p in all_narratives}
+        for item in narrative_answers:
+            nid = item.get("id")
+            answer_text = (item.get("answer") or "").strip()
+            if nid and nid in valid_narrative_ids and answer_text:
+                existing_answers[nid] = answer_text
+                # Surface the answer in wiki_matching so it feeds the embedding
+                label = next((p["prompt"][:60] for p in all_narratives if p["id"] == nid), nid)
+                entry = f"\n- [{nid}] {answer_text}"
+                if entry not in wiki_matching:
+                    wiki_matching = (wiki_matching or "") + entry
 
         structured_wiki = _render_structured_wiki(existing_answers)
 
@@ -668,6 +1147,10 @@ async def post_turn(body: PostTurnRequest, uid: str = Depends(verify_token)):
             VALUES ($1, $2, $3)
         """, uid, conversation, body.session_id)
 
+    # Re-embed matching wiki in the background so pgvector stays fresh without
+    # blocking the post-turn response.
+    asyncio.create_task(_refresh_wiki_embedding(uid, app.state.pool))
+
     return {"updated": True}
 
 # ── Health ────────────────────────────────────────────────────────────────────
@@ -683,6 +1166,7 @@ class ProfileUpdateBody(BaseModel):
     age: int | None = None
     gender: str | None = None
     location_region: str | None = None
+    location_coords: dict | None = None
     onboarding_complete: bool | None = None
     matching_paused: bool | None = None
     preboarding_seen: bool | None = None
@@ -695,6 +1179,7 @@ class ProfileUpdateBody(BaseModel):
     community_profile: str | None = None
     agent_name: str | None = None
     voice_preference: str | None = None
+    matching_prefs: dict | None = None
 
 @app.get("/profile")
 async def get_profile(uid: str = Depends(verify_token)):
@@ -725,7 +1210,7 @@ async def update_profile(body: ProfileUpdateBody, uid: str = Depends(verify_toke
     idx = 1
     for k, v in fields.items():
         # Handle maps/lists to JSON strings
-        if k in ("photo_order", "voice_settings", "matching_prefs"):
+        if k in ("photo_order", "voice_settings", "matching_prefs", "location_coords"):
             v = json.dumps(v)
         set_clauses.append(f"{k} = ${idx}")
         args.append(v)
@@ -735,6 +1220,20 @@ async def update_profile(body: ProfileUpdateBody, uid: str = Depends(verify_toke
     query = f"UPDATE users SET {', '.join(set_clauses)}, updated_at = NOW() WHERE id = ${idx}"
     
     async with pool.acquire() as conn:
+        existing = await conn.fetchval("SELECT 1 FROM users WHERE id = $1", uid)
+        if not existing:
+            display_name = fields.get("display_name") or "User"
+            try:
+                user_record = auth.get_user(uid)
+                if user_record.display_name and "display_name" not in fields:
+                    display_name = user_record.display_name
+            except Exception:
+                pass
+            await conn.execute(
+                "INSERT INTO users (id, display_name) VALUES ($1, $2) ON CONFLICT DO NOTHING",
+                uid,
+                display_name,
+            )
         await conn.execute(query, *args)
     return {"success": True}
 
@@ -748,7 +1247,7 @@ async def get_public_profile(userId: str, uid: str = Depends(verify_token)):
         data = dict(row)
         
         # Get photos from user_media
-        media_rows = await conn.fetch("SELECT photo_url FROM user_media WHERE user_id = $1 ORDER BY created_at DESC LIMIT 24", userId)
+        media_rows = await conn.fetch(f"SELECT photo_url FROM user_media WHERE user_id = $1 ORDER BY created_at DESC LIMIT {MATCHES_MEDIA_LIMIT}", userId)
         photos = [r["photo_url"] for r in media_rows]
         data["photos"] = photos
         
@@ -772,25 +1271,36 @@ async def get_public_profile(userId: str, uid: str = Depends(verify_token)):
 async def get_insights(uid: str = Depends(verify_token)):
     pool = app.state.pool
     async with pool.acquire() as conn:
-        row = await conn.fetchrow("SELECT wiki_about_me, wiki_preferences, wiki_context, profile_public FROM users WHERE id = $1", uid)
+        row = await conn.fetchrow(
+            "SELECT wiki_about_me, wiki_preferences, wiki_context, wiki_matching, profile_public, updated_at FROM users WHERE id = $1", uid
+        )
         if not row:
             return {}
         profile = dict(row)
-        
-        media_rows = await conn.fetch("SELECT photo_url, caption, created_at FROM user_media WHERE user_id = $1 ORDER BY created_at DESC LIMIT 20", uid)
-        
+
+        media_rows = await conn.fetch(f"SELECT photo_url, caption, created_at FROM user_media WHERE user_id = $1 ORDER BY created_at DESC LIMIT {INSIGHTS_MEDIA_LIMIT}", uid)
+
         media_lines = []
         for mr in media_rows:
-            date_str = mr["created_at"].strftime("%Y-%m-%d")
+            try:
+                date_str = mr["created_at"].strftime("%Y-%m-%d")
+            except Exception:
+                date_str = str(mr["created_at"])[:10]
             line = f"- [{date_str}]({mr['photo_url']})"
             if mr["caption"]:
                 line += f"\n  {mr['caption']}"
             media_lines.append(line)
-        
+
+        updated_at = str(profile.get("updated_at") or "")
         return {
             "about_me": profile.get("wiki_about_me") or "",
+            "about_me_updated_at": updated_at,
             "preferences": profile.get("wiki_preferences") or "",
+            "preferences_updated_at": updated_at,
             "context": profile.get("wiki_context") or "",
+            "context_updated_at": updated_at,
+            "matching": profile.get("wiki_matching") or "",
+            "matching_updated_at": updated_at,
             "media": "\n".join(media_lines),
             "public_profile": profile.get("profile_public") or ""
         }
@@ -836,7 +1346,7 @@ async def update_match_status(match_id: int, body: MatchStatusBody, uid: str = D
 async def get_notifications(uid: str = Depends(verify_token)):
     pool = app.state.pool
     async with pool.acquire() as conn:
-        rows = await conn.fetch("SELECT id, user_id, type, title, body, meta, read, created_at FROM notifications WHERE user_id = $1 ORDER BY created_at DESC LIMIT 50", uid)
+        rows = await conn.fetch(f"SELECT id, user_id, type, title, body, meta, read, created_at FROM notifications WHERE user_id = $1 ORDER BY created_at DESC LIMIT {NOTIFICATIONS_LIMIT}", uid)
         notifs = []
         for r in rows:
             n = dict(r)
@@ -995,7 +1505,7 @@ async def explore(gender: str | None = None, ageMin: int | None = None, ageMax: 
         args.append(f"%{query}%")
         idx += 1
         
-    sql += " LIMIT 50"
+    sql += f" LIMIT {EXPLORE_LIMIT}"
     
     async with pool.acquire() as conn:
         rows = await conn.fetch(sql, *args)
@@ -1031,6 +1541,106 @@ async def delete_media_by_url(body: MediaDeleteBody, uid: str = Depends(verify_t
         await conn.execute("DELETE FROM user_media WHERE user_id = $1 AND photo_url = $2", uid, body.photo_url)
     return {"success": True}
 
+class AnalyzePhotosBody(BaseModel):
+    photo_urls: list[str]
+
+_SAFETY_PROMPT = (
+    "Is this image safe for a dating app? Check for explicit nudity, graphic violence, "
+    "or hate symbols. Respond with JSON only: "
+    '{"safe": true or false, "reason": "one sentence if unsafe, else empty string"}'
+)
+
+async def _is_photo_safe(url: str) -> tuple[bool, str]:
+    try:
+        raw = await _gemini_call(TEXT_MODEL, [_SAFETY_PROMPT, {"url": url}],
+                                  generation_config={"response_mime_type": "application/json"})
+        data = json.loads(raw)
+        return bool(data.get("safe", True)), data.get("reason", "")
+    except Exception:
+        return True, ""  # fail open — don't block on moderation errors
+
+@app.post("/profile/analyze-photos")
+@limiter.limit(RATE_ANALYZE_PHOTOS)
+async def analyze_photos(request: Request, body: AnalyzePhotosBody, uid: str = Depends(verify_token)):
+    """Use Gemini Vision to understand the user's appearance from their photos,
+    then store a brief appearance note in wiki_about_me."""
+    if not body.photo_urls:
+        return {"success": False, "reason": "no photos"}
+    # Safety check: scan each photo before processing
+    for url in body.photo_urls:
+        safe, reason = await _is_photo_safe(url)
+        if not safe:
+            logger.warning(f"[moderation] unsafe photo for {uid}: {reason}")
+            pool = app.state.pool
+            async with pool.acquire() as conn:
+                await conn.execute(
+                    "UPDATE users SET matching_paused = TRUE WHERE id = $1", uid
+                )
+            raise HTTPException(status_code=422, detail=f"Photo flagged: {reason}")
+    try:
+        photo_prompt = (
+            "You are an honest, tactful personal matchmaker reviewing a client's photos. "
+            "Your job is to give them a real, useful assessment — like a trusted friend who wants them to "
+            "put their best foot forward with matches. Be specific, honest, and kind but NOT flattering.\n\n"
+            "Analyze the photo(s) and produce a structured assessment covering:\n"
+            "1. Overall score: X.X/10 with a one-word label (e.g. Above Average, Strong, Solid, Needs Work)\n"
+            "2. Key strengths: 2-3 specific things that stand out positively (bone structure, grooming, style, presence, hair, etc.)\n"
+            "3. Areas to improve: 2-3 honest, specific things they could work on (skin texture, beard neckline, hair styling, posture, dark circles, clothing, etc.)\n"
+            "4. Best feature: one thing\n"
+            "5. One-sentence overall impression a potential match would have\n\n"
+            "Do NOT mention race or ethnicity. Be honest — if they score a 6, say 6. "
+            "Format as a clean bullet list. No preamble.\n\n"
+            "Example format:\n"
+            "- score: 7.2/10 — Strong\n"
+            "- strengths: defined jawline; full natural hair with good volume; well-groomed beard\n"
+            "- improve: under-eye darkness worth addressing; beard neckline could be cleaner; skin texture uneven\n"
+            "- best feature: jawline and bone structure\n"
+            "- impression: confident, grounded look — approachable with a masculine edge"
+        )
+        parts = [photo_prompt]
+        for url in body.photo_urls[:PHOTO_ANALYSIS_MAX]:
+            parts.append({"url": url})
+        description = ""
+        for attempt in range(len(_API_KEYS)):
+            try:
+                model = genai.GenerativeModel(TEXT_MODEL)
+                resp = model.generate_content(parts)
+                description = resp.text.strip() if resp and resp.text else ""
+                break
+            except Exception as e:
+                if _is_quota_error(e) and attempt < len(_API_KEYS) - 1:
+                    _rotate_key()
+                    continue
+                raise
+        if description:
+            pool = app.state.pool
+            async with pool.acquire() as conn:
+                existing = await conn.fetchrow("SELECT wiki_about_me FROM users WHERE id = $1", uid)
+                current = (existing["wiki_about_me"] or "") if existing else ""
+                # Replace any prior appearance assessment block
+                lines = [l for l in current.split("\n")
+                         if not any(k in l.lower() for k in ("score:", "strengths:", "improve:", "best feature:", "impression:"))]
+                appearance_block = f"## Appearance Assessment\n{description}"
+                updated = (appearance_block + "\n\n" + "\n".join(lines)).strip()
+                await conn.execute("UPDATE users SET wiki_about_me = $1 WHERE id = $2", updated, uid)
+    except Exception as e:
+        logger.warning(f"analyze-photos failed: {e}")
+    return {"success": True}
+
+# ── Device token endpoint (FCM registration) ──────────────────────────────────
+
+class DeviceTokenBody(BaseModel):
+    token: str
+
+@app.post("/device-token")
+async def save_device_token(body: DeviceTokenBody, uid: str = Depends(verify_token)):
+    """Save the device's FCM token so the backend can send push notifications."""
+    pool = app.state.pool
+    async with pool.acquire() as conn:
+        await conn.execute("UPDATE users SET fcm_token = $1 WHERE id = $2", body.token, uid)
+    logger.info(f"FCM token registered for {uid}")
+    return {"success": True}
+
 # ── Direct Messaging Endpoints ─────────────────────────────────────────────────
 
 class MessageBody(BaseModel):
@@ -1041,20 +1651,24 @@ class MessageBody(BaseModel):
 async def send_direct_message(body: MessageBody, uid: str = Depends(verify_token)):
     pool = app.state.pool
     async with pool.acquire() as conn:
-        # Save message
-        await conn.execute("INSERT INTO messages (from_user_id, to_user_id, text) VALUES ($1, $2, $3)", uid, body.target_user_id, body.text)
-        
-        # Save notification
+        await conn.execute(
+            "INSERT INTO messages (from_user_id, to_user_id, text) VALUES ($1, $2, $3)",
+            uid, body.target_user_id, body.text,
+        )
         me = await conn.fetchrow("SELECT display_name FROM users WHERE id = $1", uid)
-        my_name = me["display_name"] if me and me["display_name"] else "Someone"
-        body_text = f"{my_name} sent you a message."
+        my_name = (me["display_name"] if me and me["display_name"] else "Someone")
+        notif_body = f"{my_name} sent you a message."
         meta = json.dumps({"from_user_id": uid})
-        
         await conn.execute("""
             INSERT INTO notifications (user_id, type, title, body, meta, read)
             VALUES ($1, 'agent_update', 'New message', $2, $3, FALSE)
-        """, body.target_user_id, body_text, meta)
-        
+        """, body.target_user_id, notif_body, meta)
+        recipient_token = await _get_fcm_token(body.target_user_id, conn)
+
+    asyncio.create_task(_send_push(
+        recipient_token, f"Message from {my_name}",
+        body.text[:PUSH_PREVIEW_LEN], {"from_user_id": uid, "type": "dm"},
+    ))
     return {"success": True}
 
 @app.get("/messages/{other_user_id}")
@@ -1063,10 +1677,10 @@ async def get_messages(other_user_id: str, uid: str = Depends(verify_token)):
     async with pool.acquire() as conn:
         rows = await conn.fetch("""
             SELECT id, from_user_id, to_user_id, text, read, created_at 
-            FROM messages 
+            FROM messages
             WHERE (from_user_id = $1 AND to_user_id = $2) OR (from_user_id = $2 AND to_user_id = $1)
-            ORDER BY created_at ASC 
-            LIMIT 200
+            ORDER BY created_at ASC
+            LIMIT {MESSAGES_LIMIT}
         """, uid, other_user_id)
         
         msgs = []
@@ -1076,6 +1690,57 @@ async def get_messages(other_user_id: str, uid: str = Depends(verify_token)):
             m["id"] = str(m["id"])
             msgs.append(m)
         return msgs
+
+# ── Text Chat Endpoint ─────────────────────────────────────────────────────────
+
+class TextChatRequest(BaseModel):
+    messages: list[dict]  # [{"role": "user"|"model", "text": "..."}]
+
+@app.post("/chat/text")
+@limiter.limit(RATE_CHAT_TEXT)
+async def text_chat(request: Request, body: TextChatRequest, uid: str = Depends(verify_token)):
+    """Text-mode chat with Ayma — uses same system prompt as voice bootstrap.
+    Useful for testing conversation quality without Gemini Live WebSocket."""
+    pool = app.state.pool
+    async with pool.acquire() as conn:
+        profile_row = await conn.fetchrow("SELECT * FROM users WHERE id = $1", uid)
+        if not profile_row:
+            raise HTTPException(status_code=404, detail="User not found")
+        profile = _parse_row(profile_row)
+        active_questions = _active_questions_for_profile(profile)
+        answered_keys = _answered_question_keys_from_profile(profile)
+        skills_rows = await conn.fetch(
+            "SELECT name, content FROM user_skills WHERE user_id = $1 AND enabled = TRUE", uid
+        )
+        skills = [dict(r) for r in skills_rows]
+        questions_rows = await conn.fetch("""
+            SELECT key, text, category, sort_order as "order", is_followup
+            FROM user_questions
+            WHERE user_id = $1 AND answered = FALSE
+            ORDER BY CASE category WHEN 'required' THEN 0 WHEN 'deeper' THEN 1 WHEN 'matching_prefs' THEN 2 ELSE 3 END, sort_order
+        """, uid)
+        pending_questions = [dict(r) for r in questions_rows]
+
+    system_prompt = _build_system_prompt(profile, skills, pending_questions)
+
+    history = []
+    for m in body.messages[:-1]:
+        role = "user" if m["role"] == "user" else "model"
+        history.append({"role": role, "parts": [{"text": m["text"]}]})
+
+    last_msg = body.messages[-1]
+
+    for attempt in range(len(_API_KEYS)):
+        try:
+            model = genai.GenerativeModel(TEXT_MODEL, system_instruction=system_prompt)
+            chat = model.start_chat(history=history)
+            resp = await chat.send_message_async(last_msg["text"])
+            return {"role": "model", "text": resp.text}
+        except Exception as e:
+            if _is_quota_error(e) and attempt < len(_API_KEYS) - 1:
+                _rotate_key()
+                continue
+            raise HTTPException(status_code=500, detail=str(e))
 
 # ── Matching & Simulation Engine Helpers ──────────────────────────────────────────
 
@@ -1095,6 +1760,29 @@ _PROFILE_SKIP = frozenset({
 def strip_pii(profile: dict) -> dict:
     """Remove personally identifying fields before sending a profile to the scoring LLM."""
     return {k: v for k, v in profile.items() if k not in _PII_FIELDS}
+
+async def _gemini_call(model_name: str, prompt, *, system_instruction=None,
+                       generation_config=None) -> str:
+    """
+    Call Gemini with automatic key rotation on quota exhaustion.
+    Tries the primary key, and if it gets a 429/quota error, rotates to the
+    backup key and retries once. Returns the response text.
+    """
+    attempts = len(_API_KEYS)  # try each key at most once
+    for attempt in range(attempts):
+        try:
+            kwargs = {}
+            if system_instruction:
+                kwargs["system_instruction"] = system_instruction
+            model = genai.GenerativeModel(model_name, **kwargs)
+            gen_cfg = generation_config or {}
+            resp = await model.generate_content_async(prompt, generation_config=gen_cfg)
+            return resp.text
+        except Exception as e:
+            if _is_quota_error(e) and attempt < attempts - 1:
+                _rotate_key()
+                continue
+            raise
 
 def _fmt_profile(profile: dict) -> str:
     skip = _PII_FIELDS | _PROFILE_SKIP
@@ -1161,17 +1849,35 @@ Return JSON only: {{"synergyScore": <integer 0-100>, "synergySummary": "<one con
 async def _generate_embedding(text: str) -> list[float] | None:
     if not text.strip():
         return None
-    try:
-        result = await asyncio.to_thread(
-            genai.embed_content,
-            model="models/text-embedding-004",
-            content=text,
-            task_type="semantic_similarity"
-        )
-        return result.get('embedding')
-    except Exception as e:
-        print(f"Error generating embedding: {e}")
+    for attempt in range(len(_API_KEYS)):
+        try:
+            return await asyncio.to_thread(_embed_text_with_gemini_v2, text)
+        except Exception as e:
+            if _is_quota_error(e) and attempt < len(_API_KEYS) - 1:
+                _rotate_key()
+                continue
+            logger.warning(f"[embedding] generation failed: {e}")
+            return None
+
+
+def _embed_text_with_gemini_v2(text: str) -> list[float] | None:
+    prepared_text = f"{_EMBEDDING_TASK_PREFIX}{text.strip()}"
+    result = _embedding_client.models.embed_content(
+        model=EMBEDDING_MODEL,
+        contents=prepared_text,
+        config=google_genai_types.EmbedContentConfig(
+            output_dimensionality=_EMBEDDING_OUTPUT_DIMENSIONALITY,
+        ),
+    )
+    embeddings = getattr(result, "embeddings", None) or []
+    if not embeddings:
         return None
+    values = getattr(embeddings[0], "values", None)
+    if values is None and isinstance(embeddings[0], dict):
+        values = embeddings[0].get("values")
+    if values is None:
+        return None
+    return list(values)
 
 def _interested_in(prefs: dict, target_gender: str) -> bool:
     pref = (prefs.get("interested_in") or "").lower().strip()
@@ -1185,43 +1891,75 @@ def _interested_in(prefs: dict, target_gender: str) -> bool:
     return True
 
 def _is_heuristic_match(me: dict, other: dict) -> bool:
-    """Return True if me and other pass the basic compatibility heuristics."""
-    my_prefs = me.get("matching_prefs") or {}
-    other_prefs = other.get("matching_prefs") or {}
-    
-    my_gender = (me.get("gender") or "").lower().strip()
+    """
+    Three-gate hard filter driven by questionnaire_graph.py.
+
+    Gate 1 — Gender/interest  (global, always checked)
+    Gate 2 — Age range        (global, always checked)
+    Gate 3 — Intent-specific  (only when both share the same intent type)
+
+    Returns True only if the pair clears all three gates.
+    """
+    my_prefs    = _parse_json_field(me.get("matching_prefs"))
+    other_prefs = _parse_json_field(other.get("matching_prefs"))
+
+    # ── Gate 1: gender / interest ──────────────────────────────────────────
+    my_gender    = (me.get("gender")    or "").lower().strip()
     other_gender = (other.get("gender") or "").lower().strip()
-    
-    # 1. Gender check
     if not _interested_in(my_prefs, other_gender):
         return False
     if not _interested_in(other_prefs, my_gender):
         return False
-        
-    # 2. Age check
-    my_age = me.get("age")
+
+    # ── Gate 2: age range ──────────────────────────────────────────────────
+    my_age    = me.get("age")
     other_age = other.get("age")
     if my_age is None or other_age is None:
         return False
-        
-    my_min = my_prefs.get("age_min")
-    my_max = my_prefs.get("age_max")
-    if my_min is not None and other_age < int(my_min):
+    my_min, my_max       = my_prefs.get("age_min"), my_prefs.get("age_max")
+    other_min, other_max = other_prefs.get("age_min"), other_prefs.get("age_max")
+    if my_min    is not None and other_age < int(my_min):    return False
+    if my_max    is not None and other_age > int(my_max):    return False
+    if other_min is not None and my_age    < int(other_min): return False
+    if other_max is not None and my_age    > int(other_max): return False
+
+    # ── Gate 3: intent-specific hard filters (questionnaire_graph) ─────────
+    my_intent    = (my_prefs.get("intent_type")    or "long_term").lower()
+    other_intent = (other_prefs.get("intent_type") or "long_term").lower()
+    if my_intent != other_intent:
+        # Different intents are never matched (e.g. nikah ↔ casual = hard no).
         return False
-    if my_max is not None and other_age > int(my_max):
-        return False
-        
-    other_min = other_prefs.get("age_min")
-    other_max = other_prefs.get("age_max")
-    if other_min is not None and my_age < int(other_min):
-        return False
-    if other_max is not None and my_age > int(other_max):
-        return False
-        
+
+    extra_filters = get_hard_filters(my_intent)  # global already handled above
+    for field in extra_filters:
+        if field in ("gender_identity", "interested_in", "age", "location_radius_km"):
+            continue  # already checked in gates 1-2
+        mv = my_prefs.get(field)
+        ov = other_prefs.get(field)
+        if mv is None or ov is None:
+            continue  # missing data → don't hard-reject; let LLM handle
+        if field == "children_intent":
+            # "childfree" ↔ "wants_children" is a hard dealbreaker
+            childfree = {"childfree", "no", "never"}
+            if (str(mv).lower() in childfree) != (str(ov).lower() in childfree):
+                return False
+        elif field == "polygyny_stance":
+            # seeker must match with seeker or open; mono must match mono
+            seekers = {"seeking", "open"}
+            if (str(mv).lower() in seekers) != (str(ov).lower() in seekers):
+                return False
+        elif field == "religion":
+            if str(mv).lower() != str(ov).lower():
+                return False
+        elif field in ("dietary_halal", "riba_free_finance"):
+            # Boolean: True requirement can't match False
+            if bool(mv) != bool(ov):
+                return False
+
     return True
 
 async def _score_pair(
-    model: genai.GenerativeModel, me: dict, other: dict
+    _model_unused, me: dict, other: dict
 ) -> dict | None:
     """Call Gemini to score a candidate pair. Returns scoring dict or None on failure."""
     prompt = MATCHING_SCORING_PROMPT.format(
@@ -1229,48 +1967,47 @@ async def _score_pair(
         profile_b=_fmt_profile(strip_pii(other)),
     )
     try:
-        resp = await model.generate_content_async(
-            prompt,
+        raw = await _gemini_call(
+            TEXT_MODEL, prompt,
             generation_config={"response_mime_type": "application/json"},
         )
-        result = json.loads(resp.text)
+        result = json.loads(raw)
         if not isinstance(result.get("score"), (int, float)):
             return None
         return result
     except Exception:
         return None
 
-async def _run_vibe_check(match_id: int, uid_a: str, uid_b: str, conn, model: genai.GenerativeModel) -> dict:
+async def _run_vibe_check(match_id: int, uid_a: str, uid_b: str, conn, _model_unused) -> dict:
     """Simulate a 5-turn first-date conversation and return synergy score + summary."""
     profile_a_row = await conn.fetchrow("SELECT * FROM users WHERE id = $1", uid_a)
     profile_b_row = await conn.fetchrow("SELECT * FROM users WHERE id = $1", uid_b)
-    
+
     profile_a = _parse_row(profile_a_row)
     profile_b = _parse_row(profile_b_row)
-    
+
     fmt_a = _fmt_profile(strip_pii(profile_a))
     fmt_b = _fmt_profile(strip_pii(profile_b))
-    
+
     # Simulate first-date conversation in 1 LLM call
     sim_prompt = VIBE_SIM_PROMPT.format(profile_a=fmt_a, profile_b=fmt_b)
     try:
-        sim_resp = await model.generate_content_async(sim_prompt)
-        conversation = sim_resp.text.strip()
+        conversation = (await _gemini_call(TEXT_MODEL, sim_prompt)).strip()
     except Exception:
         conversation = "(simulation unavailable)"
-        
+
     # Rate chemistry and compatibility
     score_prompt = VIBE_SCORE_PROMPT.format(
         profile_a=fmt_a,
         profile_b=fmt_b,
-        conversation=conversation
+        conversation=conversation,
     )
     try:
-        score_resp = await model.generate_content_async(
-            score_prompt,
-            generation_config={"response_mime_type": "application/json"}
+        raw = await _gemini_call(
+            TEXT_MODEL, score_prompt,
+            generation_config={"response_mime_type": "application/json"},
         )
-        result = json.loads(score_resp.text)
+        result = json.loads(raw)
         synergy_score = int(result.get("synergyScore", 50))
         synergy_summary = str(result.get("synergySummary", ""))
     except Exception:
@@ -1314,9 +2051,10 @@ async def _run_vibe_check(match_id: int, uid_a: str, uid_b: str, conn, model: ge
 # ── Matching & Simulation Endpoints ──────────────────────────────────────────────
 
 @app.post("/run-matching")
-async def run_matching(uid: str = Depends(verify_token)):
+@limiter.limit(RATE_RUN_MATCHING)
+async def run_matching(request: Request, uid: str = Depends(verify_token)):
     pool = app.state.pool
-    model = genai.GenerativeModel(TEXT_MODEL)
+    model = None  # _score_pair and _run_vibe_check now use _gemini_call internally
     
     async with pool.acquire() as conn:
         me_row = await conn.fetchrow("SELECT * FROM users WHERE id = $1", uid)
@@ -1345,7 +2083,7 @@ async def run_matching(uid: str = Depends(verify_token)):
                     
         if embedding_vector:
             vector_str = f"[{','.join(map(str, embedding_vector))}]"
-            candidate_rows = await conn.fetch("""
+            candidate_rows = await conn.fetch(f"""
                 SELECT * FROM users
                 WHERE onboarding_complete = TRUE
                   AND matching_paused = FALSE
@@ -1356,10 +2094,10 @@ async def run_matching(uid: str = Depends(verify_token)):
                       SELECT user_b FROM matches WHERE user_a = $1
                   )
                 ORDER BY (CASE WHEN matching_embedding IS NULL THEN 1 ELSE 0 END), matching_embedding <=> $2::vector ASC
-                LIMIT 100
+                LIMIT {MATCH_CANDIDATE_POOL}
             """, uid, vector_str)
         else:
-            candidate_rows = await conn.fetch("""
+            candidate_rows = await conn.fetch(f"""
                 SELECT * FROM users
                 WHERE onboarding_complete = TRUE
                   AND matching_paused = FALSE
@@ -1369,13 +2107,13 @@ async def run_matching(uid: str = Depends(verify_token)):
                       UNION
                       SELECT user_b FROM matches WHERE user_a = $1
                   )
-                LIMIT 100
+                LIMIT {MATCH_CANDIDATE_POOL}
             """, uid)
-            
+
         candidates = [_parse_row(r) for r in candidate_rows]
         filtered = [c for c in candidates if _is_heuristic_match(me, c)]
-        
-        to_score = filtered[:15]
+
+        to_score = filtered[:MATCH_SCORE_TOP_K]
         if not to_score:
             return {"matches_created": 0, "candidates_evaluated": 0}
             
@@ -1383,13 +2121,12 @@ async def run_matching(uid: str = Depends(verify_token)):
         
         scored_pairs = [
             (c, s) for c, s in zip(to_score, scorings)
-            if s is not None and float(s.get("score", 0.0)) >= 0.4
+            if s is not None and float(s.get("score", 0.0)) >= MATCH_SCORE_MIN
         ]
         scored_pairs.sort(key=lambda x: float(x[1].get("score", 0.0)), reverse=True)
         
         created = 0
-        vibe_threshold = 0.65
-        vibe_candidates = [p for p in scored_pairs if float(p[1].get("score", 0.0)) >= vibe_threshold][:5]
+        vibe_candidates = [p for p in scored_pairs if float(p[1].get("score", 0.0)) >= VIBE_CHECK_THRESHOLD][:VIBE_CHECK_TOP_K]
         vibe_uids = {c["id"] for c, _ in vibe_candidates}
         
         for candidate, scoring in scored_pairs:
@@ -1421,7 +2158,7 @@ async def run_matching(uid: str = Depends(verify_token)):
                 synergy_score = vibe["synergy_score"]
                 synergy_summary = vibe["synergy_summary"]
                 
-                final_score = round(score * 0.7 + (synergy_score / 100) * 0.3, 3)
+                final_score = round(score * FINAL_SCORE_COMPAT_WEIGHT + (synergy_score / 100) * (1 - FINAL_SCORE_COMPAT_WEIGHT), 3)
                 
                 await conn.execute("""
                     UPDATE matches SET
@@ -1448,8 +2185,73 @@ async def run_matching(uid: str = Depends(verify_token)):
                 """, user_a, user_b, score, scoring.get("rationale", ""), db_summary_a, db_summary_b)
                 
             created += 1
-            
+            # Push notification: tell the other user they have a new match
+            other_token = await _get_fcm_token(cuid, conn)
+            me_row = await conn.fetchrow("SELECT display_name FROM users WHERE id = $1", uid)
+            my_name = (me_row["display_name"] if me_row and me_row["display_name"] else "Someone")
+            asyncio.create_task(_send_push(
+                other_token, "New match ✨",
+                f"You matched with {my_name}!",
+                {"type": "new_match", "match_user_id": uid},
+            ))
+
+        logger.info(f"[matching] {uid}: {created} matches created from {len(to_score)} candidates")
         return {"matches_created": created, "candidates_evaluated": len(to_score)}
+
+# ── Cron-triggered matching (Cloud Scheduler) ──────────────────────────────────
+
+@app.post("/run-matching-cron")
+async def run_matching_cron(x_cron_secret: str | None = Header(None, alias="X-Cron-Secret")):
+    """Cloud Scheduler calls this with X-Cron-Secret header to match all active users.
+    Set CRON_SECRET env var in Cloud Run and in the scheduler job HTTP headers."""
+    if not CRON_SECRET or x_cron_secret != CRON_SECRET:
+        raise HTTPException(status_code=403, detail="Forbidden")
+    pool = app.state.pool
+    total_created = 0
+    async with pool.acquire() as conn:
+        user_rows = await conn.fetch(
+            "SELECT id FROM users WHERE onboarding_complete = TRUE AND matching_paused = FALSE"
+        )
+        user_ids = [r["id"] for r in user_rows]
+    logger.info(f"[cron] Running matching for {len(user_ids)} users")
+    for uid in user_ids:
+        try:
+            async with pool.acquire() as conn:
+                me_row = await conn.fetchrow("SELECT * FROM users WHERE id = $1", uid)
+                if not me_row:
+                    continue
+                me = _parse_row(me_row)
+                candidate_rows = await conn.fetch(f"""
+                    SELECT * FROM users
+                    WHERE onboarding_complete = TRUE AND matching_paused = FALSE AND id != $1
+                    AND id NOT IN (
+                        SELECT user_a FROM matches WHERE user_b = $1
+                        UNION SELECT user_b FROM matches WHERE user_a = $1
+                    ) LIMIT {CRON_CANDIDATE_POOL}
+                """, uid)
+                candidates = [_parse_row(r) for r in candidate_rows]
+                filtered = [c for c in candidates if _is_heuristic_match(me, c)][:CRON_SCORE_TOP_K]
+                if not filtered:
+                    continue
+                scorings = await asyncio.gather(*[_score_pair(None, me, c) for c in filtered])
+                for candidate, scoring in zip(filtered, scorings):
+                    if not scoring or float(scoring.get("score", 0)) < MATCH_SCORE_MIN:
+                        continue
+                    cuid = candidate["id"]
+                    ua, ub = (uid, cuid) if uid < cuid else (cuid, uid)
+                    sa = scoring.get("summary_a" if uid < cuid else "summary_b", "")
+                    sb = scoring.get("summary_b" if uid < cuid else "summary_a", "")
+                    await conn.execute("""
+                        INSERT INTO matches (user_a, user_b, score, rationale, summary_a, summary_b, status)
+                        VALUES ($1,$2,$3,$4,$5,$6,'pending')
+                        ON CONFLICT (user_a, user_b) DO NOTHING
+                    """, ua, ub, round(float(scoring.get("score", 0)), 3),
+                        scoring.get("rationale", ""), sa, sb)
+                    total_created += 1
+        except Exception as e:
+            logger.warning(f"[cron] matching failed for {uid}: {e}")
+    logger.info(f"[cron] Matching complete: {total_created} new matches")
+    return {"total_matches_created": total_created, "users_processed": len(user_ids)}
 
 class VibeCheckRequest(BaseModel):
     match_id: int
@@ -1457,27 +2259,25 @@ class VibeCheckRequest(BaseModel):
 @app.post("/vibe-check")
 async def vibe_check(body: VibeCheckRequest, uid: str = Depends(verify_token)):
     pool = app.state.pool
-    model = genai.GenerativeModel(TEXT_MODEL)
-    
     async with pool.acquire() as conn:
         match_row = await conn.fetchrow("SELECT * FROM matches WHERE id = $1", body.match_id)
         if not match_row:
             raise HTTPException(status_code=404, detail="Match not found")
-        
+
         match = dict(match_row)
         uid_a = match.get("user_a")
         uid_b = match.get("user_b")
-        
+
         if uid not in (uid_a, uid_b):
             raise HTTPException(status_code=403, detail="Not your match")
-            
+
         other_uid = uid_b if uid == uid_a else uid_a
-        result = await _run_vibe_check(body.match_id, uid, other_uid, conn, model)
+        result = await _run_vibe_check(body.match_id, uid, other_uid, conn, None)
         synergy_score = result["synergy_score"]
         synergy_summary = result["synergy_summary"]
         
         compat_score = float(match.get("score") or 0.0)
-        final_score = round(compat_score * 0.7 + (synergy_score / 100) * 0.3, 3)
+        final_score = round(compat_score * FINAL_SCORE_COMPAT_WEIGHT + (synergy_score / 100) * (1 - FINAL_SCORE_COMPAT_WEIGHT), 3)
         
         await conn.execute("""
             UPDATE matches SET

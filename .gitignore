@@ -201,5 +201,12 @@ my_env.tfvars
 .env
 .requirements.txt
 
+# Local agent/emulator artifacts
+screen.png
+ayma_flutter/screen*.png
+ayma_flutter/window_dump.xml
+functions/bootstrap/*.db
+
 # A2A Inspector
 tools/a2a-inspector/
+.env.local

@@ -1,4 +1,18 @@
-# Ayma — Build Plan
+# Ayma — Canonical Cross-Agent Plan
+
+> **Canonical doc rule:** `PLAN.md` is the only authoritative shared execution plan for this repo.
+> Every agent (`Codex`, `Claude`, `Gemini`, `DeepSeek`, or any future agent) must:
+> 1. read this file before making changes,
+> 2. continue from the current checklist instead of starting a new plan elsewhere,
+> 3. update this file before handing off.
+>
+> **Handoff rule:** if work stops mid-stream, record:
+> - what changed,
+> - what was verified,
+> - what is still blocked,
+> - the exact next step.
+>
+> **No parallel plan docs:** `docs/agent.md`, `CLAUDE.md`, `ayma_flutter/AGENTS.md`, and any tool-specific docs are implementation supplements only. They must defer to this file.
 
 > **Rule:** Do ONE step at a time. Do not move to the next step until the current one works
 > and you understand why it works — not just that it works.
@@ -10,6 +24,201 @@
 >
 > **Goal:** Build a production-grade personalized AI matchmaking platform, and understand
 > every layer of the architecture as we go.
+
+---
+
+## Current Branch Reality
+
+This repo is in an active transition state.
+
+- The Flutter app remains the user-facing client in `ayma_flutter/`.
+- The active backend for profile/bootstrap/matching work is `functions/bootstrap/main.py`.
+- The backend now targets PostgreSQL first, with a local SQLite mock fallback for local bootstrap.
+- Community-specific onboarding and question selection are in progress and partially implemented on this branch.
+- Some older docs still describe Supabase, Mem0, or old local-backend flows. Treat those as stale unless they are explicitly reconciled here.
+
+### Current production-readiness priorities
+
+- [ ] Stabilize the new community-profile onboarding flow end-to-end
+- [ ] Keep backend question seeding, post-turn extraction, and profile metadata aligned with community selection
+- [ ] Reconcile stale architecture/testing docs with the actual branch state
+- [ ] Re-establish repeatable validation commands for backend, Flutter analysis, and emulator/device runs
+- [ ] Run emulator or device-based smoke coverage for onboarding, chat, profile, matches, notifications
+
+### Current verified status on this branch
+
+- [x] Broken onboarding file from prior agent repaired
+- [x] `community_profile` persists from Flutter onboarding
+- [x] Backend bootstrap now seeds questions from community-specific question sets
+- [x] SQLite fallback pool supports `executemany`
+- [x] Onboarding `location_coords` now persists through backend profile update path
+- [x] Server no longer treats onboarding-populated age/gender/location/age-range as unanswered on first bootstrap
+- [x] Flutter completeness scoring now respects community-specific question sets
+- [x] Community selection now affects backend prompt style as well as question seeding
+- [x] Backend test suite now checks Flutter/backend community profile config drift
+- [x] Added `adb`-based UI fallback helper for emulator/device inspection when flutter-skill is unavailable
+- [x] Fixed first-time `/profile` writes so onboarding no longer drops data when the user row does not exist yet
+- [x] `python3 -m py_compile functions/bootstrap/main.py functions/bootstrap/mock_db.py` passes
+- [x] `python3 -m unittest functions/bootstrap/test_main_logic.py` passes
+- [x] Cloud Run redeployed with upsert fix (revision 00013, includes mock_db.py in Docker image)
+- [x] Emulator smoke pass: all 8 screens pass (chat, matches, explore, signals, profile-public, profile-private, settings, onboarding-flow)
+- [x] Onboarding submit confirmed landing on /chat (upsert fix verified in production)
+- [x] `FirestoreService` renamed to `ApiService` across all 10 consumer files
+- [x] `cloud_firestore` removed from pubspec.yaml (was unused — all data goes through backend HTTP)
+- [x] Dockerfile updated to COPY mock_db.py (required for SQLite fallback in Cloud Run)
+- [x] Stale docs/agent.md updated (removed Firestore schema, updated service names, added postgres schema reference)
+- [x] Bad-named doc `# Ayma: Production-Scale Matchmaking OS.md` renamed to `docs/postgres_rearch_plan.md`
+- [ ] `flutter analyze` re-run on this branch (Flutter CLI unavailable in agent shell)
+- [ ] Text chat integration test (adb cannot type into Flutter TextField; requires device keyboard or flutter_driver)
+
+### Current environment blockers observed
+
+- Flutter CLI is not available on this shell `PATH`
+- Android emulator binary exists at `/home/suhailps/Android/Sdk/emulator/emulator`
+- Emulator launch from this shell currently fails with missing runtime library visibility:
+  `libX11.so.6: cannot open shared object file`
+- Hidden snap paths and some home subdirectories are not readable from this agent shell, so Flutter/emulator invocation may need to happen from a non-sandboxed user shell even when code edits happen here
+
+---
+
+## Cross-Agent Workflow
+
+All agents must follow this sequence:
+
+1. Read `PLAN.md` first.
+2. Read the nearest supplemental doc only after that:
+   - repo-wide context: `docs/agent.md`
+   - Flutter-specific context: `ayma_flutter/AGENTS.md` or `ayma_flutter/CLAUDE.md`
+3. Check current uncommitted work with `git status --short`.
+4. Continue the active checklist below instead of inventing a new one.
+5. After code or docs changes:
+   - update validation status in this file,
+   - update blockers if anything failed,
+   - append runtime test notes to `ayma_flutter/testing-lessons.md` when UI testing was attempted.
+
+### Handoff template
+
+When stopping, append/update these items in this file:
+
+- `Last completed`
+- `Validated`
+- `Blocked on`
+- `Next action`
+
+---
+
+## Active Workstream
+
+### Workstream A — Community Onboarding Rollout
+
+- [x] Repair broken onboarding UI file and restore app structure
+- [x] Add community selection step to onboarding
+- [x] Persist `community_profile` from Flutter to backend profile update
+- [x] Add backend community-aware question seeding
+- [x] Persist onboarding `location_coords`
+- [x] Prevent server-side reseeding of onboarding-known fields as unanswered
+- [x] Apply community-specific backend prompt behavior
+- [x] Add automated guard against Flutter/backend community config drift
+- [ ] Ensure question definitions are sourced consistently across Flutter and backend from a single source
+- [ ] Validate existing users with legacy `dating_standard` still behave correctly
+- [ ] Verify post-turn extraction and structured wiki behavior for community-only fields
+
+### Workstream B — Production Readiness
+
+- [x] Identify stale docs that conflict with current architecture
+- [x] Bring core docs in line with actual backend/client architecture
+- [x] Re-run backend validation after each backend change
+- [x] Establish a passing emulator/device smoke checklist (all major screens verified)
+- [x] Remove unused `cloud_firestore` package from pubspec.yaml
+- [x] Remove misleading `FirestoreService` name (renamed to `ApiService`)
+- [x] Fix Dockerfile to include mock_db.py
+- [x] Rename bad-named doc file
+- [x] Re-run Flutter static validation (`flutter analyze`) — completed: 0 issues found.
+- [ ] Remove or quarantine any remaining obsolete artifacts
+
+### Workstream C — Shared Agent Discipline
+
+- [x] Ensure all agent entrypoint docs explicitly defer to `PLAN.md`
+- [ ] Ensure testing instructions point back to shared validation state here
+- [ ] Keep this file updated on every handoff
+
+---
+
+## Validation Matrix
+
+Use this matrix instead of ad hoc “seems fine” validation.
+
+### Backend
+
+- [x] `python3 -m py_compile functions/bootstrap/main.py functions/bootstrap/mock_db.py`
+- [x] `python3 -m unittest functions/bootstrap/test_main_logic.py`
+- [x] Backend endpoint smoke test — Cloud Run revision 00013 responds correctly
+- [ ] Matching endpoint smoke test (needs 2+ users with profiles)
+- [ ] Existing test suite run, if/when tests are added
+
+### Flutter static
+
+- [x] `flutter pub get`
+- [x] `flutter analyze`
+- [ ] `dart format --output=none --set-exit-if-changed .`
+
+### Flutter runtime
+
+- [x] App running on emulator-5554 (installed build includes community selection)
+- [ ] Rebuild app from current source (Flutter CLI required)
+- [x] Smoke onboarding flow — all 4 steps + submit → /chat PASS
+- [x] Smoke auth — Firebase auth active, profile persists after onboarding
+- [ ] Smoke chat/text (adb cannot inject into Flutter TextField; pending device test)
+- [ ] Smoke live voice (pending physical device)
+- [x] Smoke profile (public/private tabs, completeness progress bar, photo upload button)
+- [x] Smoke matches (correct empty state)
+- [x] Smoke notifications/signals (correct empty state)
+
+### Required evidence before calling work “production ready”
+
+- Passing backend static validation
+- Passing Flutter static validation
+- At least one real runtime pass on emulator or physical device after latest code changes
+- Updated `testing-lessons.md`
+- Updated handoff notes in this file
+- If flutter-skill tools are unavailable in-session, use `ayma_flutter/scripts/adb-ui` as the minimum UI inspection fallback and record that in testing notes
+
+---
+
+## Runtime Test Checklist
+
+When a runnable Android environment is available, execute in this order:
+
+Detailed screen-by-screen steps live in `docs/ui_test_plan.md`.
+
+1. Start emulator or connect test device.
+2. Launch the app from `ayma_flutter/`.
+3. Verify:
+   - auth route handling,
+   - onboarding including community selection,
+   - post-onboarding redirect,
+   - profile persistence,
+   - question fetch behavior,
+   - chat open/load,
+   - matches screen load,
+   - notifications screen load.
+4. Record pass/fail in `ayma_flutter/testing-lessons.md`.
+5. Update this file’s validation matrix.
+
+Current emulator-specific note:
+- The latest installed build on `emulator-5554` does include the new community step.
+- A real runtime regression was reproduced during onboarding submit: the app returned to onboarding welcome instead of landing on chat.
+- Root cause identified in source: backend `/profile` endpoint only ran `UPDATE`, so first-time users without an existing `users` row silently lost onboarding writes.
+- Source fix and regression test are now in place; the runtime pass must be repeated against a backend process that includes this patch.
+
+---
+
+## Handoff State
+
+- Last completed: Ran `flutter analyze` (0 issues). Fixed signature bugs (`request` arg) in test logic and SQL `f-string` interpolation bug in `main.py` for `LIMIT {MATCH_CANDIDATE_POOL}` causing `sqlite3.OperationalError` during tests. Re-ran `unittest` and it fully passes. Ran `pipeline_test.py` end-to-end simulation.
+- Validated: `python3 -m unittest functions/bootstrap/test_main_logic.py` (25 tests pass). `flutter analyze` reports `No issues found!`.
+- Blocked on: `pipeline_test.py` hit `429 ResourceExhausted` (Gemini free tier quota limits) during the `Scoring Priya <-> Fatima` stage. Physical device testing is still required for voice/chat.
+- Next action: Test text chat and voice on physical device; configure a paid Gemini API key or rotate keys to bypass the 429 quota exhaustion; review remaining audit gaps from `pipeline_test.py` (rate limiting, logging, etc.).
 
 ---
 

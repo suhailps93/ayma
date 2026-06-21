@@ -40,7 +40,7 @@ Cloud Run  (ayma-bootstrap)
 ## Data Flow: Text Session (fallback)
 
 1. Flutter sends text via `sendText()`.
-2. `audio_service.dart` calls Gemini REST (`gemini-2.5-flash`) with full conversation history.
+2. `audio_service.dart` calls Gemini REST (`gemini-3.5-flash`) with full conversation history.
 3. Response appended to transcript; `POST /post-turn` called for memory extraction.
 
 ---
@@ -80,8 +80,8 @@ media/{id}
 | Model | Used For |
 |---|---|
 | `gemini-3.1-flash-live-preview` | Real-time voice conversation (Gemini Live WebSocket) |
-| `gemini-2.5-flash` | Text fallback chat + post-turn memory extraction |
-| `gemini-2.5-flash` (planned) | Matching compatibility scoring |
+| `gemini-3.5-flash` | Text fallback chat + post-turn memory extraction |
+| `gemini-3.5-flash` (planned) | Matching compatibility scoring |
 
 ---
 

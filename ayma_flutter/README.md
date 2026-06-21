@@ -1,5 +1,8 @@
 # Ayma — Flutter App
 
+> Read `/home/suhailps/latest_claude/ayma/PLAN.md` first for the current branch plan, validation state, and handoff notes.
+> This README describes the Flutter app structure, but it is not the canonical execution plan.
+
 Ayma is an AI-first dating app where your personal AI companion (Ayma) learns who you are through voice and text conversations, curates matches for you, and handles all the introductions on your behalf.
 
 ## Architecture
@@ -33,7 +36,7 @@ lib/
     audio_service.dart    — Gemini Live WebSocket + flutter_sound recorder/player
     auth_service.dart     — Firebase Auth wrapper
     backend_service.dart  — Cloud Run API client
-    firestore_service.dart — Firestore CRUD
+    api_service.dart      — backend HTTP client (profile, matches, notifs, explore, insights)
     web_audio_impl.dart   — Web mic/player (dart:html)
     web_audio_stub.dart   — Stub for non-web builds
   models/           — UserProfile, MatchModel, NotificationModel, AuthSession

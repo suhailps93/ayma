@@ -14,7 +14,7 @@ import '../env.dart';
 import 'audio_recorder_service.dart';
 import 'audio_streamer_service.dart';
 import 'backend_service.dart';
-import 'firestore_service.dart';
+import 'api_service.dart';
 import 'gemini_live_client.dart';
 import 'openai_realtime_client.dart';
 
@@ -27,6 +27,13 @@ enum SessionState {
   listening,
   thinking,
   speaking,
+}
+
+enum TextChatFailure {
+  none,
+  noConnection,
+  quotaExhausted,
+  serverError,
 }
 
 class TranscriptLine {
@@ -106,6 +113,20 @@ class AymaAudioService extends ChangeNotifier {
   Timer? _outputDecayTimer;
   int _audioBytesPerTurn = 0;
   static const int _maxTranscriptLines = 180;
+
+  // ── Text-chat error state ─────────────────────────────────────────────────
+  /// Reason why the last text reply failed. Cleared when a reply succeeds.
+  TextChatFailure _textChatFailure = TextChatFailure.none;
+  TextChatFailure get textChatFailure => _textChatFailure;
+
+  /// User messages that got no reply yet (queued for retry).
+  final List<String> _pendingTextMessages = [];
+
+  void _setTextChatFailure(TextChatFailure f) {
+    if (_textChatFailure == f) return;
+    _textChatFailure = f;
+    notifyListeners();
+  }
 
   String? _providerApiKey;
   String? _systemPrompt;
@@ -386,7 +407,7 @@ class AymaAudioService extends ChangeNotifier {
     _sessionId = DateTime.now().millisecondsSinceEpoch.toString();
 
     // Check for environment bypass first
-    debugPrint('DEBUG: Attempting connect. Provider: ${Env.liveProvider}, Key length: ${Env.geminiApiKey.length}');
+    debugPrint('DEBUG: Attempting connect. Provider: ${Env.liveProvider}, Env key length: ${Env.geminiApiKey.length}');
     if (Env.liveProvider == 'gemini' && Env.geminiApiKey.isNotEmpty) {
       debugPrint('DEBUG: Using Gemini API Key Bypass');
       _providerApiKey = Env.geminiApiKey;
@@ -423,13 +444,15 @@ class AymaAudioService extends ChangeNotifier {
     final apiKey = _credentialFromBootstrap(bootstrap);
     final setup = bootstrap['setup'] as Map<String, dynamic>?;
 
+    debugPrint('DEBUG: Bootstrap credential length: ${(apiKey ?? '').length}, wsUrl: $liveWsUrl');
+
     _providerApiKey = apiKey;
     _systemPrompt = _extractSystemPrompt(setup);
 
     try {
       if (Env.liveProvider == 'gemini') {
-        if (liveWsUrl == null || liveWsUrl.isEmpty || apiKey == null) {
-          throw Exception('Missing Gemini Live bootstrap data');
+        if (liveWsUrl == null || liveWsUrl.isEmpty || (apiKey ?? '').isEmpty) {
+          throw Exception('Missing Gemini Live bootstrap data (url=${liveWsUrl?.length}, key=${apiKey?.length})');
         }
 
         final Map<String, dynamic> payload = setup != null
@@ -437,15 +460,8 @@ class AymaAudioService extends ChangeNotifier {
             : <String, dynamic>{
                 // PERMANENT MODEL SELECTION - DO NOT CHANGE WITHOUT EXPLICIT USER DIRECTIVE
                 'model': 'models/gemini-3.1-flash-live-preview',
-                'response_modalities': ['AUDIO'],
-                'speech_config': {
-                  'voice_config': {
-                    'prebuilt_voice_config': {
-                      'voice_name': 'Aoide', // Standard Gemini Live voice
-                    }
-                  }
-                },
                 'generation_config': {
+                  'response_modalities': ['AUDIO'],
                   'speech_config': {
                     'voice_config': {
                       'prebuilt_voice_config': {
@@ -455,19 +471,6 @@ class AymaAudioService extends ChangeNotifier {
                   }
                 }
               };
-
-        // Inject VAD config if not present to ensure best barge-in experience
-        payload['speech_config'] ??= <String, dynamic>{};
-        final speechConfig = Map<String, dynamic>.from(payload['speech_config'] as Map);
-        payload['speech_config'] = speechConfig;
-
-        // Gemini Multimodal Live API uses 'speech_config' with 'voice_config'
-        // Some versions use 'automatic_activity_detection'
-        speechConfig['automatic_activity_detection'] ??= {
-          'enabled': true,
-          'detection_sensitivity': 'HIGH',
-          'prefix_padding_ms': 300,
-        };
 
         await _client.connect(liveWsUrl, apiKey, payload);
         return;
@@ -667,7 +670,7 @@ class AymaAudioService extends ChangeNotifier {
     final question = (args['question'] as String? ?? '').trim();
     if (question.isEmpty) return 'skipped: empty question';
     try {
-      await FirestoreService.addFollowupQuestion(question, sessionId: _sessionId);
+      await ApiService.addFollowupQuestion(question, sessionId: _sessionId);
       return 'noted';
     } catch (e) {
       return 'error: $e';
@@ -701,21 +704,54 @@ class AymaAudioService extends ChangeNotifier {
 
     if (_state == SessionState.disconnected) _setState(SessionState.thinking);
 
-    try {
-      await _bootstrapTextChatIfNeeded();
-      final reply = await _providerTextChat(historyText, attachments: attachments);
-      if (reply.isEmpty) {
-        _addAssistantFallbackMessage();
+    // Drain any previously-queued messages first (FIFO order)
+    final queue = List<String>.from(_pendingTextMessages);
+    _pendingTextMessages.clear();
+
+    bool anyFailed = false;
+    TextChatFailure failureReason = TextChatFailure.none;
+
+    Future<bool> trySend(String msg) async {
+      try {
+        await _bootstrapTextChatIfNeeded();
+        final reply = await _providerTextChat(msg, attachments: []);
+        if (reply.isEmpty) {
+          anyFailed = true;
+          failureReason = TextChatFailure.serverError;
+          _pendingTextMessages.add(msg);
+          return false;
+        }
+        _pendingTurnUser = msg;
+        _pendingTurnModel = reply;
+        _addTranscript(reply, isUser: false);
+        unawaited(_commitTurnToBackend());
+        return true;
+      } on _QuotaExhaustedException {
+        anyFailed = true;
+        failureReason = TextChatFailure.quotaExhausted;
+        _pendingTextMessages.add(msg);
+        return false;
+      } catch (_) {
+        anyFailed = true;
+        failureReason = TextChatFailure.noConnection;
+        _pendingTextMessages.add(msg);
         return false;
       }
-      _pendingTurnUser = historyText;
-      _pendingTurnModel = reply;
-      _addTranscript(reply, isUser: false);
-      unawaited(_commitTurnToBackend());
-      return true;
-    } catch (_) {
-      _addAssistantFallbackMessage();
-      return false;
+    }
+
+    try {
+      // Retry queued messages first
+      for (final q in queue) {
+        await trySend(q);
+      }
+      // Now send the current message
+      final ok = await trySend(historyText);
+      if (!anyFailed) {
+        _setTextChatFailure(TextChatFailure.none);
+      } else {
+        _setTextChatFailure(failureReason);
+      }
+      return ok;
     } finally {
       if (_state == SessionState.thinking) _setState(SessionState.disconnected);
     }
@@ -811,7 +847,8 @@ class AymaAudioService extends ChangeNotifier {
         )
         .timeout(const Duration(seconds: 30));
 
-    if (response.statusCode != 200) return '';
+    if (response.statusCode == 429) throw const _QuotaExhaustedException();
+    if (response.statusCode != 200) throw _ServerErrorException(response.statusCode);
     final body = jsonDecode(response.body) as Map<String, dynamic>;
     final candidates = body['candidates'] as List<dynamic>? ?? [];
     if (candidates.isEmpty) return '';
@@ -1140,12 +1177,9 @@ class AymaAudioService extends ChangeNotifier {
     }
   }
 
-  void _addAssistantFallbackMessage() {
-    _addTranscript(
-      'I could not generate a reply right now. Please check your connection and try again.',
-      isUser: false,
-    );
-  }
+  // ignore: unused_element — kept as escape hatch for live voice path
+  void _addAssistantFallbackMessage() {}
+
 
   @override
   void dispose() {
@@ -1163,4 +1197,13 @@ class AymaAudioService extends ChangeNotifier {
     _streamer.dispose();
     super.dispose();
   }
+}
+
+class _QuotaExhaustedException implements Exception {
+  const _QuotaExhaustedException();
+}
+
+class _ServerErrorException implements Exception {
+  final int statusCode;
+  const _ServerErrorException(this.statusCode);
 }

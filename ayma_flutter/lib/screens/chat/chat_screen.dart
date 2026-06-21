@@ -11,7 +11,6 @@ import 'package:image_picker/image_picker.dart';
 
 import '../../providers/providers.dart';
 import '../../services/audio_service.dart';
-import '../../services/firestore_service.dart';
 import '../../services/backend_service.dart';
 import '../../theme.dart';
 
@@ -186,14 +185,7 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
       final idsToRemove = ready.map((d) => d.id).toSet();
       setState(() => _drafts.removeWhere((d) => idsToRemove.contains(d.id)));
 
-      final sent = await _audioService.sendText(message, attachments: attachments);
-      if (!sent && mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-            content: Text('Message sent locally, but reply generation failed.'),
-          ),
-        );
-      }
+      await _audioService.sendText(message, attachments: attachments);
     } finally {
       _sendingText = false;
     }
@@ -235,9 +227,8 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
   Future<void> _pickVideo(ImageSource source) async {
     Navigator.of(context).maybePop();
     final picked = await _picker.pickVideo(
-        source: source, maxDuration: const Duration(minutes: 3));
+        source: source, maxDuration: const Duration(minutes: 2));
     if (picked == null) return;
-    final bytes = await picked.readAsBytes();
     final draft = _DraftAttachment(
       id: DateTime.now().microsecondsSinceEpoch.toString(),
       kind: _DraftKind.video,
@@ -247,23 +238,41 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
     setState(() {
       _drafts.insert(0, draft);
     });
-    await _uploadDraft(draft, bytes);
+    // Use putFile() path so the video is streamed from disk without loading
+    // the entire file into memory (avoids OOM for large videos).
+    await _uploadDraftFromPath(draft, picked.path);
   }
 
   Future<void> _uploadDraft(_DraftAttachment draft, Uint8List bytes) async {
     try {
       final url = await BackendService.uploadMedia(bytes, draft.filename);
-      if (draft.kind == _DraftKind.image) {
-        await FirestoreService.saveMediaRecord(photoUrl: url);
-        ref.invalidate(insightsProvider);
-      }
-      final status = draft.kind == _DraftKind.video ? 'Video attached' : 'Photo attached';
+      // Photos sent in chat are uploaded for Gemini to see but NOT saved to the
+      // user's profile media — profile photos must be added explicitly via Profile.
       final i = _drafts.indexWhere((d) => d.id == draft.id);
       if (i != -1) {
         setState(() =>
-            _drafts[i] = _drafts[i].copyWith(status: status, remoteUrl: url));
+            _drafts[i] = _drafts[i].copyWith(status: 'Photo attached', remoteUrl: url));
       }
-    } catch (e) {
+    } catch (e, st) {
+      debugPrint('[chat] image upload failed: $e\n$st');
+      final i = _drafts.indexWhere((d) => d.id == draft.id);
+      if (i != -1) {
+        setState(
+            () => _drafts[i] = _drafts[i].copyWith(status: 'Upload failed'));
+      }
+    }
+  }
+
+  Future<void> _uploadDraftFromPath(_DraftAttachment draft, String filePath) async {
+    try {
+      final url = await BackendService.uploadMediaPath(filePath, draft.filename);
+      final i = _drafts.indexWhere((d) => d.id == draft.id);
+      if (i != -1) {
+        setState(() =>
+            _drafts[i] = _drafts[i].copyWith(status: 'Video attached', remoteUrl: url));
+      }
+    } catch (e, st) {
+      debugPrint('[chat] video upload failed: $e\n$st');
       final i = _drafts.indexWhere((d) => d.id == draft.id);
       if (i != -1) {
         setState(
@@ -325,6 +334,8 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
         ref.watch(audioServiceProvider.select((a) => a.rawInputVolume));
     final userTalking =
         ref.watch(audioServiceProvider.select((a) => a.userTalking));
+    final textFailure =
+        ref.watch(audioServiceProvider.select((a) => a.textChatFailure));
     final transcript = _audioService.transcript;
     final tailKey = transcript.isEmpty
         ? ''
@@ -343,7 +354,11 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
       _scrollToBottom();
     }
 
-    final connected = state != SessionState.disconnected;
+    // Voice session = WebSocket is live (not just text-thinking)
+    final voiceActive = state == SessionState.connecting ||
+        state == SessionState.ready ||
+        state == SessionState.listening ||
+        state == SessionState.speaking;
     final wakeWordOn = _wakeWordActive;
     return Scaffold(
       backgroundColor: context.ac.bg,
@@ -354,9 +369,9 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
           children: [
             // ── Top bar ─────────────────────────────────────────────
             _TopBar(
-              connected: connected,
-              timerLabel: connected ? 'Session · $_timerLabel' : 'Offline',
-              onDisconnect: connected ? () {
+              connected: voiceActive,
+              timerLabel: voiceActive ? 'Session · $_timerLabel' : 'Offline',
+              onDisconnect: voiceActive ? () {
                 _audioService.disconnect();
                 _sessionTimer?.cancel();
                 setState(() => _sessionDuration = Duration.zero);
@@ -364,11 +379,15 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
             ),
 
             // ── Wake word ───────────────────────────────────────────
-            if (!connected)
+            if (!voiceActive)
               _WakeWordBanner(
                 active: wakeWordOn,
                 onToggle: _toggleWakeWord,
               ),
+
+            // ── Text-chat error banner ───────────────────────────────
+            if (textFailure != TextChatFailure.none)
+              _TextErrorBanner(failure: textFailure),
 
             // ── Transcript ──────────────────────────────────────────
             Expanded(
@@ -737,7 +756,11 @@ class _InputBarState extends State<_InputBar>
   bool get _canSend =>
       _hasText ||
       (widget.hasAttachment && widget.drafts.every((d) => d.remoteUrl != null));
-  bool get _micOn => _voiceActive && !widget.muted;
+  // Only glow when voice is genuinely listening/ready — not during AI processing.
+  bool get _micOn =>
+      (widget.state == SessionState.listening ||
+          widget.state == SessionState.ready) &&
+      !widget.muted;
 
   String get _hintText {
     switch (widget.state) {
@@ -1160,6 +1183,63 @@ class _PillAttachButton extends StatelessWidget {
           ),
         ),
       );
+}
+
+class _TextErrorBanner extends StatelessWidget {
+  final TextChatFailure failure;
+  const _TextErrorBanner({required this.failure});
+
+  @override
+  Widget build(BuildContext context) {
+    final (icon, label, sub) = switch (failure) {
+      TextChatFailure.quotaExhausted => (
+          Icons.hourglass_empty_rounded,
+          'API quota reached',
+          'Ayma will reply when quota resets (midnight PT)',
+        ),
+      TextChatFailure.noConnection => (
+          Icons.wifi_off_rounded,
+          'No connection',
+          'Your messages are saved — Ayma will reply when back online',
+        ),
+      _ => (
+          Icons.error_outline_rounded,
+          'Reply failed',
+          'Your messages are saved — Ayma will retry on your next message',
+        ),
+    };
+
+    return Container(
+      margin: const EdgeInsets.fromLTRB(16, 0, 16, 6),
+      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+      decoration: BoxDecoration(
+        color: const Color(0xFF2A1A0A),
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: const Color(0xFF5A3010), width: 0.5),
+      ),
+      child: Row(
+        children: [
+          Icon(icon, size: 16, color: const Color(0xFFC48312)),
+          const SizedBox(width: 10),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(label,
+                    style: const TextStyle(
+                        color: Color(0xFFC48312),
+                        fontSize: 12,
+                        fontWeight: FontWeight.w600)),
+                Text(sub,
+                    style: const TextStyle(
+                        color: Color(0xFF9E8E7E), fontSize: 11, height: 1.3)),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
 }
 
 class _WakeWordBanner extends StatelessWidget {

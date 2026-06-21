@@ -2,5 +2,7 @@ fastapi[standard]==0.115.6
 uvicorn[standard]==0.32.1
 firebase-admin==6.6.0
 google-generativeai==0.8.3
+google-genai==1.21.1
 pydantic==2.10.3
 asyncpg==0.30.0
+slowapi==0.1.9

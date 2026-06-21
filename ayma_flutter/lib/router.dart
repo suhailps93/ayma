@@ -14,16 +14,15 @@ import 'screens/settings/settings_screen.dart';
 import 'screens/shell/shell_screen.dart';
 
 class _RouterRefreshNotifier extends ChangeNotifier {
-  _RouterRefreshNotifier(Ref ref) {
-    ref.listen(authSessionProvider, (_, __) => notifyListeners());
-    ref.listen(authInitializedProvider, (_, __) => notifyListeners());
-    ref.listen(onboardingStatusProvider, (_, __) => notifyListeners());
-    ref.listen(preboardingSeenProvider, (_, __) => notifyListeners());
-  }
+  void notify() => notifyListeners();
 }
 
 final routerProvider = Provider<GoRouter>((ref) {
-  final notifier = _RouterRefreshNotifier(ref);
+  final notifier = _RouterRefreshNotifier();
+
+  ref.listen(authSessionProvider, (prev, next) => notifier.notify());
+  ref.listen(authInitializedProvider, (prev, next) => notifier.notify());
+  ref.listen(onboardingStatusProvider, (prev, next) => notifier.notify());
 
   final router = GoRouter(
     initialLocation: '/chat',
@@ -39,7 +38,7 @@ final routerProvider = Provider<GoRouter>((ref) {
 
       final onboarding = ref.read(onboardingStatusProvider);
       if (onboarding.hasValue) {
-        final complete = onboarding.value ?? false;
+        final complete = onboarding.valueOrNull ?? false;
         if (!complete && path != '/onboarding') return '/onboarding';
         if (complete && path == '/onboarding') return '/chat';
       }

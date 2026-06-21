@@ -5,12 +5,13 @@ import 'package:firebase_auth/firebase_auth.dart';
 import 'package:http/http.dart' as http;
 
 import '../env.dart';
+import '../models/community_profile.dart';
 import '../models/match_model.dart';
 import '../models/notification_model.dart';
 import '../models/profile.dart';
 
-class FirestoreService {
-  FirestoreService._();
+class ApiService {
+  ApiService._();
 
   static String get _uid => FirebaseAuth.instance.currentUser?.uid ?? '';
   static String uidForClient() => FirebaseAuth.instance.currentUser?.uid ?? '';
@@ -896,6 +897,288 @@ class FirestoreService {
     },
   ];
 
+  // ── Community-specific questions (appended to the global bank) ─────────────
+  // These IDs are referenced by CommunityProfile.questionIds but live here
+  // so the question bank remains a single source of truth.
+
+  static const List<Map<String, dynamic>> _communityQuestions = [
+    // ── Indian Arranged Marriage ───────────────────────────────────────────
+    {
+      'id': 'mother_tongue',
+      'text': 'What language do you speak at home (mother tongue)?',
+      'section': 'cultural_identity',
+      'required': false,
+      'sensitive_flag': false,
+      'priority': 'high',
+      'phase': 2,
+      'category': 'deeper',
+      'order': 1,
+    },
+    {
+      'id': 'gotra',
+      'text': 'What is your gotra (ancestral lineage)?',
+      'section': 'sensitive_attributes',
+      'required': false,
+      'sensitive_flag': true,
+      'priority': 'medium',
+      'phase': 3,
+      'category': 'deeper',
+      'order': 30,
+    },
+    {
+      'id': 'manglik_status',
+      'text': 'Are you Manglik (Mangal Dosha in your horoscope)?',
+      'section': 'sensitive_attributes',
+      'required': false,
+      'sensitive_flag': true,
+      'priority': 'medium',
+      'phase': 3,
+      'category': 'deeper',
+      'order': 31,
+    },
+    {
+      'id': 'kundali_match_required',
+      'text': 'Is horoscope (kundali) matching required for your marriage?',
+      'section': 'values_religion_culture',
+      'required': false,
+      'sensitive_flag': true,
+      'priority': 'medium',
+      'phase': 3,
+      'category': 'deeper',
+      'order': 32,
+    },
+    {
+      'id': 'nri_status',
+      'text': 'Are you an NRI (Non-Resident Indian) or based in India?',
+      'section': 'cultural_identity',
+      'required': false,
+      'sensitive_flag': false,
+      'priority': 'high',
+      'phase': 2,
+      'category': 'deeper',
+      'order': 2,
+    },
+    {
+      'id': 'state_of_origin',
+      'text': 'Which Indian state are you originally from?',
+      'section': 'cultural_identity',
+      'required': false,
+      'sensitive_flag': false,
+      'priority': 'high',
+      'phase': 2,
+      'category': 'deeper',
+      'order': 3,
+    },
+    {
+      'id': 'family_income_band',
+      'text': 'What is your approximate family income band (annual)?',
+      'section': 'financial_compatibility',
+      'required': false,
+      'sensitive_flag': true,
+      'priority': 'medium',
+      'phase': 3,
+      'category': 'deeper',
+      'order': 33,
+    },
+    {
+      'id': 'family_type_preference',
+      'text': 'Do you prefer a joint family or nuclear family setup after marriage?',
+      'section': 'family_background',
+      'required': false,
+      'sensitive_flag': false,
+      'priority': 'high',
+      'phase': 2,
+      'category': 'deeper',
+      'order': 4,
+    },
+    {
+      'id': 'religious_sect',
+      'text': 'What is your religious denomination or sect '  
+              '(e.g. Sunni/Shia for Muslim; Brahmin/Kshatriya for Hindu)?',
+      'section': 'values_religion_culture',
+      'required': false,
+      'sensitive_flag': true,
+      'priority': 'medium',
+      'phase': 3,
+      'category': 'deeper',
+      'order': 34,
+    },
+    // ── Muslim Matrimonial ─────────────────────────────────────────────────
+    {
+      'id': 'hijab_preference',
+      'text': 'Do you wear hijab / observe purdah?',
+      'section': 'values_religion_culture',
+      'required': false,
+      'sensitive_flag': false,
+      'priority': 'high',
+      'phase': 2,
+      'category': 'deeper',
+      'order': 5,
+    },
+    {
+      'id': 'beard_preference',
+      'text': 'Do you keep a beard (for men) / prefer a bearded partner?',
+      'section': 'values_religion_culture',
+      'required': false,
+      'sensitive_flag': false,
+      'priority': 'medium',
+      'phase': 2,
+      'category': 'deeper',
+      'order': 6,
+    },
+    {
+      'id': 'prayer_frequency',
+      'text': 'How often do you pray (salah)?',
+      'section': 'values_religion_culture',
+      'required': false,
+      'sensitive_flag': false,
+      'priority': 'high',
+      'phase': 2,
+      'category': 'deeper',
+      'order': 7,
+    },
+    {
+      'id': 'halal_diet_strict',
+      'text': 'Do you strictly observe halal dietary requirements?',
+      'section': 'physical_lifestyle',
+      'required': false,
+      'sensitive_flag': false,
+      'priority': 'high',
+      'phase': 2,
+      'category': 'deeper',
+      'order': 8,
+    },
+    {
+      'id': 'mahram_required',
+      'text': 'Do you require a mahram (chaperone) when meeting a potential spouse?',
+      'section': 'values_religion_culture',
+      'required': false,
+      'sensitive_flag': true,
+      'priority': 'medium',
+      'phase': 3,
+      'category': 'deeper',
+      'order': 35,
+    },
+    {
+      'id': 'nikah_type',
+      'text': 'What type of marriage ceremony do you prefer '  
+              '(civil + religious, religious only, etc.)?',
+      'section': 'intent_readiness',
+      'required': false,
+      'sensitive_flag': false,
+      'priority': 'high',
+      'phase': 2,
+      'category': 'deeper',
+      'order': 9,
+    },
+    {
+      'id': 'polygamy_openness',
+      'text': 'Are you open to polygamous marriage arrangements?',
+      'section': 'sensitive_attributes',
+      'required': false,
+      'sensitive_flag': true,
+      'priority': 'low',
+      'phase': 3,
+      'category': 'deeper',
+      'order': 36,
+    },
+    // ── West African Marriage ──────────────────────────────────────────────
+    {
+      'id': 'tribe_ethnicity',
+      'text': 'What is your tribal or ethnic background?',
+      'section': 'cultural_identity',
+      'required': false,
+      'sensitive_flag': true,
+      'priority': 'high',
+      'phase': 3,
+      'category': 'deeper',
+      'order': 37,
+    },
+    {
+      'id': 'lobola_expectation',
+      'text': 'What are your thoughts or expectations around bride price / lobola?',
+      'section': 'family_background',
+      'required': false,
+      'sensitive_flag': true,
+      'priority': 'medium',
+      'phase': 3,
+      'category': 'deeper',
+      'order': 38,
+    },
+    {
+      'id': 'family_approval_importance',
+      'text': 'How important is family approval in your marriage decision?',
+      'section': 'family_background',
+      'required': false,
+      'sensitive_flag': false,
+      'priority': 'high',
+      'phase': 2,
+      'category': 'deeper',
+      'order': 10,
+    },
+    {
+      'id': 'language_spoken',
+      'text': 'What language(s) do you primarily speak?',
+      'section': 'cultural_identity',
+      'required': false,
+      'sensitive_flag': false,
+      'priority': 'medium',
+      'phase': 2,
+      'category': 'deeper',
+      'order': 11,
+    },
+    // ── LGBTQ+ Dating ─────────────────────────────────────────────────────
+    {
+      'id': 'sexual_orientation',
+      'text': 'How would you describe your sexual orientation?',
+      'section': 'basic_identity',
+      'required': false,
+      'sensitive_flag': true,
+      'priority': 'high',
+      'phase': 3,
+      'category': 'required',
+      'order': 40,
+    },
+    {
+      'id': 'pronouns',
+      'text': 'What are your pronouns?',
+      'section': 'basic_identity',
+      'required': false,
+      'sensitive_flag': false,
+      'priority': 'high',
+      'phase': 2,
+      'category': 'required',
+      'order': 12,
+    },
+    {
+      'id': 'transition_status',
+      'text': 'Are you comfortable sharing your transition journey or status?',
+      'section': 'basic_identity',
+      'required': false,
+      'sensitive_flag': true,
+      'priority': 'low',
+      'phase': 3,
+      'category': 'deeper',
+      'order': 41,
+    },
+    {
+      'id': 'relationship_structure',
+      'text': 'What relationship structure works best for you '  
+              '(monogamous, polyamorous, open, etc.)?',
+      'section': 'intent_readiness',
+      'required': false,
+      'sensitive_flag': false,
+      'priority': 'high',
+      'phase': 2,
+      'category': 'required',
+      'order': 13,
+    },
+  ];
+
+  /// Full question bank — base questions + all community-specific ones.
+  static List<Map<String, dynamic>> get allQuestions =>
+      [..._northstarQuestions, ..._communityQuestions];
+
   /// Backward-compat alias.
   // ignore: unused_field
   static const List<Map<String, dynamic>> _standardQuestions =
@@ -916,10 +1199,14 @@ class FirestoreService {
     'income_band': 'core_matchability',
     'has_children': 'core_matchability',
     'wants_children': 'core_matchability',
+    'nri_status': 'core_matchability',
+    'state_of_origin': 'core_matchability',
     // intent_and_readiness
     'relationship_intent': 'intent_and_readiness',
     'timeline_for_commitment': 'intent_and_readiness',
     'marital_status': 'intent_and_readiness',
+    'relationship_structure': 'intent_and_readiness',
+    'nikah_type': 'intent_and_readiness',
     // lifestyle_compatibility
     'weight_kg': 'lifestyle_compatibility',
     'diet': 'lifestyle_compatibility',
@@ -930,15 +1217,29 @@ class FirestoreService {
     'friends_social_style': 'lifestyle_compatibility',
     'has_pets': 'lifestyle_compatibility',
     'pet_details': 'lifestyle_compatibility',
+    'halal_diet_strict': 'lifestyle_compatibility',
+    'prayer_frequency': 'lifestyle_compatibility',
     // values_and_family_alignment
     'religion': 'values_and_family_alignment',
     'religious_practice_level': 'values_and_family_alignment',
+    'religious_sect': 'values_and_family_alignment',
     'skin_tone': 'values_and_family_alignment',
     'race': 'values_and_family_alignment',
     'caste': 'values_and_family_alignment',
     'sub_caste': 'values_and_family_alignment',
+    'gotra': 'values_and_family_alignment',
+    'manglik_status': 'values_and_family_alignment',
+    'kundali_match_required': 'values_and_family_alignment',
     'family_type': 'values_and_family_alignment',
+    'family_type_preference': 'values_and_family_alignment',
     'family_values': 'values_and_family_alignment',
+    'family_approval_importance': 'values_and_family_alignment',
+    'tribe_ethnicity': 'values_and_family_alignment',
+    'mother_tongue': 'values_and_family_alignment',
+    'language_spoken': 'values_and_family_alignment',
+    'hijab_preference': 'values_and_family_alignment',
+    'beard_preference': 'values_and_family_alignment',
+    'mahram_required': 'values_and_family_alignment',
     'past_relationship_count': 'values_and_family_alignment',
     'past_relationship_learnings': 'values_and_family_alignment',
     // depth_and_authenticity
@@ -953,7 +1254,34 @@ class FirestoreService {
     'bio_relationship_offer': 'depth_and_authenticity',
     'bio_relationship_need': 'depth_and_authenticity',
     'ai_profile_summary': 'depth_and_authenticity',
+    'family_income_band': 'depth_and_authenticity',
+    'lobola_expectation': 'depth_and_authenticity',
+    'polygamy_openness': 'depth_and_authenticity',
+    'transition_status': 'depth_and_authenticity',
+    'sexual_orientation': 'depth_and_authenticity',
+    'pronouns': 'depth_and_authenticity',
   };
+
+  // ── Community Profile helpers ───────────────────────────────────────────────
+
+  /// Returns the [CommunityProfile] config for the given community [id].
+  static CommunityProfile getCommunityProfile(String communityId) =>
+      CommunityProfiles.forId(communityId);
+
+  /// Returns the ordered, filtered list of questions for a given community.
+  /// Questions not in the community's [questionIds] list are excluded.
+  static List<Map<String, dynamic>> getQuestionsForCommunity(String communityId) {
+    final profile = CommunityProfiles.forId(communityId);
+    final orderedIds = profile.questionIds;
+    final bank = {for (final q in allQuestions) q['id'] as String: q};
+    // Return in the community-defined order, skipping any unknown IDs.
+    final result = <Map<String, dynamic>>[];
+    for (final id in orderedIds) {
+      final q = bank[id];
+      if (q != null) result.add(q);
+    }
+    return result;
+  }
 
   // ── Profile Answers ────────────────────────────────────────────────────────
 
@@ -984,18 +1312,12 @@ class FirestoreService {
       'depth_and_authenticity': 10.0,
     };
 
-    // Legacy field mappings: questionId → profileData key
-    const legacyMap = <String, String>{
-      'age': 'age',
-      'gender_identity': 'gender',
-      'location_city': 'location_region',
-      'occupation': 'occupation',
-      'height_cm': 'height_cm',
-    };
+    final communityId =
+        (profileData['community_profile'] as String?) ?? 'dating_standard';
 
     // Group questions by bucket
     final bucketQuestions = <String, List<Map<String, dynamic>>>{};
-    for (final q in _northstarQuestions) {
+    for (final q in getQuestionsForCommunity(communityId)) {
       final bucket =
           _questionScoringBucket[q['id'] as String] ?? 'depth_and_authenticity';
       bucketQuestions.putIfAbsent(bucket, () => []).add(q);
@@ -1018,13 +1340,10 @@ class FirestoreService {
         final questionMax = isRequired ? 1.0 : 0.6;
         maxPossible += questionMax;
 
-        // Check answers map first, then legacy profileData
+        // Check answers map first, then legacy profileData / onboarding fields.
         dynamic val = answers[id];
         if (_isEmptyValue(val)) {
-          final legacyKey = legacyMap[id];
-          if (legacyKey != null) {
-            val = profileData[legacyKey];
-          }
+          val = _legacyProfileValue(id, profileData);
         }
 
         if (_isEmptyValue(val)) {
@@ -1048,6 +1367,34 @@ class FirestoreService {
     if (val == null) return true;
     if (val is String && val.trim().isEmpty) return true;
     return false;
+  }
+
+  static dynamic _legacyProfileValue(
+    String questionId,
+    Map<String, dynamic> profileData,
+  ) {
+    const directMap = <String, String>{
+      'age': 'age',
+      'gender_identity': 'gender',
+      'location_city': 'location_region',
+      'occupation': 'occupation',
+      'height_cm': 'height_cm',
+    };
+    final directKey = directMap[questionId];
+    if (directKey != null) return profileData[directKey];
+
+    if (questionId == 'preferred_age_range') {
+      final prefs = profileData['matching_prefs'];
+      if (prefs is Map<String, dynamic>) {
+        final minAge = prefs['age_min'];
+        final maxAge = prefs['age_max'];
+        if (minAge != null && maxAge != null) {
+          return {'age_min': minAge, 'age_max': maxAge};
+        }
+      }
+    }
+
+    return null;
   }
 
   /// Reads answers and user doc, returns completeness score 0–100.
@@ -1104,6 +1451,12 @@ class FirestoreService {
 
   static Future<void> updatePhotoOrder(List<String> orderedUrls) async {
     await updateProfile({'photo_order': orderedUrls});
+  }
+
+  static Future<void> analyzePhotos(List<String> photoUrls) async {
+    try {
+      await _post('/profile/analyze-photos', {'photo_urls': photoUrls});
+    } catch (_) {}
   }
 
   // ── Explore ────────────────────────────────────────────────────────────────

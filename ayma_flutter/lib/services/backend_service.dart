@@ -3,10 +3,12 @@
 // Only bootstrap and post-turn memory extraction go through here.
 
 import 'dart:convert';
+import 'dart:io' as io;
 import 'dart:typed_data';
 
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:firebase_storage/firebase_storage.dart';
+import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:http/http.dart' as http;
 
 import '../env.dart';
@@ -103,14 +105,47 @@ class BackendService {
     final uid = FirebaseAuth.instance.currentUser?.uid;
     if (uid == null) throw Exception('Not authenticated');
 
+    final safeName = filename.replaceAll(RegExp(r'[^\w.\-]'), '_');
     final ref = FirebaseStorage.instance
         .ref()
-        .child('media/$uid/${DateTime.now().millisecondsSinceEpoch}_$filename');
+        .child('media/$uid/${DateTime.now().millisecondsSinceEpoch}_$safeName');
 
     final task = await ref.putData(
       bytes,
       SettableMetadata(contentType: _mimeType(filename)),
     );
+    return await task.ref.getDownloadURL();
+  }
+
+  static Future<void> saveDeviceToken(String token) async {
+    final idToken = await _idToken();
+    if (idToken == null) return;
+    await http.post(
+      Uri.parse('${Env.bootstrapUrl}/device-token'),
+      headers: {'Content-Type': 'application/json', 'Authorization': 'Bearer $idToken'},
+      body: jsonEncode({'token': token}),
+    );
+  }
+
+  // Uses putFile() on native to avoid loading large video files into memory.
+  // Falls back to putData() on web (where dart:io File is unavailable).
+  static Future<String> uploadMediaPath(String filePath, String filename) async {
+    final uid = FirebaseAuth.instance.currentUser?.uid;
+    if (uid == null) throw Exception('Not authenticated');
+
+    final safeName = filename.replaceAll(RegExp(r'[^\w.\-]'), '_');
+    final ref = FirebaseStorage.instance
+        .ref()
+        .child('media/$uid/${DateTime.now().millisecondsSinceEpoch}_$safeName');
+
+    final meta = SettableMetadata(contentType: _mimeType(filename));
+    final TaskSnapshot task;
+    if (kIsWeb) {
+      final bytes = await io.File(filePath).readAsBytes();
+      task = await ref.putData(bytes, meta);
+    } else {
+      task = await ref.putFile(io.File(filePath), meta);
+    }
     return await task.ref.getDownloadURL();
   }
 
@@ -120,9 +155,11 @@ class BackendService {
       'jpg' || 'jpeg' => 'image/jpeg',
       'png' => 'image/png',
       'webp' => 'image/webp',
+      'gif' => 'image/gif',
       'mp4' => 'video/mp4',
       'mov' => 'video/quicktime',
-      _ => 'application/octet-stream',
+      'webm' => 'video/webm',
+      _ => 'image/jpeg', // image_picker on Android often returns files without extension
     };
   }
 }

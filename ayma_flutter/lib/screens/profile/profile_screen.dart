@@ -7,7 +7,7 @@ import 'package:image_picker/image_picker.dart';
 import '../../models/profile.dart';
 import '../../providers/providers.dart';
 import '../../services/backend_service.dart';
-import '../../services/firestore_service.dart';
+import '../../services/api_service.dart';
 import '../../theme.dart';
 import '../../widgets/ayma_button.dart';
 import '../../widgets/ayma_text_field.dart';
@@ -117,7 +117,7 @@ class _ProfileScreenState extends ConsumerState<ProfileScreen>
     setState(() => _saving = true);
     try {
       final ageInt = int.tryParse(_ageCtrl.text.trim());
-      await FirestoreService.updateProfile({
+      await ApiService.updateProfile({
         if (_nameCtrl.text.trim().isNotEmpty)
           'display_name': _nameCtrl.text.trim(),
         'profile_public': _bioCtrl.text.trim(),
@@ -184,7 +184,7 @@ class _ProfileScreenState extends ConsumerState<ProfileScreen>
     try {
       final bytes = await picked.readAsBytes();
       final url = await BackendService.uploadMedia(bytes, picked.name);
-      await FirestoreService.saveMediaRecord(photoUrl: url);
+      await ApiService.saveMediaRecord(photoUrl: url);
       ref.invalidate(publicProfileProvider(profile.id));
       ref.invalidate(insightsProvider);
       if (mounted) {
@@ -204,7 +204,7 @@ class _ProfileScreenState extends ConsumerState<ProfileScreen>
 
   Future<void> _toggleLocked(UserProfile profile) async {
     try {
-      await FirestoreService.updateProfile(
+      await ApiService.updateProfile(
           {'profile_public_locked': !profile.profilePublicLocked});
       ref.invalidate(profileProvider);
     } catch (e) {
@@ -217,7 +217,7 @@ class _ProfileScreenState extends ConsumerState<ProfileScreen>
 
   Future<void> _deletePhoto(UserProfile profile, String photoUrl) async {
     try {
-      await FirestoreService.deleteMediaByUrl(photoUrl);
+      await ApiService.deleteMediaByUrl(photoUrl);
       ref.invalidate(publicProfileProvider(profile.id));
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
@@ -234,7 +234,7 @@ class _ProfileScreenState extends ConsumerState<ProfileScreen>
 
   Future<void> _reorderPhotos(UserProfile profile, List<String> ordered) async {
     try {
-      await FirestoreService.updatePhotoOrder(ordered);
+      await ApiService.updatePhotoOrder(ordered);
       ref.invalidate(publicProfileProvider(profile.id));
     } catch (e) {
       if (mounted) {

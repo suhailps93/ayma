@@ -2,6 +2,8 @@ import 'dart:async';
 
 import 'package:connectivity_plus/connectivity_plus.dart';
 import 'package:firebase_auth/firebase_auth.dart';
+import 'package:firebase_messaging/firebase_messaging.dart';
+import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -12,7 +14,7 @@ import '../models/notification_model.dart';
 import '../models/profile.dart';
 import '../services/audio_service.dart';
 import '../services/auth_service.dart';
-import '../services/firestore_service.dart';
+import '../services/api_service.dart';
 import '../services/backend_service.dart';
 
 // ── Auth ──────────────────────────────────────────────────────────────────────
@@ -26,6 +28,35 @@ final authControllerProvider = ChangeNotifierProvider<AuthService>((ref) {
 // Emits the Firebase User (null when signed out). Used by router.
 final firebaseUserProvider = StreamProvider<User?>((ref) {
   return FirebaseAuth.instance.authStateChanges();
+});
+
+// Registers the device FCM token with the backend whenever the user signs in.
+// Web and environments where FCM is unavailable are silently skipped.
+final fcmRegistrationProvider = Provider<void>((ref) {
+  ref.listen<AsyncValue<User?>>(firebaseUserProvider, (_, next) {
+    next.whenData((user) async {
+      if (user == null || kIsWeb) return;
+      try {
+        final messaging = FirebaseMessaging.instance;
+        final settings = await messaging.requestPermission(alert: true, badge: true, sound: true);
+        if (settings.authorizationStatus == AuthorizationStatus.authorized ||
+            settings.authorizationStatus == AuthorizationStatus.provisional) {
+          final token = await messaging.getToken();
+          if (token != null) {
+            await BackendService.saveDeviceToken(token);
+          }
+          // Refresh and re-register when the token rotates
+          messaging.onTokenRefresh.listen((newToken) async {
+            try {
+              await BackendService.saveDeviceToken(newToken);
+            } catch (_) {}
+          });
+        }
+      } catch (_) {
+        // FCM unavailable on this platform/build — ignore silently
+      }
+    });
+  });
 });
 
 // Convenience — maps Firebase User → AuthUser for the rest of the app.
@@ -53,13 +84,13 @@ final authSessionProvider = Provider<AuthUser?>((ref) {
 final profileProvider = FutureProvider<UserProfile?>((ref) async {
   final user = ref.watch(currentUserProvider);
   if (user == null) return null;
-  return FirestoreService.getProfile();
+  return ApiService.getProfile();
 });
 
 final publicProfileProvider =
     FutureProvider.family<Map<String, dynamic>?, String>((ref, userId) async {
   if (userId.isEmpty) return null;
-  return FirestoreService.getPublicProfile(userId);
+  return ApiService.getPublicProfile(userId);
 });
 
 // ── Matches ───────────────────────────────────────────────────────────────────
@@ -67,13 +98,13 @@ final publicProfileProvider =
 final matchesProvider = FutureProvider<List<MatchModel>>((ref) async {
   final user = ref.watch(currentUserProvider);
   if (user == null) return [];
-  return FirestoreService.getMatches();
+  return ApiService.getMatches();
 });
 
 final userProfileByIdProvider =
     FutureProvider.family<Map<String, dynamic>?, String>((ref, userId) async {
   if (userId.isEmpty) return null;
-  return FirestoreService.getPublicProfile(userId);
+  return ApiService.getPublicProfile(userId);
 });
 
 // ── Notifications ─────────────────────────────────────────────────────────────
@@ -102,7 +133,7 @@ class NotificationsNotifier extends StateNotifier<List<NotificationModel>> {
       return;
     }
     _sub?.cancel();
-    _sub = FirestoreService.notificationsStream().listen(
+    _sub = ApiService.notificationsStream().listen(
       (list) => state = list,
       onError: (e) {
         debugPrint('Notifications stream error: $e');
@@ -115,12 +146,12 @@ class NotificationsNotifier extends StateNotifier<List<NotificationModel>> {
 
   Future<void> markRead(String id) async {
     state = [for (final n in state) if (n.id == id) n.copyWith(read: true) else n];
-    await FirestoreService.markNotificationRead(id);
+    await ApiService.markNotificationRead(id);
   }
 
   Future<void> markAllRead() async {
     state = state.map((n) => n.copyWith(read: true)).toList();
-    await FirestoreService.markAllNotificationsRead();
+    await ApiService.markAllNotificationsRead();
   }
 
   int get unreadCount => state.where((n) => !n.read).length;
@@ -137,13 +168,13 @@ class NotificationsNotifier extends StateNotifier<List<NotificationModel>> {
 final onboardingStatusProvider = FutureProvider<bool>((ref) async {
   final user = ref.watch(currentUserProvider);
   if (user == null) return false;
-  return FirestoreService.getOnboardingStatus();
+  return ApiService.getOnboardingStatus();
 });
 
 final preboardingSeenProvider = FutureProvider<bool>((ref) async {
   final user = ref.watch(currentUserProvider);
   if (user == null) return false;
-  return FirestoreService.getPreboardingSeen();
+  return ApiService.getPreboardingSeen();
 });
 
 // ── Insights ──────────────────────────────────────────────────────────────────
@@ -151,7 +182,7 @@ final preboardingSeenProvider = FutureProvider<bool>((ref) async {
 final insightsProvider = FutureProvider<Map<String, String>>((ref) async {
   final user = ref.watch(currentUserProvider);
   if (user == null) return {};
-  return FirestoreService.getInsights();
+  return ApiService.getInsights();
 });
 
 // ── Profile Answers ───────────────────────────────────────────────────────────
@@ -159,7 +190,7 @@ final insightsProvider = FutureProvider<Map<String, String>>((ref) async {
 final profileAnswersProvider = FutureProvider<Map<String, dynamic>>((ref) async {
   final user = ref.watch(currentUserProvider);
   if (user == null) return {};
-  return FirestoreService.getProfileAnswers();
+  return ApiService.getProfileAnswers();
 });
 
 // ── Profile Completeness ──────────────────────────────────────────────────────
@@ -167,18 +198,18 @@ final profileAnswersProvider = FutureProvider<Map<String, dynamic>>((ref) async 
 final profileCompletenessProvider = FutureProvider<double>((ref) async {
   final user = ref.watch(currentUserProvider);
   if (user == null) return 0.0;
-  return FirestoreService.getProfileCompleteness();
+  return ApiService.getProfileCompleteness();
 });
 
 // ── Match actions ─────────────────────────────────────────────────────────────
 
 Future<void> acceptMatch(String matchId, WidgetRef ref) async {
-  await FirestoreService.updateMatchStatus(matchId, 'accepted');
+  await ApiService.updateMatchStatus(matchId, 'accepted');
   ref.invalidate(matchesProvider);
 }
 
 Future<void> rejectMatch(String matchId, WidgetRef ref) async {
-  await FirestoreService.updateMatchStatus(matchId, 'rejected');
+  await ApiService.updateMatchStatus(matchId, 'rejected');
   ref.invalidate(matchesProvider);
 }
 
@@ -188,7 +219,7 @@ Future<void> runVibeCheck(String matchId, WidgetRef ref) async {
 }
 
 Future<void> toggleMatchSimulation(String matchId, bool show, WidgetRef ref) async {
-  await FirestoreService.toggleMatchSimulation(matchId, show);
+  await ApiService.toggleMatchSimulation(matchId, show);
   ref.invalidate(matchesProvider);
 }
 
@@ -239,7 +270,7 @@ final exploreProvider =
   final user = ref.watch(currentUserProvider);
   if (user == null) return {'people': [], 'prompts': []};
   final filters = ref.watch(exploreFiltersProvider);
-  final people = await FirestoreService.explore(
+  final people = await ApiService.explore(
     gender: filters.gender,
     ageMin: filters.ageMin,
     ageMax: filters.ageMax,
@@ -251,7 +282,7 @@ final exploreProvider =
 // ── Profile update ────────────────────────────────────────────────────────────
 
 Future<void> updateProfile(Map<String, dynamic> fields, WidgetRef ref) async {
-  await FirestoreService.updateProfile(fields);
+  await ApiService.updateProfile(fields);
   ref.invalidate(profileProvider);
   final user = ref.read(currentUserProvider);
   if (user != null) {

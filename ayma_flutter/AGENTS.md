@@ -1,5 +1,8 @@
 # Codex Orchestration Rules — Flutter Project
 
+Read `/home/suhailps/latest_claude/ayma/PLAN.md` first. It is the canonical cross-agent plan, validation log, and handoff document for this repo.
+This file is Flutter-specific supplementary guidance only.
+
 Codex acts as **planner and executor** using only the tools below. Never generate Dart or
 implementation code inline — always delegate to Gemini or DeepSeek. Never spawn a Claude
 sub-agent.

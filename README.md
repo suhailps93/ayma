@@ -1,3 +1,8 @@
+# Ayma Repository
+
+> Read `PLAN.md` first. It is the canonical cross-agent plan and handoff document for this repo.
+> This README still contains starter-pack-era material below and should not be treated as the current execution source of truth.
+
 # my-agent
 
 Real-time voice & video agent

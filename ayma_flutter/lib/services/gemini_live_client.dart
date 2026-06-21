@@ -75,6 +75,9 @@ class GeminiLiveClient {
 
   Future<void> connect(String wsUrl, String apiKey, Map<String, dynamic> setupPayload) async {
     debugPrint('DEBUG: GeminiLiveClient connecting to $wsUrl');
+    if (apiKey.trim().isEmpty) {
+      throw ArgumentError('Gemini API key/token is empty');
+    }
     if (_status != LiveClientStatus.disconnected) {
       _closeTransport();
     }
@@ -82,15 +85,20 @@ class GeminiLiveClient {
 
     final isToken = apiKey.startsWith('AQ.');
     final authParam = isToken ? 'access_token' : 'key';
-    
-    debugPrint('DEBUG: Using ${isToken ? 'OAuth Token' : 'API Key'} for authentication');
-    
+
+    debugPrint('DEBUG: Using ${isToken ? 'OAuth Token' : 'API Key'} for authentication (length: ${apiKey.length})');
+
     final wsUri = Uri.parse(wsUrl).replace(queryParameters: {authParam: apiKey});
+    debugPrint('DEBUG: GeminiLiveClient WS URI: ${wsUri.replace(queryParameters: {authParam: '${apiKey.substring(0, apiKey.length > 6 ? 6 : apiKey.length)}...'})}');
     _channel = kIsWeb
         ? WebSocketChannel.connect(wsUri)
         : IOWebSocketChannel.connect(wsUri, pingInterval: const Duration(seconds: 30));
 
-    _channel!.sink.add(jsonEncode({'setup': _normalizeSetup(setupPayload)}));
+    await _channel!.ready;
+
+    final setupMessage = jsonEncode({'setup': _normalizeSetup(setupPayload)});
+    debugPrint('DEBUG: GeminiLiveClient setup: $setupMessage');
+    _channel!.sink.add(setupMessage);
 
     _wsSub = _channel!.stream.listen(
       (data) {
@@ -102,7 +110,9 @@ class GeminiLiveClient {
         _onDisconnect();
       },
       onDone: () {
-        debugPrint('DEBUG: Gemini WebSocket closed');
+        debugPrint(
+          'DEBUG: Gemini WebSocket closed (code: ${_channel!.closeCode}, reason: ${_channel!.closeReason}, status was: $_status)',
+        );
         _onDisconnect();
       },
     );

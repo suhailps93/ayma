@@ -1,6 +1,7 @@
 # Coding Agent Guide
 
-**Start here: read `docs/agent.md` before touching any code.** It has the full project state, active work, architecture rules, and deploy commands. Everything else in this file is a supplement.
+**Start here: read `PLAN.md` before touching any code.** `PLAN.md` is the canonical cross-agent plan and handoff doc.
+Then read `docs/agent.md` for repo context. Everything else in this file is a supplement.
 
 ---
 
@@ -10,6 +11,9 @@
 |---|---|
 | Run app | `cd ayma_flutter && flutter run` |
 | Check for issues | `cd ayma_flutter && flutter analyze` |
+| Check Flutter env | `./ayma_flutter/scripts/check-flutter-env` |
+| ADB UI fallback | `./ayma_flutter/scripts/adb-ui devices` |
+| Run bootstrap tests | `python3 -m unittest functions/bootstrap/test_main_logic.py` |
 | Deploy Cloud Run | see `docs/agent.md` → Deploy Commands |
 | Deploy Firestore rules | `firebase deploy --only firestore:rules` |
 

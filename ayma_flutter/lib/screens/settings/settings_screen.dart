@@ -4,7 +4,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
 import '../../providers/providers.dart';
-import '../../services/firestore_service.dart';
+import '../../services/api_service.dart';
 import '../../theme.dart';
 
 class SettingsScreen extends ConsumerStatefulWidget {
@@ -95,7 +95,7 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
     }
     setState(() => _savingVoice = true);
     try {
-      await FirestoreService.updateVoiceSettings(
+      await ApiService.updateVoiceSettings(
         voiceGender: voiceGender,
         accentLocale: accentLocale,
         accentLabel: accentLocale,
@@ -130,7 +130,7 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
 
     setState(() => _previewingVoice = true);
     try {
-      await FirestoreService.updateVoiceSettings(
+      await ApiService.updateVoiceSettings(
         voiceGender: voiceGender,
         accentLocale: accentLocale,
         accentLabel: accentLocale,
@@ -160,7 +160,7 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
   Future<void> _clearAymaKnowledge() async {
     setState(() => _clearingMemory = true);
     try {
-      await FirestoreService.clearAymaKnowledge();
+      await ApiService.clearAymaKnowledge();
       await ref.read(audioServiceProvider).clearLocalTranscript();
       ref.invalidate(insightsProvider);
       ref.invalidate(profileProvider);
@@ -294,7 +294,7 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
             // Agent section
             _SectionLabel('Ayma'),
             FutureBuilder<Map<String, String>>(
-              future: FirestoreService.getVoiceSettings(),
+              future: ApiService.getVoiceSettings(),
               builder: (context, snapshot) {
                 final settings = snapshot.data;
                 _accentLocale ??= settings?['accent_locale'] ?? 'en-US';

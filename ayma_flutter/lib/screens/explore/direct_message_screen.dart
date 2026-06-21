@@ -1,6 +1,6 @@
 import 'package:flutter/material.dart';
 
-import '../../services/firestore_service.dart';
+import '../../services/api_service.dart';
 import '../../theme.dart';
 
 class DirectMessageScreen extends StatefulWidget {
@@ -31,7 +31,7 @@ class _DirectMessageScreenState extends State<DirectMessageScreen> {
     if (text.isEmpty || _sending) return;
     setState(() => _sending = true);
     try {
-      await FirestoreService.sendDirectMessage(
+      await ApiService.sendDirectMessage(
         targetUserId: widget.targetUserId,
         text: text,
       );
@@ -55,7 +55,7 @@ class _DirectMessageScreenState extends State<DirectMessageScreen> {
         children: [
           Expanded(
             child: StreamBuilder<List<Map<String, dynamic>>>(
-              stream: FirestoreService.conversationStream(widget.targetUserId),
+              stream: ApiService.conversationStream(widget.targetUserId),
               builder: (context, snap) {
                 final items = snap.data ?? const <Map<String, dynamic>>[];
                 if (items.isEmpty) {
@@ -73,7 +73,7 @@ class _DirectMessageScreenState extends State<DirectMessageScreen> {
                     final m = items[i];
                     final text = (m['text'] as String?) ?? '';
                     final from = (m['from_user_id'] as String?) ?? '';
-                    final mine = from == FirestoreService.uidForClient();
+                    final mine = from == ApiService.uidForClient();
                     return Align(
                       alignment:
                           mine ? Alignment.centerRight : Alignment.centerLeft,

@@ -1,5 +1,13 @@
 # Ayma Local Test Runbook For Pixel Over Wi‑Fi
 
+> Read `PLAN.md` first.
+>
+> Status: this runbook is not the canonical plan. It contains older local-backend assumptions and must be used only together with the current validation/blocker state in `PLAN.md`.
+>
+> Current known issue from the latest agent run:
+> - emulator/device execution was not completed from the Codex shell because Flutter is not on `PATH` there and the Android emulator binary failed to resolve `libX11.so.6`.
+> - before using this runbook, verify that your shell can run both `flutter` and the Android emulator successfully.
+
 This runbook is the repeatable setup for testing Ayma locally on a Pixel device over wireless ADB.
 
 It covers:
@@ -22,9 +30,10 @@ You should already have:
 
 - Android platform tools installed and `adb` available in your shell
 - Flutter installed
-- the Python virtualenv created in the repo at `./.venv`
-- your `.env` configured for Supabase, Gemini, Mem0, and any bucket settings you want to use
-- your database migrations applied
+- the Python runtime needed for any local backend checks you plan to run
+- Flutter installed and runnable from your current shell
+- the Android emulator or wireless ADB device connection working from your current shell
+- any environment variables needed by the active backend flow
 
 If you added new schema recently, apply migrations before testing.
 
@@ -75,7 +84,14 @@ adb connect 10.0.0.203:44313
 adb devices
 ```
 
-## 3. Start The Local Backend
+## 3. Start The Backend You Intend To Test
+
+The active branch may be using the deployed bootstrap backend or the local `functions/bootstrap` service with SQLite fallback.
+Do not assume the older monolithic local backend path below is still the active one for the branch you are testing.
+
+Check `PLAN.md` first and confirm which backend path is current.
+
+### Legacy local backend flow
 
 Open a terminal and run:
 

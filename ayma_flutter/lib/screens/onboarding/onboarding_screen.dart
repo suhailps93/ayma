@@ -1,13 +1,16 @@
 import 'dart:async';
+
 import 'package:flutter/material.dart';
-import 'package:go_router/go_router.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:geocoding/geocoding.dart';
 import 'package:geolocator/geolocator.dart';
+import 'package:go_router/go_router.dart';
+import 'package:image_picker/image_picker.dart';
 
-import 'package:flutter_riverpod/flutter_riverpod.dart';
-
+import '../../models/community_profile.dart';
 import '../../providers/providers.dart';
-import '../../services/firestore_service.dart';
+import '../../services/api_service.dart';
+import '../../services/backend_service.dart';
 import '../../theme.dart';
 import '../../utils/distance_units.dart';
 import '../../widgets/ayma_button.dart';
@@ -25,7 +28,6 @@ class _OrbPainter extends CustomPainter {
     final baseR = size.width * 0.38;
     final r = baseR * (0.93 + 0.07 * breathe);
 
-    // Outer glow
     canvas.drawCircle(
       Offset(cx, cy),
       r * 1.35,
@@ -37,10 +39,10 @@ class _OrbPainter extends CustomPainter {
             Colors.transparent,
           ],
         ).createShader(
-            Rect.fromCircle(center: Offset(cx, cy), radius: r * 1.35)),
+          Rect.fromCircle(center: Offset(cx, cy), radius: r * 1.35),
+        ),
     );
 
-    // Border ring
     canvas.drawCircle(
       Offset(cx, cy),
       r * 1.12,
@@ -50,7 +52,6 @@ class _OrbPainter extends CustomPainter {
         ..strokeWidth = 0.5,
     );
 
-    // Sphere fill
     final spherePaint = Paint()
       ..shader = RadialGradient(
         center: const Alignment(-0.3, -0.4),
@@ -65,7 +66,6 @@ class _OrbPainter extends CustomPainter {
       ).createShader(Rect.fromCircle(center: Offset(cx, cy), radius: r));
     canvas.drawCircle(Offset(cx, cy), r, spherePaint);
 
-    // Highlight
     final hlR = r * 0.28;
     canvas.drawCircle(
       Offset(cx - r * 0.25, cy - r * 0.28),
@@ -76,8 +76,12 @@ class _OrbPainter extends CustomPainter {
             Colors.white.withValues(alpha: 0.35),
             Colors.transparent,
           ],
-        ).createShader(Rect.fromCircle(
-            center: Offset(cx - r * 0.25, cy - r * 0.28), radius: hlR)),
+        ).createShader(
+          Rect.fromCircle(
+            center: Offset(cx - r * 0.25, cy - r * 0.28),
+            radius: hlR,
+          ),
+        ),
     );
   }
 
@@ -102,8 +106,9 @@ class _BreathingOrbState extends State<_BreathingOrb>
   void initState() {
     super.initState();
     _ctrl = AnimationController(
-        vsync: this, duration: const Duration(milliseconds: 3200))
-      ..repeat(reverse: true);
+      vsync: this,
+      duration: const Duration(milliseconds: 3200),
+    )..repeat(reverse: true);
     _anim = CurvedAnimation(parent: _ctrl, curve: Curves.easeInOut);
   }
 
@@ -133,16 +138,19 @@ class OnboardingScreen extends ConsumerStatefulWidget {
 }
 
 class _OnboardingScreenState extends ConsumerState<OnboardingScreen> {
-  // 0=welcome, 1=about you, 2=preferences
+  // 0=welcome, 1=community select, 2=about you, 3=preferences, 4=photos
   int _step = 0;
   bool _saving = false;
 
-  // Step 1 – about you
+  // Step 1 – community
+  CommunityProfile? _communityProfile;
+
+  // Step 2 – about you
   final _nameCtrl = TextEditingController();
   String? _gender;
   int _age = 28;
 
-  // Step 2 – preferences
+  // Step 3 – preferences
   String? _interestedIn;
   int _minAge = 24;
   int _maxAge = 38;
@@ -155,6 +163,10 @@ class _OnboardingScreenState extends ConsumerState<OnboardingScreen> {
   int _locationRequestId = 0;
   double? _locationLat;
   double? _locationLng;
+
+  // Step 4 – photos
+  final List<String> _photoUrls = [];
+  bool _uploadingPhoto = false;
 
   static const List<String> _seedLocations = [
     'San Francisco, CA',
@@ -186,7 +198,8 @@ class _OnboardingScreenState extends ConsumerState<OnboardingScreen> {
   void _syncLocationFromController() {
     final normalized = _normalizedLocation(_locationCtrl.text);
     final nextSuggestions = _buildLocationSuggestions(normalized);
-    if (_locationText != normalized || !_sameSuggestions(_suggestions, nextSuggestions)) {
+    if (_locationText != normalized ||
+        !_sameSuggestions(_suggestions, nextSuggestions)) {
       setState(() {
         _locationText = normalized;
         _suggestions = nextSuggestions;
@@ -214,8 +227,14 @@ class _OnboardingScreenState extends ConsumerState<OnboardingScreen> {
   @override
   void initState() {
     super.initState();
-    unawaited(FirestoreService.markPreboardingSeen());
     _locationCtrl.addListener(_syncLocationFromController);
+    WidgetsBinding.instance.addPostFrameCallback((_) async {
+      // Skip the welcome step if this user has already seen the preboard once.
+      final alreadySeen = await ref.read(preboardingSeenProvider.future);
+      if (!mounted) return;
+      if (alreadySeen && _step == 0) setState(() => _step = 1);
+      unawaited(ApiService.markPreboardingSeen());
+    });
   }
 
   @override
@@ -228,10 +247,10 @@ class _OnboardingScreenState extends ConsumerState<OnboardingScreen> {
   }
 
   void _next() {
-    if (_step < 2) {
+    if (_step < 4) {
       setState(() {
         _step++;
-        if (_step == 2) _detectLocation();
+        if (_step == 3) _detectLocation();
       });
     } else {
       _save();
@@ -239,6 +258,18 @@ class _OnboardingScreenState extends ConsumerState<OnboardingScreen> {
   }
 
   Future<void> _detectLocation() async {
+    // Check and request permission before attempting GPS.
+    // If denied, auto-expand the text field so the user can search manually.
+    LocationPermission perm = await Geolocator.checkPermission();
+    if (perm == LocationPermission.denied) {
+      perm = await Geolocator.requestPermission();
+    }
+    if (perm == LocationPermission.denied ||
+        perm == LocationPermission.deniedForever) {
+      if (mounted) setState(() => _locationExpanded = true);
+      return;
+    }
+
     final requestId = ++_locationRequestId;
     final startedWith = _normalizedLocation(_locationCtrl.text);
     setState(() => _locationLoading = true);
@@ -249,16 +280,16 @@ class _OnboardingScreenState extends ConsumerState<OnboardingScreen> {
       var location =
           '${pos.latitude.toStringAsFixed(4)}, ${pos.longitude.toStringAsFixed(4)}';
       try {
-        final marks = await placemarkFromCoordinates(pos.latitude, pos.longitude);
+        final marks =
+            await placemarkFromCoordinates(pos.latitude, pos.longitude);
         if (marks.isNotEmpty) {
           final p = marks.first;
           final city = (p.locality ?? p.subAdministrativeArea ?? '').trim();
           final state = (p.administrativeArea ?? '').trim();
           final country = (p.country ?? '').trim();
-          final parts = [city, state, country].where((s) => s.isNotEmpty).toList();
-          if (parts.isNotEmpty) {
-            location = parts.join(', ');
-          }
+          final parts =
+              [city, state, country].where((s) => s.isNotEmpty).toList();
+          if (parts.isNotEmpty) location = parts.join(', ');
         }
       } catch (_) {}
       if (!mounted) return;
@@ -270,7 +301,10 @@ class _OnboardingScreenState extends ConsumerState<OnboardingScreen> {
         _setLocationText(location, updateController: true);
         _suggestions = _buildLocationSuggestions(location);
       });
-    } catch (_) {}
+    } catch (_) {
+      // GPS failed after permission granted — fall back to manual search
+      if (mounted) setState(() => _locationExpanded = true);
+    }
     if (mounted && requestId == _locationRequestId) {
       setState(() => _locationLoading = false);
     }
@@ -299,17 +333,20 @@ class _OnboardingScreenState extends ConsumerState<OnboardingScreen> {
   Future<void> _save() async {
     setState(() => _saving = true);
     try {
-      final voiceDefaults = FirestoreService.deriveVoiceDefaults(
+      final voiceDefaults = ApiService.deriveVoiceDefaults(
         gender: _gender,
         locationRegion: _normalizedLocation(_locationCtrl.text),
       );
-      await FirestoreService.updateProfile({
+      final communityId =
+          (_communityProfile ?? CommunityProfiles.datingWestern).id;
+      await ApiService.updateProfile({
         'display_name': _nameCtrl.text.trim(),
         'age': _age,
         'gender': _gender,
         'voice_preference': voiceDefaults['voice_gender'],
         'voice_accent': voiceDefaults['accent_locale'],
         'voice_settings': voiceDefaults,
+        'community_profile': communityId,
         'matching_prefs': {
           'interested_in': _interestedIn,
           'age_min': _minAge,
@@ -323,7 +360,7 @@ class _OnboardingScreenState extends ConsumerState<OnboardingScreen> {
           },
         'onboarding_complete': true,
       });
-      await FirestoreService.initializeQuestions(
+      await ApiService.initializeQuestions(
         alreadyAnswered: {'name', 'age', 'gender', 'interested_in', 'location'},
       );
       ref.invalidate(onboardingStatusProvider);
@@ -343,9 +380,13 @@ class _OnboardingScreenState extends ConsumerState<OnboardingScreen> {
       case 0:
         return true;
       case 1:
-        return _nameCtrl.text.trim().isNotEmpty && _gender != null;
+        return _communityProfile != null;
       case 2:
+        return _nameCtrl.text.trim().isNotEmpty && _gender != null;
+      case 3:
         return _interestedIn != null;
+      case 4:
+        return !_uploadingPhoto;
       default:
         return false;
     }
@@ -359,14 +400,13 @@ class _OnboardingScreenState extends ConsumerState<OnboardingScreen> {
       body: SafeArea(
         child: Column(
           children: [
-            // Progress bar
             if (_step > 0)
               Padding(
                 padding:
                     const EdgeInsets.symmetric(horizontal: 28, vertical: 18),
                 child: Row(
                   children: List.generate(
-                    3,
+                    4,
                     (i) => Expanded(
                       child: Container(
                         height: 2,
@@ -384,7 +424,6 @@ class _OnboardingScreenState extends ConsumerState<OnboardingScreen> {
               )
             else
               const SizedBox(height: 18),
-
             Expanded(
               child: AnimatedSwitcher(
                 duration: const Duration(milliseconds: 320),
@@ -392,9 +431,11 @@ class _OnboardingScreenState extends ConsumerState<OnboardingScreen> {
                   opacity: anim,
                   child: SlideTransition(
                     position: Tween<Offset>(
-                            begin: const Offset(0.04, 0), end: Offset.zero)
-                        .animate(CurvedAnimation(
-                            parent: anim, curve: Curves.easeOut)),
+                      begin: const Offset(0.04, 0),
+                      end: Offset.zero,
+                    ).animate(
+                      CurvedAnimation(parent: anim, curve: Curves.easeOut),
+                    ),
                     child: child,
                   ),
                 ),
@@ -404,7 +445,6 @@ class _OnboardingScreenState extends ConsumerState<OnboardingScreen> {
                 ),
               ),
             ),
-
             _buildBottom(),
           ],
         ),
@@ -417,6 +457,11 @@ class _OnboardingScreenState extends ConsumerState<OnboardingScreen> {
       case 0:
         return _WelcomeStep(onHowItWorks: _showHowItWorks);
       case 1:
+        return _CommunityStep(
+          selected: _communityProfile,
+          onSelect: (c) => setState(() => _communityProfile = c),
+        );
+      case 2:
         return _AboutYouStep(
           nameCtrl: _nameCtrl,
           gender: _gender,
@@ -425,7 +470,7 @@ class _OnboardingScreenState extends ConsumerState<OnboardingScreen> {
           onGenderSelect: (v) => setState(() => _gender = v),
           onAgeChanged: (v) => setState(() => _age = v),
         );
-      case 2:
+      case 3:
         return _PreferencesStep(
           interestedIn: _interestedIn,
           minAge: _minAge,
@@ -458,9 +503,60 @@ class _OnboardingScreenState extends ConsumerState<OnboardingScreen> {
           onDetect: _detectLocation,
           countryCode: Localizations.localeOf(context).countryCode,
         );
+      case 4:
+        return _PhotoStep(
+          photoUrls: _photoUrls,
+          uploading: _uploadingPhoto,
+          onAdd: _pickAndUploadPhoto,
+          onSetPrimary: _setPhotoAsPrimary,
+          onDelete: _deletePhoto,
+        );
       default:
         return const SizedBox();
     }
+  }
+
+  void _setPhotoAsPrimary(int index) {
+    if (index <= 0 || index >= _photoUrls.length) return;
+    setState(() {
+      final url = _photoUrls.removeAt(index);
+      _photoUrls.insert(0, url);
+    });
+    unawaited(ApiService.updatePhotoOrder(_photoUrls));
+  }
+
+  void _deletePhoto(int index) {
+    if (index < 0 || index >= _photoUrls.length) return;
+    final url = _photoUrls[index];
+    setState(() => _photoUrls.removeAt(index));
+    unawaited(ApiService.deleteMediaByUrl(url));
+    unawaited(ApiService.updatePhotoOrder(_photoUrls));
+  }
+
+  Future<void> _pickAndUploadPhoto() async {
+    final picker = ImagePicker();
+    final picked = await picker.pickMultiImage(imageQuality: 85, limit: 6);
+    if (picked.isEmpty || !mounted) return;
+    setState(() => _uploadingPhoto = true);
+    try {
+      for (final xfile in picked) {
+        final bytes = await xfile.readAsBytes();
+        final url = await BackendService.uploadMedia(bytes, xfile.name);
+        await ApiService.saveMediaRecord(photoUrl: url);
+        if (mounted) setState(() => _photoUrls.add(url));
+      }
+      // Ask backend to analyze uploaded photos for face/appearance context
+      if (_photoUrls.isNotEmpty) {
+        unawaited(ApiService.analyzePhotos(_photoUrls));
+      }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Upload failed: $e')),
+        );
+      }
+    }
+    if (mounted) setState(() => _uploadingPhoto = false);
   }
 
   Widget _buildBottom() {
@@ -491,10 +587,25 @@ class _OnboardingScreenState extends ConsumerState<OnboardingScreen> {
     }
     return Padding(
       padding: const EdgeInsets.fromLTRB(28, 0, 28, 32),
-      child: AymaButton(
-        label: _step < 2 ? 'Continue' : 'Get started',
-        loading: _saving,
-        onPressed: _canProceed ? _next : null,
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          AymaButton(
+            label: _step < 4 ? 'Continue' : 'Get started',
+            loading: _saving,
+            onPressed: _canProceed ? _next : null,
+          ),
+          if (_step == 4) ...[
+            const SizedBox(height: 14),
+            GestureDetector(
+              onTap: _saving ? null : _save,
+              child: Text(
+                'Add photos later',
+                style: TextStyle(color: AymaColors.fgMute, fontSize: 13),
+              ),
+            ),
+          ],
+        ],
       ),
     );
   }
@@ -556,8 +667,10 @@ class _WelcomeStep extends StatelessWidget {
           const SizedBox(height: 20),
           const _BreathingOrb(size: 180),
           const SizedBox(height: 32),
-          Text('FIRST MEETING',
-              style: AymaFonts.mono(size: 10, color: AymaColors.fgMute)),
+          Text(
+            'FIRST MEETING',
+            style: AymaFonts.mono(size: 10, color: AymaColors.fgMute),
+          ),
           const SizedBox(height: 14),
           Padding(
             padding: const EdgeInsets.symmetric(horizontal: 32),
@@ -569,7 +682,10 @@ class _WelcomeStep extends StatelessWidget {
                   TextSpan(
                     text: 'Ayma.',
                     style: AymaFonts.serif(
-                        size: 34, italic: true, color: AymaColors.accent),
+                      size: 34,
+                      italic: true,
+                      color: AymaColors.accent,
+                    ),
                   ),
                 ],
               ),
@@ -596,7 +712,143 @@ class _WelcomeStep extends StatelessWidget {
   }
 }
 
-// ── Step 1: About You ─────────────────────────────────────────────────────────
+// ── Step 1: Community Selection ───────────────────────────────────────────────
+
+class _CommunityStep extends StatelessWidget {
+  final CommunityProfile? selected;
+  final ValueChanged<CommunityProfile> onSelect;
+
+  const _CommunityStep({required this.selected, required this.onSelect});
+
+  @override
+  Widget build(BuildContext context) {
+    return SingleChildScrollView(
+      padding: const EdgeInsets.symmetric(horizontal: 28),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const SizedBox(height: 4),
+          _StepLabel('01 · YOUR CONTEXT'),
+          const SizedBox(height: 16),
+          Text('What are you looking for?', style: AymaFonts.serif(size: 28)),
+          const SizedBox(height: 6),
+          Text(
+            'Choose the matchmaking context that fits your world.',
+            style: TextStyle(color: AymaColors.fgDim, fontSize: 14),
+          ),
+          const SizedBox(height: 28),
+          ...CommunityProfiles.all.map(
+            (community) => Padding(
+              padding: const EdgeInsets.only(bottom: 12),
+              child: _CommunityCard(
+                community: community,
+                isSelected: selected?.id == community.id,
+                onTap: () => onSelect(community),
+              ),
+            ),
+          ),
+          const SizedBox(height: 12),
+        ],
+      ),
+    );
+  }
+}
+
+class _CommunityCard extends StatelessWidget {
+  final CommunityProfile community;
+  final bool isSelected;
+  final VoidCallback onTap;
+
+  const _CommunityCard({
+    required this.community,
+    required this.isSelected,
+    required this.onTap,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return GestureDetector(
+      onTap: onTap,
+      child: AnimatedContainer(
+        duration: const Duration(milliseconds: 200),
+        curve: Curves.easeOut,
+        padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 16),
+        decoration: BoxDecoration(
+          color: isSelected ? AymaColors.accentFaint : AymaColors.bgCard,
+          borderRadius: BorderRadius.circular(16),
+          border: Border.all(
+            color: isSelected ? AymaColors.accent : AymaColors.lineSoft,
+            width: isSelected ? 1.5 : 0.5,
+          ),
+        ),
+        child: Row(
+          children: [
+            Container(
+              width: 44,
+              height: 44,
+              alignment: Alignment.center,
+              decoration: BoxDecoration(
+                color: isSelected ? AymaColors.accentSoft : AymaColors.bgElev,
+                borderRadius: BorderRadius.circular(12),
+              ),
+              child: Text(
+                community.emoji,
+                style: const TextStyle(fontSize: 22),
+              ),
+            ),
+            const SizedBox(width: 14),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    community.displayName,
+                    style: TextStyle(
+                      color: isSelected ? AymaColors.accent : AymaColors.fg,
+                      fontSize: 15,
+                      fontWeight: FontWeight.w600,
+                      letterSpacing: -0.2,
+                    ),
+                  ),
+                  const SizedBox(height: 3),
+                  Text(
+                    community.shortDescription,
+                    style: TextStyle(
+                      color: AymaColors.fgDim,
+                      fontSize: 13,
+                      height: 1.4,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+            const SizedBox(width: 10),
+            AnimatedOpacity(
+              opacity: isSelected ? 1.0 : 0.0,
+              duration: const Duration(milliseconds: 200),
+              child: Container(
+                width: 22,
+                height: 22,
+                alignment: Alignment.center,
+                decoration: BoxDecoration(
+                  color: AymaColors.accent,
+                  shape: BoxShape.circle,
+                ),
+                child: const Icon(
+                  Icons.check,
+                  color: AymaColors.bg,
+                  size: 13,
+                ),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+// ── Step 2: About You ─────────────────────────────────────────────────────────
 
 class _AboutYouStep extends StatelessWidget {
   final TextEditingController nameCtrl;
@@ -652,8 +904,10 @@ class _AboutYouStep extends StatelessWidget {
             children: [
               Text('$age', style: AymaFonts.serif(size: 48)),
               const SizedBox(width: 8),
-              Text('YEARS',
-                  style: AymaFonts.mono(size: 9, color: AymaColors.fgMute)),
+              Text(
+                'YEARS',
+                style: AymaFonts.mono(size: 9, color: AymaColors.fgMute),
+              ),
             ],
           ),
           const SizedBox(height: 4),
@@ -682,7 +936,7 @@ class _AboutYouStep extends StatelessWidget {
   }
 }
 
-// ── Step 2: Preferences ───────────────────────────────────────────────────────
+// ── Step 3: Preferences ──────────────────────────────────────────────────────
 
 class _PreferencesStep extends StatelessWidget {
   final String? interestedIn;
@@ -915,8 +1169,11 @@ class _Chip extends StatelessWidget {
   final bool selected;
   final VoidCallback onTap;
 
-  const _Chip(
-      {required this.label, required this.selected, required this.onTap});
+  const _Chip({
+    required this.label,
+    required this.selected,
+    required this.onTap,
+  });
 
   @override
   Widget build(BuildContext context) => GestureDetector(
@@ -949,9 +1206,11 @@ class _Chip extends StatelessWidget {
 class _LocationCard extends StatelessWidget {
   final String locationText;
   final TextEditingController locationCtrl;
-  final bool locationLoading, expanded;
+  final bool locationLoading;
+  final bool expanded;
   final List<String> suggestions;
-  final VoidCallback onTap, onDetect;
+  final VoidCallback onTap;
+  final VoidCallback onDetect;
   final ValueChanged<String> onChanged;
   final ValueChanged<String> onSuggestionTap;
   final String? countryCode;
@@ -988,8 +1247,11 @@ class _LocationCard extends StatelessWidget {
             ),
             child: Row(
               children: [
-                Icon(Icons.location_on_outlined,
-                    color: AymaColors.fgMute, size: 18),
+                Icon(
+                  Icons.location_on_outlined,
+                  color: AymaColors.fgMute,
+                  size: 18,
+                ),
                 const SizedBox(width: 10),
                 Expanded(
                   child: expanded
@@ -1000,7 +1262,9 @@ class _LocationCard extends StatelessWidget {
                           decoration: InputDecoration(
                             hintText: 'City or region',
                             hintStyle: TextStyle(
-                                color: AymaColors.fgMute, fontSize: 15),
+                              color: AymaColors.fgMute,
+                              fontSize: 15,
+                            ),
                             border: InputBorder.none,
                             enabledBorder: InputBorder.none,
                             focusedBorder: InputBorder.none,
@@ -1025,9 +1289,13 @@ class _LocationCard extends StatelessWidget {
                               ),
                             ),
                             if (locationText.isNotEmpty)
-                              Text('Within 25 $unit',
-                                  style: TextStyle(
-                                      color: AymaColors.fgMute, fontSize: 12)),
+                              Text(
+                                'Within 25 $unit',
+                                style: TextStyle(
+                                  color: AymaColors.fgMute,
+                                  fontSize: 12,
+                                ),
+                              ),
                           ],
                         ),
                 ),
@@ -1040,12 +1308,18 @@ class _LocationCard extends StatelessWidget {
                 else if (expanded)
                   GestureDetector(
                     onTap: onDetect,
-                    child: Icon(Icons.my_location_rounded,
-                        color: AymaColors.accent, size: 18),
+                    child: Icon(
+                      Icons.my_location_rounded,
+                      color: AymaColors.accent,
+                      size: 18,
+                    ),
                   )
                 else
-                  Icon(Icons.chevron_right_rounded,
-                      color: AymaColors.fgMute, size: 18),
+                  Icon(
+                    Icons.chevron_right_rounded,
+                    color: AymaColors.fgMute,
+                    size: 18,
+                  ),
               ],
             ),
           ),
@@ -1060,18 +1334,178 @@ class _LocationCard extends StatelessWidget {
             ),
             child: Column(
               children: suggestions
-                  .map((s) => ListTile(
-                        dense: true,
-                        title: Text(s,
-                            style:
-                                TextStyle(color: AymaColors.fg, fontSize: 14)),
-                        onTap: () => onSuggestionTap(s),
-                      ))
+                  .map(
+                    (s) => ListTile(
+                      dense: true,
+                      title: Text(
+                        s,
+                        style: TextStyle(color: AymaColors.fg, fontSize: 14),
+                      ),
+                      onTap: () => onSuggestionTap(s),
+                    ),
+                  )
                   .toList(),
             ),
           ),
         ],
       ],
+    );
+  }
+}
+
+// ── Step 4: Photos ────────────────────────────────────────────────────────────
+
+class _PhotoStep extends StatelessWidget {
+  final List<String> photoUrls;
+  final bool uploading;
+  final VoidCallback onAdd;
+  final ValueChanged<int> onSetPrimary;
+  final ValueChanged<int> onDelete;
+
+  const _PhotoStep({
+    required this.photoUrls,
+    required this.uploading,
+    required this.onAdd,
+    required this.onSetPrimary,
+    required this.onDelete,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return SingleChildScrollView(
+      padding: const EdgeInsets.symmetric(horizontal: 28),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const SizedBox(height: 4),
+          _StepLabel('04 · YOUR PHOTOS'),
+          const SizedBox(height: 16),
+          Text('Show your face.', style: AymaFonts.serif(size: 28)),
+          const SizedBox(height: 6),
+          Text(
+            'Tap to set as main photo. Ayma will use these to learn how to describe you.',
+            style: TextStyle(color: AymaColors.fgDim, fontSize: 14),
+          ),
+          const SizedBox(height: 32),
+          if (photoUrls.isNotEmpty) ...[
+            GridView.builder(
+              shrinkWrap: true,
+              physics: const NeverScrollableScrollPhysics(),
+              gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
+                crossAxisCount: 3,
+                crossAxisSpacing: 8,
+                mainAxisSpacing: 8,
+              ),
+              itemCount: photoUrls.length,
+              itemBuilder: (_, i) {
+                final isPrimary = i == 0;
+                return GestureDetector(
+                  onTap: isPrimary ? null : () => onSetPrimary(i),
+                  onLongPress: () => onDelete(i),
+                  child: Stack(
+                    fit: StackFit.expand,
+                    children: [
+                      ClipRRect(
+                        borderRadius: BorderRadius.circular(10),
+                        child: Image.network(
+                          photoUrls[i],
+                          fit: BoxFit.cover,
+                          errorBuilder: (_, __, ___) => Container(
+                            color: AymaColors.bgCard,
+                            child: Icon(Icons.broken_image_outlined,
+                                color: AymaColors.fgMute),
+                          ),
+                        ),
+                      ),
+                      if (isPrimary)
+                        Positioned(
+                          top: 6,
+                          left: 6,
+                          child: Container(
+                            padding: const EdgeInsets.symmetric(
+                                horizontal: 6, vertical: 2),
+                            decoration: BoxDecoration(
+                              color: AymaColors.accent,
+                              borderRadius: BorderRadius.circular(6),
+                            ),
+                            child: Text(
+                              'MAIN',
+                              style: AymaFonts.mono(
+                                  size: 8, color: AymaColors.bg),
+                            ),
+                          ),
+                        ),
+                      Positioned(
+                        top: 4,
+                        right: 4,
+                        child: GestureDetector(
+                          onTap: () => onDelete(i),
+                          child: Container(
+                            width: 22,
+                            height: 22,
+                            decoration: BoxDecoration(
+                              color: Colors.black54,
+                              shape: BoxShape.circle,
+                            ),
+                            child: const Icon(Icons.close,
+                                size: 13, color: Colors.white),
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
+                );
+              },
+            ),
+            const SizedBox(height: 12),
+          ],
+          GestureDetector(
+            onTap: uploading ? null : onAdd,
+            child: Container(
+              width: double.infinity,
+              padding: const EdgeInsets.symmetric(vertical: 18),
+              decoration: BoxDecoration(
+                color: AymaColors.bgCard,
+                borderRadius: BorderRadius.circular(14),
+                border: Border.all(color: AymaColors.lineSoft, width: 0.5),
+              ),
+              child: uploading
+                  ? const Center(
+                      child: SizedBox(
+                        width: 20,
+                        height: 20,
+                        child: CircularProgressIndicator(strokeWidth: 2),
+                      ),
+                    )
+                  : Row(
+                      mainAxisAlignment: MainAxisAlignment.center,
+                      children: [
+                        Icon(Icons.add_photo_alternate_outlined,
+                            color: AymaColors.fgMute, size: 20),
+                        const SizedBox(width: 8),
+                        Text(
+                          photoUrls.isEmpty
+                              ? 'Add photos'
+                              : 'Add more photos',
+                          style:
+                              TextStyle(color: AymaColors.fgDim, fontSize: 15),
+                        ),
+                      ],
+                    ),
+            ),
+          ),
+          if (photoUrls.isNotEmpty)
+            Padding(
+              padding: const EdgeInsets.only(top: 8),
+              child: Text(
+                'Long-press a photo to delete it',
+                style: TextStyle(color: AymaColors.fgMute, fontSize: 11),
+                textAlign: TextAlign.center,
+              ),
+            ),
+          const SizedBox(height: 24),
+        ],
+      ),
     );
   }
 }
@@ -1111,7 +1545,11 @@ class _HowItem extends StatelessWidget {
   final String title;
   final String body;
 
-  const _HowItem({required this.icon, required this.title, required this.body});
+  const _HowItem({
+    required this.icon,
+    required this.title,
+    required this.body,
+  });
 
   @override
   Widget build(BuildContext context) => Row(
@@ -1132,15 +1570,23 @@ class _HowItem extends StatelessWidget {
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                Text(title,
-                    style: const TextStyle(
-                        color: AymaColors.fg,
-                        fontSize: 14,
-                        fontWeight: FontWeight.w500)),
+                Text(
+                  title,
+                  style: const TextStyle(
+                    color: AymaColors.fg,
+                    fontSize: 14,
+                    fontWeight: FontWeight.w500,
+                  ),
+                ),
                 const SizedBox(height: 2),
-                Text(body,
-                    style: TextStyle(
-                        color: AymaColors.fgDim, fontSize: 13, height: 1.45)),
+                Text(
+                  body,
+                  style: TextStyle(
+                    color: AymaColors.fgDim,
+                    fontSize: 13,
+                    height: 1.45,
+                  ),
+                ),
               ],
             ),
           ),
