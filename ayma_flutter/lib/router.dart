@@ -4,6 +4,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
 import 'providers/providers.dart';
+import 'screens/admin/admin_screen.dart';
 import 'screens/auth/auth_screen.dart';
 import 'screens/chat/chat_screen.dart';
 import 'screens/explore/explore_screen.dart';
@@ -34,6 +35,7 @@ final routerProvider = Provider<GoRouter>((ref) {
       final path = state.matchedLocation;
 
       if (!initialized) return null;
+      if (path == '/admin') return null;
       if (user == null) return path == '/auth' ? null : '/auth';
       if (path == '/auth') return '/chat';
 
@@ -49,6 +51,7 @@ final routerProvider = Provider<GoRouter>((ref) {
     routes: [
       GoRoute(path: '/auth',       builder: (_, __) => const AuthScreen()),
       GoRoute(path: '/onboarding', builder: (_, __) => const OnboardingScreen()),
+      GoRoute(path: '/admin',      builder: (_, __) => const AdminScreen()),
       ShellRoute(
         builder: (context, state, child) => ShellScreen(child: child),
         routes: [

@@ -16,6 +16,7 @@ dependencies:
   google_sign_in: ^6.2.1
   firebase_storage: ^12.3.4
   firebase_messaging: ^15.1.6
+  firebase_app_check: ^0.3.2+10
   # Navigation
   go_router: ^13.2.4
 
@@ -29,6 +30,7 @@ dependencies:
   # Network
   web_socket_channel: ^3.0.1
   http: ^1.2.2
+  js: ^0.7.2
 
   # UI
   intl_phone_field: ^3.2.0

@@ -71,6 +71,12 @@ class TranscriptLine {
 // Orchestrates the selected live client + recorder + streamer while preserving
 // the UI contract used by ChatScreen.
 class AymaAudioService extends ChangeNotifier {
+  static const String _geminiLiveModel = 'gemini-3.1-flash-live-preview';
+  static const String _geminiLiveWsApiKey =
+      'wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent';
+  static const String _geminiLiveWsEphemeral =
+      'wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1alpha.GenerativeService.BidiGenerateContentConstrained';
+
   String get _transcriptStorageKey {
     final uid = FirebaseAuth.instance.currentUser?.uid ?? 'guest';
     return 'ayma.chat.transcript.$uid';
@@ -407,27 +413,35 @@ class AymaAudioService extends ChangeNotifier {
     _setState(SessionState.connecting);
     _sessionId = DateTime.now().millisecondsSinceEpoch.toString();
 
-    // Check for environment bypass first
-    debugPrint('DEBUG: Attempting connect. Provider: ${Env.liveProvider}, Env key length: ${Env.geminiApiKey.length}');
-    if (Env.liveProvider == 'gemini' && Env.geminiApiKey.isNotEmpty) {
-      debugPrint('DEBUG: Using Gemini API Key Bypass');
-      _providerApiKey = Env.geminiApiKey;
-      final bootstrap = await _bootstrapForProvider();
-      final setup = bootstrap['setup'] as Map<String, dynamic>?;
-      _systemPrompt = _extractSystemPrompt(setup);
-      if (setup == null) throw Exception('Bootstrap did not return a setup payload');
-      final wsUrl = bootstrap['websocket_url'] as String?;
-      if (wsUrl == null || wsUrl.isEmpty) throw Exception('Bootstrap did not return websocket_url');
-      await _client.connect(wsUrl, _providerApiKey!, setup);
-      return;
-    }
-
     if (!kIsWeb) {
       final permission = await Permission.microphone.request();
       if (!permission.isGranted) {
         _setState(SessionState.disconnected);
         throw Exception('Microphone permission denied');
       }
+    }
+
+    debugPrint('DEBUG: Attempting connect. Provider: ${Env.liveProvider}, Env key length: ${Env.geminiApiKey.length}');
+    if (Env.liveProvider == 'gemini' && Env.geminiApiKey.isNotEmpty) {
+      debugPrint('DEBUG: Using Gemini API Key Bypass');
+      _providerApiKey = Env.geminiApiKey;
+      Map<String, dynamic> bootstrap = const <String, dynamic>{};
+      try {
+        bootstrap =
+            await _bootstrapForProvider().timeout(const Duration(seconds: 4));
+      } catch (e) {
+        debugPrint('DEBUG: Gemini bootstrap unavailable, using local fallback setup: $e');
+      }
+      final bootstrapSetup = bootstrap['setup'] as Map<String, dynamic>?;
+      final setup =
+          bootstrapSetup ??
+          _localGeminiSetup(
+            model: (bootstrap['model'] as String?) ?? _geminiLiveModel,
+          );
+      _systemPrompt = _extractSystemPrompt(setup);
+      final wsUrl = _geminiLiveWsUrlForCredential(_providerApiKey!);
+      await _client.connect(wsUrl, _providerApiKey!, setup);
+      return;
     }
 
     final bootstrap = await _bootstrapForProvider();
@@ -915,6 +929,51 @@ class AymaAudioService extends ChangeNotifier {
         },
       },
       'tools': _openAiToolsFromGeminiSetup(setup),
+    };
+  }
+
+  String _geminiLiveWsUrlForCredential(String credential) {
+    return credential.startsWith('AIza')
+        ? _geminiLiveWsApiKey
+        : _geminiLiveWsEphemeral;
+  }
+
+  Map<String, dynamic> _localGeminiSetup({required String model}) {
+    return {
+      'model': 'models/$model',
+      'system_instruction': {
+        'parts': [
+          {
+            'text':
+                'You are Ayma, a warm and perceptive voice-first companion. Keep replies natural, concise, and conversational.',
+          },
+        ],
+      },
+      'generation_config': {
+        'response_modalities': ['AUDIO'],
+      },
+      'input_audio_transcription': {},
+      'tools': [
+        {
+          'functionDeclarations': [
+            {
+              'name': 'add_followup_question',
+              'description':
+                  'Save a concise follow-up question or topic to revisit later.',
+              'parameters': {
+                'type': 'OBJECT',
+                'properties': {
+                  'question': {
+                    'type': 'STRING',
+                    'description': 'The reminder question to save.',
+                  },
+                },
+                'required': ['question'],
+              },
+            },
+          ],
+        },
+      ],
     };
   }
 

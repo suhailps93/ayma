@@ -361,6 +361,16 @@ Thin-client architecture is the active rule. Fix the security issues below befor
 
 ---
 
+## Deferred Follow-Up
+
+- [ ] **Admin console deployment wiring** — The password-only `/admin` UI and backend endpoints are implemented locally, but production access is still blocked by backend environment/deployment work. Finish this later by:
+  set `ADMIN_PASSWORD` on the real backend that owns live Postgres data;
+  redeploy/restart that backend;
+  verify `/admin` works from signed-out and signed-in states;
+  optionally add a local-backend run path once a real `DATABASE_URL` is available for local testing.
+
+---
+
 ## Security Fixes Needed
 
 > Audited: 2026-06-20. Fix all Critical and High items before production launch.

@@ -289,6 +289,14 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
               subtitle: currentUser?.email ?? '',
               delay: 60,
             ),
+            const SizedBox(height: 2),
+            _Tile(
+              icon: Icons.admin_panel_settings_outlined,
+              title: 'Admin console',
+              subtitle: 'Password-protected God view across all stored user data',
+              onTap: () => context.push('/admin'),
+              delay: 80,
+            ),
 
             const SizedBox(height: 20),
 

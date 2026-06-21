@@ -11,6 +11,7 @@ import re
 
 def _install_test_stubs():
     os.environ.setdefault("GOOGLE_API_KEY", "test-key")
+    os.environ.setdefault("ADMIN_PASSWORD", "test-admin-pass")
 
     asyncpg = types.ModuleType("asyncpg")
 
@@ -198,6 +199,15 @@ def _parse_flutter_community_profiles():
     return profiles
 
 class BootstrapLogicTests(unittest.TestCase):
+    def test_require_admin_access_accepts_password(self):
+        allowed = bootstrap_main._require_admin_access("test-admin-pass")
+        self.assertTrue(allowed)
+
+    def test_require_admin_access_rejects_wrong_password(self):
+        with self.assertRaises(bootstrap_main.HTTPException) as ctx:
+            bootstrap_main._require_admin_access("wrong-pass")
+        self.assertEqual(ctx.exception.status_code, 401)
+
     def test_answered_keys_include_onboarding_backed_fields(self):
         profile = {
             "age": 28,

@@ -30,6 +30,7 @@ import asyncio
 import json
 import logging
 import os
+import secrets
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from contextlib import asynccontextmanager
@@ -135,6 +136,7 @@ def _is_quota_error(exc: Exception) -> bool:
 GOOGLE_API_KEY = _active_key()  # kept for bootstrap token response
 genai.configure(api_key=GOOGLE_API_KEY)
 _embedding_client = google_genai.Client(api_key=GOOGLE_API_KEY)
+ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", "").strip()
 
 # ── Rate limiting ─────────────────────────────────────────────────────────────
 limiter = Limiter(key_func=get_remote_address)
@@ -232,6 +234,39 @@ def verify_token(credentials: HTTPAuthorizationCredentials = Depends(security)) 
         return decoded["uid"]
     except Exception:
         raise HTTPException(status_code=401, detail="Invalid Firebase token")
+
+
+def _require_admin_access(admin_password: str | None) -> bool:
+    if not ADMIN_PASSWORD:
+        logger.error("Admin access attempted but ADMIN_PASSWORD is not configured.")
+        raise HTTPException(status_code=503, detail="Admin access not configured")
+    if not admin_password or not secrets.compare_digest(admin_password, ADMIN_PASSWORD):
+        raise HTTPException(status_code=401, detail="Invalid admin password")
+    return True
+
+
+def verify_admin(
+    admin_password: str | None = Header(default=None, alias="X-Admin-Password"),
+) -> bool:
+    return _require_admin_access(admin_password)
+
+
+def _serialize_value(value: Any) -> Any:
+    if isinstance(value, datetime):
+        return value.isoformat()
+    if isinstance(value, dict):
+        return {k: _serialize_value(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_serialize_value(v) for v in value]
+    if isinstance(value, tuple):
+        return [_serialize_value(v) for v in value]
+    if isinstance(value, (str, int, float, bool)) or value is None:
+        return value
+    return str(value)
+
+
+def _serialize_records(rows) -> list[dict]:
+    return [{k: _serialize_value(v) for k, v in dict(row).items()} for row in rows]
 
 # ── System prompt templates ───────────────────────────────────────────────────
 
@@ -827,6 +862,18 @@ For each prompt that received a real answer, capture the user's response as a si
 
 ---
 
+## Part 5: Public Profile Bio
+
+Write a `public_summary` — a 1-2 sentence bio that will appear on the user's PUBLIC dating profile, visible to other users.
+
+Rules for public_summary:
+- Write as a warm, third-person description that makes the person sound interesting and approachable
+- Focus on: who they are, what they do, where they live, their personality or values
+- NEVER include: substance use (drugs, alcohol habits), explicit hookup/sexual preferences, very personal relationship history, anything that would be overly intimate or off-putting if read by a stranger
+- Sensitive fields (diet restrictions, religion, substances) should only appear if they are clearly core to the person's identity AND framed positively (e.g. "passionate vegetarian chef" not "doesn't drink and smokes weed")
+- If in doubt whether something is appropriate for a public profile, leave it out
+- Aim for the tone of a good Hinge or Bumble bio — human, specific, inviting
+
 EXAMPLE OUTPUT (replace all values with real data — do not copy these strings):
 {{
   "wiki_updates": {{
@@ -1081,6 +1128,294 @@ async def post_turn(request: Request, body: PostTurnRequest, uid: str = Depends(
 @app.get("/health")
 async def health():
     return {"status": "ok"}
+
+
+# ── Admin Endpoints ───────────────────────────────────────────────────────────
+
+@app.get("/admin/users")
+async def admin_list_users(
+    query: str | None = None,
+    gender: str | None = None,
+    community_profile: str | None = None,
+    intent_type: str | None = None,
+    onboarding_complete: bool | None = None,
+    matching_paused: bool | None = None,
+    has_photos: bool | None = None,
+    has_matches: bool | None = None,
+    has_messages: bool | None = None,
+    min_age: int | None = None,
+    max_age: int | None = None,
+    limit: int = 100,
+    admin_ok: bool = Depends(verify_admin),
+):
+    del admin_ok
+    pool = app.state.pool
+    args: list[Any] = []
+    where: list[str] = []
+
+    def bind(value: Any) -> str:
+        args.append(value)
+        return f"${len(args)}"
+
+    if query:
+        token = bind(f"%{query.strip()}%")
+        where.append(
+            f"(u.id ILIKE {token} OR u.display_name ILIKE {token} OR u.profile_public ILIKE {token} OR u.location_region ILIKE {token})"
+        )
+    if gender:
+        where.append(f"u.gender = {bind(gender)}")
+    if community_profile:
+        where.append(f"u.community_profile = {bind(community_profile)}")
+    if intent_type:
+        where.append(f"COALESCE(u.matching_prefs->>'intent_type', '') = {bind(intent_type)}")
+    if onboarding_complete is not None:
+        where.append(f"u.onboarding_complete = {bind(onboarding_complete)}")
+    if matching_paused is not None:
+        where.append(f"u.matching_paused = {bind(matching_paused)}")
+    if min_age is not None:
+        where.append(f"u.age >= {bind(min_age)}")
+    if max_age is not None:
+        where.append(f"u.age <= {bind(max_age)}")
+    if has_photos is not None:
+        exists_clause = "EXISTS (SELECT 1 FROM user_media um WHERE um.user_id = u.id)"
+        where.append(exists_clause if has_photos else f"NOT {exists_clause}")
+    if has_matches is not None:
+        exists_clause = "EXISTS (SELECT 1 FROM matches mt WHERE mt.user_a = u.id OR mt.user_b = u.id)"
+        where.append(exists_clause if has_matches else f"NOT {exists_clause}")
+    if has_messages is not None:
+        exists_clause = "EXISTS (SELECT 1 FROM messages msg WHERE msg.from_user_id = u.id OR msg.to_user_id = u.id)"
+        where.append(exists_clause if has_messages else f"NOT {exists_clause}")
+
+    safe_limit = max(1, min(limit, 500))
+    sql = f"""
+        SELECT
+            u.id,
+            u.display_name,
+            u.age,
+            u.gender,
+            u.location_region,
+            u.community_profile,
+            u.onboarding_complete,
+            u.matching_paused,
+            u.profile_public,
+            u.updated_at,
+            COALESCE(u.matching_prefs->>'intent_type', '') AS intent_type,
+            (SELECT COUNT(*) FROM user_media um WHERE um.user_id = u.id) AS photo_count,
+            (SELECT COUNT(*) FROM user_memories mem WHERE mem.user_id = u.id) AS memory_count,
+            (SELECT COUNT(*) FROM matches mt WHERE mt.user_a = u.id OR mt.user_b = u.id) AS match_count,
+            (SELECT COUNT(*) FROM messages msg WHERE msg.from_user_id = u.id OR msg.to_user_id = u.id) AS message_count,
+            (SELECT COUNT(*) FROM notifications n WHERE n.user_id = u.id AND n.read = FALSE) AS unread_notifications
+        FROM users u
+        {"WHERE " + " AND ".join(where) if where else ""}
+        ORDER BY u.updated_at DESC, u.created_at DESC
+        LIMIT {safe_limit}
+    """
+
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(sql, *args)
+    return _serialize_records(rows)
+
+
+@app.get("/admin/users/{target_uid}")
+async def admin_get_user_detail(target_uid: str, admin_ok: bool = Depends(verify_admin)):
+    del admin_ok
+    pool = app.state.pool
+    async with pool.acquire() as conn:
+        user_row = await conn.fetchrow("SELECT * FROM users WHERE id = $1", target_uid)
+        if not user_row:
+            raise HTTPException(status_code=404, detail="User not found")
+
+        skills_rows = await conn.fetch(
+            "SELECT user_id, skill_id, name, content, enabled FROM user_skills WHERE user_id = $1 ORDER BY skill_id ASC",
+            target_uid,
+        )
+        questions_rows = await conn.fetch(
+            """
+            SELECT user_id, question_id, key, text, category, sort_order, answered, answered_at, is_followup
+            FROM user_questions
+            WHERE user_id = $1
+            ORDER BY answered ASC, is_followup ASC, sort_order ASC, question_id ASC
+            """,
+            target_uid,
+        )
+        memories_rows = await conn.fetch(
+            """
+            SELECT id, user_id, text, session_id, created_at
+            FROM user_memories
+            WHERE user_id = $1
+            ORDER BY created_at DESC, id DESC
+            """,
+            target_uid,
+        )
+        media_rows = await conn.fetch(
+            """
+            SELECT id, user_id, photo_url, caption, created_at
+            FROM user_media
+            WHERE user_id = $1
+            ORDER BY created_at DESC, id DESC
+            """,
+            target_uid,
+        )
+        notifications_rows = await conn.fetch(
+            """
+            SELECT id, user_id, type, title, body, meta, read, created_at
+            FROM notifications
+            WHERE user_id = $1
+            ORDER BY created_at DESC, id DESC
+            """,
+            target_uid,
+        )
+        messages_rows = await conn.fetch(
+            """
+            SELECT
+                m.id,
+                m.from_user_id,
+                m.to_user_id,
+                m.text,
+                m.read,
+                m.created_at,
+                CASE
+                    WHEN m.from_user_id = $1 THEN m.to_user_id
+                    ELSE m.from_user_id
+                END AS counterpart_user_id,
+                u.display_name AS counterpart_display_name
+            FROM messages m
+            LEFT JOIN users u
+                ON u.id = CASE WHEN m.from_user_id = $1 THEN m.to_user_id ELSE m.from_user_id END
+            WHERE m.from_user_id = $1 OR m.to_user_id = $1
+            ORDER BY m.created_at DESC, m.id DESC
+            """,
+            target_uid,
+        )
+        match_rows = await conn.fetch(
+            """
+            SELECT
+                m.*,
+                CASE WHEN m.user_a = $1 THEN m.user_b ELSE m.user_a END AS other_user_id,
+                u.display_name AS other_display_name
+            FROM matches m
+            LEFT JOIN users u
+                ON u.id = CASE WHEN m.user_a = $1 THEN m.user_b ELSE m.user_a END
+            WHERE m.user_a = $1 OR m.user_b = $1
+            ORDER BY m.updated_at DESC, m.created_at DESC, m.id DESC
+            """,
+            target_uid,
+        )
+
+        match_ids = [row["id"] for row in match_rows]
+        simulation_rows = []
+        if match_ids:
+            simulation_rows = await conn.fetch(
+                """
+                SELECT id, match_id, sender_uid, turn_index, message_text, created_at
+                FROM match_simulations
+                WHERE match_id = ANY($1::int[])
+                ORDER BY match_id ASC, turn_index ASC, created_at ASC
+                """,
+                match_ids,
+            )
+
+    simulations_by_match: dict[int, list[dict]] = {}
+    for row in simulation_rows:
+        data = {k: _serialize_value(v) for k, v in dict(row).items()}
+        simulations_by_match.setdefault(int(row["match_id"]), []).append(data)
+
+    serialized_matches = []
+    for row in match_rows:
+        record = {k: _serialize_value(v) for k, v in dict(row).items()}
+        record["simulation"] = simulations_by_match.get(int(row["id"]), [])
+        serialized_matches.append(record)
+
+    dm_threads: dict[str, dict[str, Any]] = {}
+    for row in messages_rows:
+        message = {k: _serialize_value(v) for k, v in dict(row).items()}
+        counterpart_id = str(message["counterpart_user_id"])
+        thread = dm_threads.setdefault(counterpart_id, {
+            "counterpart_user_id": counterpart_id,
+            "counterpart_display_name": message.get("counterpart_display_name") or "",
+            "messages": [],
+        })
+        thread["messages"].append(message)
+
+    return {
+        "user": {k: _serialize_value(v) for k, v in dict(user_row).items()},
+        "stats": {
+            "skills": len(skills_rows),
+            "questions": len(questions_rows),
+            "memories": len(memories_rows),
+            "media": len(media_rows),
+            "notifications": len(notifications_rows),
+            "messages": len(messages_rows),
+            "matches": len(match_rows),
+        },
+        "agent_data_notes": {
+            "full_agent_chat_transcripts_available": False,
+            "stored_agent_history_source": "user_memories stores post-turn conversation audit snapshots; raw_user_statements stores verbatim user lines; user_media stores uploaded photos",
+        },
+        "skills": _serialize_records(skills_rows),
+        "questions": _serialize_records(questions_rows),
+        "memories": _serialize_records(memories_rows),
+        "media": _serialize_records(media_rows),
+        "notifications": _serialize_records(notifications_rows),
+        "messages": _serialize_records(messages_rows),
+        "dm_threads": list(dm_threads.values()),
+        "matches": serialized_matches,
+    }
+
+# ── Wiki Correct Endpoint ──────────────────────────────────────────────────────
+
+_WIKI_SECTION_COLUMNS = {
+    "about_me": "wiki_about_me",
+    "context": "wiki_context",
+    "preferences": "wiki_preferences",
+    "matching": "wiki_matching",
+}
+
+class WikiCorrectBody(BaseModel):
+    section: str
+    feedback: str
+
+@app.post("/wiki/correct")
+async def wiki_correct(body: WikiCorrectBody, uid: str = Depends(verify_token)):
+    if body.section not in _WIKI_SECTION_COLUMNS:
+        raise HTTPException(status_code=400, detail=f"Invalid section. Must be one of: {', '.join(_WIKI_SECTION_COLUMNS)}")
+
+    column = _WIKI_SECTION_COLUMNS[body.section]
+    pool = app.state.pool
+
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(f"SELECT {column} FROM users WHERE id = $1", uid)
+        current_content = (row[column] if row and row[column] else "") if row else ""
+
+    prompt = (
+        f"You maintain this user's private profile wiki section. "
+        f"The user says their correction: '{body.feedback}'. "
+        f"Update the wiki section preserving existing accurate facts, removing/correcting what the user flagged. "
+        f"Return JSON: {{\"updated_wiki\": \"...\"}}. "
+        f"Current wiki:\n{current_content}"
+    )
+
+    try:
+        raw = await _gemini_call(
+            TEXT_MODEL, prompt,
+            generation_config={"response_mime_type": "application/json"},
+        )
+        payload = json.loads(raw)
+    except Exception as e:
+        logger.warning(f"[wiki/correct] Gemini call failed: {type(e).__name__}: {e}")
+        raise HTTPException(status_code=500, detail="Failed to process correction")
+
+    updated_wiki = payload.get("updated_wiki", current_content)
+
+    async with pool.acquire() as conn:
+        await conn.execute(
+            f"UPDATE users SET {column} = $1 WHERE id = $2",
+            updated_wiki, uid,
+        )
+
+    asyncio.create_task(_refresh_wiki_embedding(uid, app.state.pool))
+
+    return {"section": body.section, "content": updated_wiki}
 
 # ── Profile Endpoints ──────────────────────────────────────────────────────────
 

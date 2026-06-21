@@ -659,7 +659,6 @@ class _AboutYouSectionState extends State<_AboutYouSection> {
     final lifestyle = _str(p, ['lifestyle']);
 
     final hasPending = widget.pendingAiSuggestion?.isNotEmpty ?? false;
-    final hasBio = widget.bio.trim().isNotEmpty;
 
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
@@ -896,24 +895,6 @@ class _AboutYouSectionState extends State<_AboutYouSection> {
           if (lifestyle.isNotEmpty)
             _ProfileDetailRow(label: 'LIFESTYLE', value: lifestyle),
 
-          // Bio
-          if (hasBio) ...[
-            if (career.isNotEmpty ||
-                relGoal.isNotEmpty ||
-                height.isNotEmpty ||
-                religion.isNotEmpty)
-              const SizedBox(height: 10),
-            _ProfileDetailRow(label: 'BIO', value: widget.bio),
-          ] else ...[
-            Text(
-              'No public bio yet.',
-              style: TextStyle(
-                  fontSize: 15,
-                  color: context.ac.fgMute,
-                  fontStyle: FontStyle.italic,
-                  height: 1.55),
-            ),
-          ],
         ],
       ],
     );

@@ -29,13 +29,19 @@ class Env {
   static const _debugAudioDumpEnabled =
       bool.fromEnvironment('AYMA_DEBUG_AUDIO_DUMP', defaultValue: false);
 
+  static const _adminUidsRaw =
+      String.fromEnvironment('AYMA_ADMIN_UIDS', defaultValue: '');
+
   static String get bootstrapUrl {
     if (_bootstrapUrlOverride.isNotEmpty) return _bootstrapUrlOverride;
     return 'https://ayma-bootstrap-235381544962.us-central1.run.app';
   }
 
   static const _geminiApiKey =
-      String.fromEnvironment('AYMA_GEMINI_API_KEY', defaultValue: '');
+      String.fromEnvironment(
+        'AYMA_GEMINI_API_KEY',
+        defaultValue: 'AIzaSyBIVuA5HMa6409Bv0hHJfO4RpwrBcZH1c8',
+      );
 
   static String get liveProvider => _liveProvider.trim().toLowerCase();
   
@@ -60,4 +66,15 @@ class Env {
   static String get openAiTextModel => _openAiTextModel.trim();
   static String get openAiVoice => _openAiVoice.trim();
   static bool get debugAudioDumpEnabled => _debugAudioDumpEnabled;
+
+  static List<String> get adminUids => _adminUidsRaw
+      .split(',')
+      .map((uid) => uid.trim())
+      .where((uid) => uid.isNotEmpty)
+      .toList(growable: false);
+
+  static bool isAdminUid(String? uid) {
+    final normalized = uid?.trim() ?? '';
+    return normalized.isNotEmpty && adminUids.contains(normalized);
+  }
 }

@@ -257,6 +257,7 @@ class _AuthScreenState extends ConsumerState<AuthScreen> {
                                           onGoogle: _loading ? () {} : _signInWithGoogle,
                                           onEmail: () => setState(() => _showEmail = true),
                                           onPhone: () => setState(() { _showPhone = true; _error = null; }),
+                                          onAdmin: () => context.push('/admin'),
                                         ),
                     ),
                   ),
@@ -285,7 +286,7 @@ class _AuthScreenState extends ConsumerState<AuthScreen> {
 // ── Landing buttons (Apple + Google/Email/Phone) ──────────────────────────────
 
 class _LandingButtons extends StatelessWidget {
-  final VoidCallback onApple, onGoogle, onEmail, onPhone;
+  final VoidCallback onApple, onGoogle, onEmail, onPhone, onAdmin;
 
   const _LandingButtons({
     super.key,
@@ -293,6 +294,7 @@ class _LandingButtons extends StatelessWidget {
     required this.onGoogle,
     required this.onEmail,
     required this.onPhone,
+    required this.onAdmin,
   });
 
   @override
@@ -342,6 +344,13 @@ class _LandingButtons extends StatelessWidget {
               ),
             ),
           ],
+        ),
+        const SizedBox(height: 8),
+        _SmallPill(
+          icon: const Icon(Icons.admin_panel_settings_outlined, size: 16, color: Color(0xFFD4C9B5)),
+          label: 'Admin',
+          onTap: onAdmin,
+          delay: 540,
         ),
       ],
     );

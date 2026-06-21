@@ -83,6 +83,8 @@ PostgreSQL stores all application data. The backend connects via `asyncpg` using
 
 Apply schema (first time): `psql $DATABASE_URL -f schema.sql` (requires pgvector extension).
 
+For a user-centric breakdown of what is stored and how tables relate, see [`docs/database-user-data.md`](database-user-data.md).
+
 ---
 
 ## Repository Layout (complete)

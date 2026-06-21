@@ -423,6 +423,24 @@ class _YourStoryPane extends ConsumerWidget {
               label: 'WHO YOU ARE',
               content: i['about_me']?.toString() ?? '',
               updatedAt: i['about_me_updated_at']?.toString() ?? '',
+              onTap: () => showModalBottomSheet(
+                context: context,
+                isScrollControlled: true,
+                useSafeArea: true,
+                backgroundColor: context.ac.bgCard,
+                shape: const RoundedRectangleBorder(
+                  borderRadius:
+                      BorderRadius.vertical(top: Radius.circular(20)),
+                ),
+                builder: (_) => _WikiCorrectSheet(
+                  label: 'WHO YOU ARE',
+                  content: i['about_me']?.toString() ?? '',
+                  sectionKey: 'about_me',
+                  onCorrected: (corrected) async {
+                    ref.invalidate(insightsProvider);
+                  },
+                ),
+              ),
             )
                 .animate(delay: 40.ms)
                 .fadeIn(duration: 300.ms)
@@ -432,6 +450,24 @@ class _YourStoryPane extends ConsumerWidget {
               label: "WHAT YOU'RE LOOKING FOR",
               content: i['preferences']?.toString() ?? '',
               updatedAt: i['preferences_updated_at']?.toString() ?? '',
+              onTap: () => showModalBottomSheet(
+                context: context,
+                isScrollControlled: true,
+                useSafeArea: true,
+                backgroundColor: context.ac.bgCard,
+                shape: const RoundedRectangleBorder(
+                  borderRadius:
+                      BorderRadius.vertical(top: Radius.circular(20)),
+                ),
+                builder: (_) => _WikiCorrectSheet(
+                  label: "WHAT YOU'RE LOOKING FOR",
+                  content: i['preferences']?.toString() ?? '',
+                  sectionKey: 'preferences',
+                  onCorrected: (corrected) async {
+                    ref.invalidate(insightsProvider);
+                  },
+                ),
+              ),
             )
                 .animate(delay: 80.ms)
                 .fadeIn(duration: 300.ms)
@@ -441,6 +477,24 @@ class _YourStoryPane extends ConsumerWidget {
               label: 'YOUR LIFE RIGHT NOW',
               content: i['context']?.toString() ?? '',
               updatedAt: i['context_updated_at']?.toString() ?? '',
+              onTap: () => showModalBottomSheet(
+                context: context,
+                isScrollControlled: true,
+                useSafeArea: true,
+                backgroundColor: context.ac.bgCard,
+                shape: const RoundedRectangleBorder(
+                  borderRadius:
+                      BorderRadius.vertical(top: Radius.circular(20)),
+                ),
+                builder: (_) => _WikiCorrectSheet(
+                  label: 'YOUR LIFE RIGHT NOW',
+                  content: i['context']?.toString() ?? '',
+                  sectionKey: 'context',
+                  onCorrected: (corrected) async {
+                    ref.invalidate(insightsProvider);
+                  },
+                ),
+              ),
             )
                 .animate(delay: 120.ms)
                 .fadeIn(duration: 300.ms)
@@ -450,6 +504,24 @@ class _YourStoryPane extends ConsumerWidget {
               label: 'FOR MATCHING',
               content: i['matching']?.toString() ?? '',
               updatedAt: i['matching_updated_at']?.toString() ?? '',
+              onTap: () => showModalBottomSheet(
+                context: context,
+                isScrollControlled: true,
+                useSafeArea: true,
+                backgroundColor: context.ac.bgCard,
+                shape: const RoundedRectangleBorder(
+                  borderRadius:
+                      BorderRadius.vertical(top: Radius.circular(20)),
+                ),
+                builder: (_) => _WikiCorrectSheet(
+                  label: 'FOR MATCHING',
+                  content: i['matching']?.toString() ?? '',
+                  sectionKey: 'matching',
+                  onCorrected: (corrected) async {
+                    ref.invalidate(insightsProvider);
+                  },
+                ),
+              ),
             )
                 .animate(delay: 160.ms)
                 .fadeIn(duration: 300.ms)
@@ -515,10 +587,12 @@ class _StoryCard extends StatefulWidget {
     required this.label,
     required this.content,
     required this.updatedAt,
+    this.onTap,
   });
   final String label;
   final String content;
   final String updatedAt;
+  final VoidCallback? onTap;
 
   @override
   State<_StoryCard> createState() => _StoryCardState();
@@ -532,7 +606,7 @@ class _StoryCardState extends State<_StoryCard> {
     final trimmed = widget.content.trim();
 
     return GestureDetector(
-      onTap: null,
+      onTap: widget.onTap,
       child: Container(
         padding: const EdgeInsets.all(18),
         decoration: BoxDecoration(
@@ -572,10 +646,9 @@ class _StoryCardState extends State<_StoryCard> {
               const SizedBox(height: 12),
               Row(
                 children: [
-                  Icon(Icons.check_box_outline_blank_rounded,
-                      size: 13, color: context.ac.fgMute),
-                  const SizedBox(width: 6),
-                  Text("Disagree? Tell me in our next talk.",
+                  Icon(Icons.edit_outlined, size: 12, color: context.ac.fgMute),
+                  const SizedBox(width: 5),
+                  Text('Tap to correct',
                       style: AymaFonts.mono(size: 9, color: context.ac.fgMute)),
                 ],
               ),
@@ -1133,6 +1206,206 @@ class _EditFormView extends StatelessWidget {
 }
 
 // ─── Helper widgets ───────────────────────────────────────────────────────────
+
+// ─── Wiki Correct Dialog ──────────────────────────────────────────────────────
+
+class _WikiCorrectSheet extends StatefulWidget {
+  const _WikiCorrectSheet({
+    required this.label,
+    required this.content,
+    required this.sectionKey,
+    required this.onCorrected,
+  });
+  final String label;
+  final String content;
+  final String sectionKey;
+  final Future<void> Function(String correctedContent) onCorrected;
+
+  @override
+  State<_WikiCorrectSheet> createState() => _WikiCorrectSheetState();
+}
+
+class _WikiCorrectSheetState extends State<_WikiCorrectSheet> {
+  late final TextEditingController _feedbackCtrl;
+  bool _loading = false;
+  String? _correctedContent;
+  String? _error;
+
+  @override
+  void initState() {
+    super.initState();
+    _feedbackCtrl = TextEditingController();
+  }
+
+  @override
+  void dispose() {
+    _feedbackCtrl.dispose();
+    super.dispose();
+  }
+
+  Future<void> _send() async {
+    final fb = _feedbackCtrl.text.trim();
+    if (fb.isEmpty) return;
+    setState(() {
+      _loading = true;
+      _error = null;
+    });
+    try {
+      final result = await ApiService.correctWikiSection(
+        section: widget.sectionKey,
+        feedback: fb,
+      );
+      final corrected = result['content']?.toString() ?? '';
+      setState(() {
+        _correctedContent = corrected;
+        _loading = false;
+      });
+      await widget.onCorrected(corrected);
+      await Future.delayed(const Duration(milliseconds: 800));
+      if (mounted) Navigator.of(context).pop();
+    } catch (e) {
+      if (mounted) {
+        setState(() {
+          _error = e.toString();
+          _loading = false;
+        });
+      }
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final displayContent = _correctedContent ?? widget.content;
+    return Padding(
+      padding: EdgeInsets.only(bottom: MediaQuery.of(context).viewInsets.bottom),
+      child: Container(
+        padding: const EdgeInsets.fromLTRB(20, 20, 20, 24),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Center(
+              child: Container(
+                width: 36,
+                height: 4,
+                margin: const EdgeInsets.only(bottom: 16),
+                decoration: BoxDecoration(
+                  color: context.ac.lineSoft,
+                  borderRadius: BorderRadius.circular(2),
+                ),
+              ),
+            ),
+            Row(
+              children: [
+                Expanded(
+                  child: Text(
+                    widget.label,
+                    style: AymaFonts.mono(size: 9, color: context.ac.fgMute),
+                  ),
+                ),
+                IconButton(
+                  icon: Icon(Icons.close, size: 18, color: context.ac.fgMute),
+                  onPressed: () => Navigator.of(context).pop(),
+                  padding: EdgeInsets.zero,
+                  constraints: const BoxConstraints(),
+                ),
+              ],
+            ),
+            const SizedBox(height: 12),
+            if (_correctedContent != null)
+              Container(
+                margin: const EdgeInsets.only(bottom: 8),
+                padding:
+                    const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+                decoration: BoxDecoration(
+                  color: Colors.green.withValues(alpha: 0.15),
+                  borderRadius: BorderRadius.circular(8),
+                ),
+                child: Text(
+                  'Corrected ✓',
+                  style: AymaFonts.mono(size: 9, color: Colors.green),
+                ),
+              ),
+            ConstrainedBox(
+              constraints: const BoxConstraints(maxHeight: 160),
+              child: SingleChildScrollView(
+                child: Text(
+                  displayContent.isEmpty ? 'Nothing here yet.' : displayContent,
+                  style: AymaFonts.serif(size: 15, color: context.ac.fg),
+                ),
+              ),
+            ),
+            const SizedBox(height: 14),
+            Divider(
+              color: context.ac.lineSoft.withValues(alpha: 0.6),
+              thickness: 0.5,
+              height: 1,
+            ),
+            const SizedBox(height: 12),
+            TextField(
+              controller: _feedbackCtrl,
+              enabled: !_loading && _correctedContent == null,
+              autofocus: true,
+              style: AymaFonts.sans(size: 14, color: context.ac.fg),
+              decoration: InputDecoration(
+                hintText: 'What needs to change?',
+                hintStyle: AymaFonts.sans(size: 14, color: context.ac.fgMute),
+                border: InputBorder.none,
+                isDense: true,
+                contentPadding: EdgeInsets.zero,
+              ),
+              maxLines: null,
+              textInputAction: TextInputAction.send,
+              onSubmitted: (_) => _send(),
+            ),
+            const SizedBox(height: 14),
+            if (_error != null)
+              Padding(
+                padding: const EdgeInsets.only(bottom: 8),
+                child: Text(
+                  _error!,
+                  style: AymaFonts.mono(size: 9, color: Colors.red),
+                ),
+              ),
+            Align(
+              alignment: Alignment.centerRight,
+              child: _loading
+                  ? SizedBox(
+                      width: 20,
+                      height: 20,
+                      child: CircularProgressIndicator(
+                        strokeWidth: 2,
+                        color: context.ac.accent,
+                      ),
+                    )
+                  : GestureDetector(
+                      onTap: _correctedContent == null ? _send : null,
+                      child: Container(
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: 16,
+                          vertical: 8,
+                        ),
+                        decoration: BoxDecoration(
+                          color: context.ac.accent.withValues(alpha: 0.15),
+                          borderRadius: BorderRadius.circular(8),
+                        ),
+                        child: Text(
+                          'Send',
+                          style: AymaFonts.sans(
+                            size: 13,
+                            color: context.ac.accent,
+                            weight: FontWeight.w600,
+                          ),
+                        ),
+                      ),
+                    ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
 
 class _FieldLabel extends StatelessWidget {
   const _FieldLabel(this.label);

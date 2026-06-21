@@ -1,8 +1,9 @@
 // Web Audio API mic capture and PCM playback for Flutter Web voice sessions.
 // ignore_for_file: avoid_web_libraries_in_flutter, undefined_class, undefined_function, deprecated_member_use
 import 'dart:html' as html;
-import 'dart:js_util' as js_util;
 import 'dart:typed_data';
+
+import 'package:js/js_util.dart' as js_util;
 
 class WebMicCapture {
   dynamic _ctx;

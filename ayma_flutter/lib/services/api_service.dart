@@ -23,24 +23,33 @@ class ApiService {
   static Future<String?> _idToken() async =>
       FirebaseAuth.instance.currentUser?.getIdToken();
 
-  static Future<http.Response> _get(String path) async {
+  static Future<http.Response> _get(
+    String path, {
+    Map<String, String>? extraHeaders,
+  }) async {
     final token = await _idToken();
     return http.get(
       Uri.parse('${Env.bootstrapUrl}$path'),
       headers: {
         'Content-Type': 'application/json',
         if (token != null) 'Authorization': 'Bearer $token',
+        ...?extraHeaders,
       },
     );
   }
 
-  static Future<http.Response> _post(String path, Map<String, dynamic> body) async {
+  static Future<http.Response> _post(
+    String path,
+    Map<String, dynamic> body, {
+    Map<String, String>? extraHeaders,
+  }) async {
     final token = await _idToken();
     return http.post(
       Uri.parse('${Env.bootstrapUrl}$path'),
       headers: {
         'Content-Type': 'application/json',
         if (token != null) 'Authorization': 'Bearer $token',
+        ...?extraHeaders,
       },
       body: jsonEncode(body),
     );
@@ -133,6 +142,70 @@ class ApiService {
       } catch (_) {}
       await Future.delayed(const Duration(seconds: 2));
     }
+  }
+
+  // ── Admin ──────────────────────────────────────────────────────────────────
+
+  static Future<List<Map<String, dynamic>>> getAdminUsers({
+    required String adminPassword,
+    String query = '',
+    String? gender,
+    String? communityProfile,
+    String? intentType,
+    bool? onboardingComplete,
+    bool? matchingPaused,
+    bool? hasPhotos,
+    bool? hasMatches,
+    bool? hasMessages,
+    int? minAge,
+    int? maxAge,
+    int limit = 100,
+  }) async {
+    final qp = <String, String>{
+      if (query.trim().isNotEmpty) 'query': query.trim(),
+      if ((gender ?? '').trim().isNotEmpty) 'gender': gender!.trim(),
+      if ((communityProfile ?? '').trim().isNotEmpty)
+        'community_profile': communityProfile!.trim(),
+      if ((intentType ?? '').trim().isNotEmpty) 'intent_type': intentType!.trim(),
+      if (onboardingComplete != null) 'onboarding_complete': '$onboardingComplete',
+      if (matchingPaused != null) 'matching_paused': '$matchingPaused',
+      if (hasPhotos != null) 'has_photos': '$hasPhotos',
+      if (hasMatches != null) 'has_matches': '$hasMatches',
+      if (hasMessages != null) 'has_messages': '$hasMessages',
+      if (minAge != null) 'min_age': '$minAge',
+      if (maxAge != null) 'max_age': '$maxAge',
+      'limit': '$limit',
+    };
+    final uri = Uri.parse('${Env.bootstrapUrl}/admin/users')
+        .replace(queryParameters: qp);
+    final token = await _idToken();
+    final response = await http.get(
+      uri,
+      headers: {
+        'Content-Type': 'application/json',
+        if (token != null) 'Authorization': 'Bearer $token',
+        'X-Admin-Password': adminPassword,
+      },
+    );
+    if (response.statusCode != 200) {
+      throw Exception('Admin users failed: ${response.statusCode} ${response.body}');
+    }
+    final data = jsonDecode(response.body) as List<dynamic>;
+    return data.cast<Map<String, dynamic>>();
+  }
+
+  static Future<Map<String, dynamic>> getAdminUserDetail({
+    required String userId,
+    required String adminPassword,
+  }) async {
+    final response = await _get(
+      '/admin/users/$userId',
+      extraHeaders: {'X-Admin-Password': adminPassword},
+    );
+    if (response.statusCode != 200) {
+      throw Exception('Admin user detail failed: ${response.statusCode} ${response.body}');
+    }
+    return jsonDecode(response.body) as Map<String, dynamic>;
   }
 
   static Map<String, String> deriveVoiceDefaults({
@@ -230,6 +303,20 @@ class ApiService {
       'profile_field_visibility': {},
       'raw_user_statements': [],
     });
+  }
+
+  static Future<Map<String, dynamic>> correctWikiSection({
+    required String section,
+    required String feedback,
+  }) async {
+    final response = await _post('/wiki/correct', {
+      'section': section,
+      'feedback': feedback,
+    });
+    if (response.statusCode != 200) {
+      throw Exception('Failed to correct wiki: ${response.statusCode}');
+    }
+    return jsonDecode(response.body) as Map<String, dynamic>;
   }
 
   // ── Account Deletion ──────────────────────────────────────────────────────
@@ -1462,7 +1549,10 @@ class ApiService {
     required String photoUrl,
     String caption = '',
   }) async {
-    await _post('/media', {'photo_url': photoUrl, 'caption': caption});
+    final response = await _post('/media', {'photo_url': photoUrl, 'caption': caption});
+    if (response.statusCode != 200 && response.statusCode != 201) {
+      throw Exception('Failed to save media record (${response.statusCode}): ${response.body}');
+    }
   }
 
   static Future<void> deleteMediaByUrl(String photoUrl) async {
