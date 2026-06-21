@@ -2,8 +2,6 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:math' as math;
-import 'dart:typed_data';
-
 import 'package:flutter/foundation.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:http/http.dart' as http;
@@ -18,6 +16,7 @@ import 'backend_service.dart';
 import 'api_service.dart';
 import 'gemini_live_client.dart';
 import 'openai_realtime_client.dart';
+import 'package:audio_session/audio_session.dart';
 
 // ignore_for_file: deprecated_member_use
 
@@ -86,6 +85,7 @@ class AymaAudioService extends ChangeNotifier {
       Env.liveProvider == 'gemini' ? GeminiLiveClient() : OpenAiRealtimeClient();
   final _recorder = AudioRecorderService();
   final _streamer = AudioStreamerService();
+  final _vad = ClientVoiceActivityDetector(rmsThreshold: 0.018);
 
   final List<StreamSubscription<dynamic>> _subs = [];
 
@@ -143,13 +143,13 @@ class AymaAudioService extends ChangeNotifier {
   bool _sttAvailable = false;
   bool _wakeWordListening = false;
 
+  bool _userInitiatedDisconnect = true;
+  int _reconnectAttempts = 0;
+  Timer? _reconnectTimer;
+
   Future<void>? _connectFuture;
 
   DateTime _lastMeterUiUpdate = DateTime.fromMillisecondsSinceEpoch(0);
-
-  final BytesBuilder _pendingMicAudio = BytesBuilder(copy: false);
-  Timer? _micFlushTimer;
-  static const _micFlushInterval = Duration(milliseconds: 120);
 
   AymaAudioService() {
     _wireClientStreams();
@@ -265,13 +265,19 @@ class AymaAudioService extends ChangeNotifier {
     }));
 
     _subs.add(_client.disconnectedStream.listen((_) {
+      _vad.reset();
       _clearPendingMicAudio();
       _talkHoldoffTimer?.cancel();
       _talkHoldoffTimer = null;
       _userTalking = false;
       _pendingTurnUser = '';
       _pendingTurnModel = '';
-      _setState(SessionState.disconnected);
+      
+      if (!_userInitiatedDisconnect) {
+        _handleUnexpectedDisconnect();
+      } else {
+        _setState(SessionState.disconnected);
+      }
     }));
   }
 
@@ -279,17 +285,61 @@ class AymaAudioService extends ChangeNotifier {
 
   void _wireRecorderStreams() {
     _subs.add(_recorder.pcmStream.listen((pcm16) {
+      if (_muted || !_client.isConnected || _state == SessionState.disconnected) {
+        _vad.reset();
+        _rawInputVolume = 0;
+        _notifyMetersThrottled();
+        return;
+      }
+
+      final wasSpeechActive = _vad.isSpeechActive;
+      final isSpeechActive = _vad.processFrame(pcm16);
       _rawInputVolume = _pcmRms(pcm16);
-      if (!_muted) _bufferAudio(pcm16);
+
+      if (isSpeechActive) {
+        if (!wasSpeechActive) {
+          debugPrint('DEBUG: VAD speech active started. Flushing pre-buffer.');
+          if (_state == SessionState.speaking) {
+            debugPrint('DEBUG: Clean Interruption. Stopping local playback immediately.');
+            _outputDecayTimer?.cancel();
+            _outputDecayTimer = null;
+            _audioBytesPerTurn = 0;
+            _streamer.stop();
+            _client.interrupt();
+          }
+
+          final preBuffer = _vad.getAndClearPreBuffer();
+          for (final prevPcm in preBuffer) {
+            _bufferAudio(prevPcm);
+          }
+        }
+        _bufferAudio(pcm16);
+
+        if (!_userTalking) {
+          _userTalking = true;
+          _notifyMetersThrottled();
+        }
+        _talkHoldoffTimer?.cancel();
+        _talkHoldoffTimer = Timer(const Duration(milliseconds: 1200), () {
+          _userTalking = false;
+          _notifyMetersThrottled();
+        });
+      } else {
+        if (wasSpeechActive) {
+          debugPrint('DEBUG: VAD speech inactive. Paused streaming.');
+          _userTalking = false;
+          _notifyMetersThrottled();
+        }
+      }
+
       _notifyMetersThrottled();
     }));
 
     _subs.add(_recorder.volumeStream.listen((vol) {
       _inputVolume = vol;
-      // EMA smoothing for visual amplitude only — VAD is driven by transcript events
+      // EMA smoothing for visual amplitude only
       final alpha = vol > _smoothedInputVol ? 0.35 : 0.15;
       _smoothedInputVol = _smoothedInputVol * (1 - alpha) + vol * alpha;
-      _rawInputVolume = _smoothedInputVol;
       _notifyMetersThrottled();
     }));
   }
@@ -304,26 +354,14 @@ class AymaAudioService extends ChangeNotifier {
     // to detect when the user interrupts the model.
     // We rely on client-side AEC (configured in web_audio_impl.dart and 
     // audio_recorder_service.dart) to filter out the model's own voice.
-    
-    _pendingMicAudio.add(pcm);
-    _micFlushTimer ??= Timer(_micFlushInterval, _flushBufferedAudio);
-  }
-
-  void _flushBufferedAudio() {
-    _micFlushTimer = null;
-    if (_pendingMicAudio.length == 0) return;
-    if (!_client.isConnected || _state == SessionState.disconnected || _muted) {
-      _clearPendingMicAudio();
-      return;
-    }
-    final pcm = _pendingMicAudio.takeBytes();
+    //
+    // We stream the 40ms PCM frames immediately to minimize latency, rather
+    // than aggregating/buffering them locally.
     _sendAudioToClient(pcm);
   }
 
   void _clearPendingMicAudio() {
-    _micFlushTimer?.cancel();
-    _micFlushTimer = null;
-    if (_pendingMicAudio.length > 0) _pendingMicAudio.clear();
+    // No-op since we stream audio immediately now.
   }
 
   void _sendAudioToClient(Uint8List pcm) {
@@ -391,6 +429,12 @@ class AymaAudioService extends ChangeNotifier {
   // ── Connection lifecycle ─────────────────────────────────────────────────────
 
   Future<void> connect({bool userInitiated = false}) async {
+    if (userInitiated) {
+      _userInitiatedDisconnect = false;
+      _reconnectAttempts = 0;
+      _reconnectTimer?.cancel();
+      _reconnectTimer = null;
+    }
     if (_connectFuture != null) {
       await _connectFuture;
       return;
@@ -418,6 +462,28 @@ class AymaAudioService extends ChangeNotifier {
       if (!permission.isGranted) {
         _setState(SessionState.disconnected);
         throw Exception('Microphone permission denied');
+      }
+
+      try {
+        debugPrint('DEBUG: Configuring voice audio session.');
+        final session = await AudioSession.instance;
+        await session.configure(AudioSessionConfiguration(
+          avAudioSessionCategory: AVAudioSessionCategory.playAndRecord,
+          avAudioSessionCategoryOptions: AVAudioSessionCategoryOptions.allowBluetooth |
+              AVAudioSessionCategoryOptions.defaultToSpeaker,
+          avAudioSessionMode: AVAudioSessionMode.voiceChat,
+          avAudioSessionRouteSharingPolicy: AVAudioSessionRouteSharingPolicy.defaultPolicy,
+          avAudioSessionSetActiveOptions: AVAudioSessionSetActiveOptions.none,
+          androidAudioAttributes: const AndroidAudioAttributes(
+            contentType: AndroidAudioContentType.speech,
+            usage: AndroidAudioUsage.voiceCommunication,
+          ),
+          androidAudioFocusGainType: AndroidAudioFocusGainType.gainTransientMayDuck,
+          androidWillPauseWhenDucked: true,
+        ));
+        await session.setActive(true);
+      } catch (e) {
+        debugPrint('DEBUG: AudioSession configuration failed: $e');
       }
     }
 
@@ -489,11 +555,39 @@ class AymaAudioService extends ChangeNotifier {
   }
 
   void disconnect({bool notify = true}) {
+    _userInitiatedDisconnect = true;
+    _reconnectAttempts = 0;
+    _reconnectTimer?.cancel();
+    _reconnectTimer = null;
     _disconnectTransport();
     _clearPendingMicAudio();
     _pendingTurnUser = '';
     _pendingTurnModel = '';
     _setState(SessionState.disconnected, notify: notify);
+  }
+
+  void _handleUnexpectedDisconnect() {
+    if (_userInitiatedDisconnect) return;
+    if (_reconnectAttempts >= 5) {
+      debugPrint('DEBUG: Max reconnect attempts reached. Giving up.');
+      _setState(SessionState.disconnected);
+      return;
+    }
+
+    _reconnectAttempts++;
+    final backoffMs = math.pow(2, _reconnectAttempts) * 500; // 1s, 2s, 4s, 8s, 16s...
+    debugPrint('DEBUG: Unexpected disconnect. Reconnecting in ${backoffMs}ms (attempt $_reconnectAttempts/5)...');
+
+    _reconnectTimer?.cancel();
+    _reconnectTimer = Timer(Duration(milliseconds: backoffMs.toInt()), () async {
+      try {
+        await connect();
+        _reconnectAttempts = 0;
+      } catch (e) {
+        debugPrint('DEBUG: Reconnect attempt $_reconnectAttempts failed: $e');
+        _handleUnexpectedDisconnect();
+      }
+    });
   }
 
   void _disconnectTransport() {
@@ -1153,7 +1247,6 @@ class AymaAudioService extends ChangeNotifier {
   void dispose() {
     stopWakeWordListening();
     _speechToText.stop();
-    _micFlushTimer?.cancel();
     _persistDebounce?.cancel();
     _talkHoldoffTimer?.cancel();
     _outputDecayTimer?.cancel();
