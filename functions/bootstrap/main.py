@@ -687,7 +687,14 @@ async def bootstrap(request: Request, uid: str = Depends(verify_token)):
         pending_questions = [dict(r) for r in questions_rows]
 
     system_prompt = _build_system_prompt(profile, skills, pending_questions)
-    voice = profile.get("voice_preference") or "Charon"
+    voice_pref = (profile.get("voice_preference") or "").strip()
+    if voice_pref.lower() in ("march", "ash", "cove", "ember", "breeze", "fenrir"):
+        voice = "Fenrir"
+    elif voice_pref.lower() in ("puck", "kore", "aoede"):
+        gemini_names = {"puck": "Puck", "kore": "Kore", "aoede": "Aoede"}
+        voice = gemini_names[voice_pref.lower()]
+    else:
+        voice = "Charon"
 
     setup = {
         "model": f"models/{LIVE_MODEL}",

@@ -4,6 +4,7 @@ import 'package:flutter_animate/flutter_animate.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
+import '../../env.dart';
 import '../../providers/providers.dart';
 import '../../services/api_service.dart';
 import '../../theme.dart';
@@ -26,11 +27,15 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
   String? _voiceName;
   final TextEditingController _accentCtrl = TextEditingController();
 
-  static const Map<String, List<String>> _voicesByGender =
-      <String, List<String>>{
-    'female': <String>['Charon', 'Linden', 'Harbor'],
-    'male': <String>['March', 'Ash'],
-  };
+  Map<String, List<String>> get _voicesByGender => Env.liveProvider == 'gemini'
+      ? const {
+          'female': ['Charon', 'Puck', 'Kore', 'Aoede'],
+          'male': ['Fenrir'],
+        }
+      : const {
+          'female': ['Linden', 'Harbor'],
+          'male': ['March', 'Ash'],
+        };
 
   @override
   void dispose() {
@@ -257,7 +262,8 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
           ? profile.voicePreference
           : 'Charon';
       _voiceGender ??= (profile.voicePreference.toLowerCase() == 'march' ||
-              profile.voicePreference.toLowerCase() == 'ash')
+              profile.voicePreference.toLowerCase() == 'ash' ||
+              profile.voicePreference.toLowerCase() == 'fenrir')
           ? 'male'
           : 'female';
     }

@@ -285,60 +285,71 @@ class _OnboardingScreenState extends ConsumerState<OnboardingScreen> {
     }
 
     WidgetsBinding.instance.addPostFrameCallback((_) async {
-      // Async fetch to verify latest backend values
-      final alreadySeen = await ref.read(preboardingSeenProvider.future);
-      final latestProfile = await ref.read(profileProvider.future);
-      if (!mounted) return;
+      try {
+        // Async fetch to verify latest backend values
+        final alreadySeen = await ref.read(preboardingSeenProvider.future);
+        final latestProfile = await ref.read(profileProvider.future);
+        if (!mounted) return;
 
-      if (latestProfile != null && latestProfile.onboardingComplete) {
-        if (mounted) context.go('/chat');
-        return;
-      }
-
-      setState(() {
-        if (latestProfile != null) {
-          if (_nameCtrl.text.isEmpty && latestProfile.displayName.isNotEmpty) {
-            _nameCtrl.text = latestProfile.displayName;
-          }
-          _gender ??= (latestProfile.gender?.isNotEmpty == true ? latestProfile.gender : null);
-          if (latestProfile.age != null) {
-            _age = latestProfile.age!;
-          }
-          final prefs = latestProfile.matchingPrefs;
-          _interestedIn ??= prefs['interested_in'] as String?;
-          if (prefs.containsKey('age_min')) {
-            _minAge = prefs['age_min'] as int;
-          }
-          if (prefs.containsKey('age_max')) {
-            _maxAge = prefs['age_max'] as int;
-          }
-          if (_locationCtrl.text.isEmpty && latestProfile.locationRegion != null && latestProfile.locationRegion!.isNotEmpty) {
-            _setLocationText(latestProfile.locationRegion!, updateController: true);
-          }
-          if (_communityProfile == null && latestProfile.communityProfile.isNotEmpty) {
-            _communityProfile = CommunityProfiles.forId(latestProfile.communityProfile);
-          }
+        if (latestProfile != null && latestProfile.onboardingComplete) {
+          if (mounted) context.go('/chat');
+          return;
         }
 
-        if (alreadySeen && _step == 0) {
-          int nextStep = 1;
+        setState(() {
           if (latestProfile != null) {
-            final hasCommunity = latestProfile.communityProfile.isNotEmpty && latestProfile.communityProfile != 'dating_standard';
-            final hasAboutYou = latestProfile.displayName.isNotEmpty && latestProfile.gender != null;
-            final hasPrefs = (latestProfile.matchingPrefs['interested_in'] as String?)?.isNotEmpty == true;
-
-            if (hasAboutYou && hasPrefs) {
-              nextStep = 4;
-            } else if (hasAboutYou) {
-              nextStep = 3;
-            } else if (hasCommunity) {
-              nextStep = 2;
+            if (_nameCtrl.text.isEmpty && latestProfile.displayName.isNotEmpty) {
+              _nameCtrl.text = latestProfile.displayName;
+            }
+            _gender ??= (latestProfile.gender?.isNotEmpty == true ? latestProfile.gender : null);
+            if (latestProfile.age != null) {
+              _age = latestProfile.age!;
+            }
+            final prefs = latestProfile.matchingPrefs;
+            _interestedIn ??= prefs['interested_in'] as String?;
+            if (prefs.containsKey('age_min')) {
+              _minAge = prefs['age_min'] as int;
+            }
+            if (prefs.containsKey('age_max')) {
+              _maxAge = prefs['age_max'] as int;
+            }
+            if (_locationCtrl.text.isEmpty && latestProfile.locationRegion != null && latestProfile.locationRegion!.isNotEmpty) {
+              _setLocationText(latestProfile.locationRegion!, updateController: true);
+            }
+            if (_communityProfile == null && latestProfile.communityProfile.isNotEmpty) {
+              _communityProfile = CommunityProfiles.forId(latestProfile.communityProfile);
             }
           }
-          _step = nextStep;
+        });
+
+        setState(() {
+          if (alreadySeen && _step == 0) {
+            int nextStep = 1;
+            if (latestProfile != null) {
+              final hasCommunity = latestProfile.communityProfile.isNotEmpty && latestProfile.communityProfile != 'dating_standard';
+              final hasAboutYou = latestProfile.displayName.isNotEmpty && latestProfile.gender != null;
+              final hasPrefs = (latestProfile.matchingPrefs['interested_in'] as String?)?.isNotEmpty == true;
+
+              if (hasAboutYou && hasPrefs) {
+                nextStep = 4;
+              } else if (hasAboutYou) {
+                nextStep = 3;
+              } else if (hasCommunity) {
+                nextStep = 2;
+              }
+            }
+            _step = nextStep;
+          }
+        });
+        unawaited(ApiService.markPreboardingSeen());
+      } catch (e) {
+        debugPrint('DEBUG: Error loading onboarding values: $e');
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(content: Text('Failed to load profile details: $e')),
+          );
         }
-      });
-      unawaited(ApiService.markPreboardingSeen());
+      }
     });
   }
 
