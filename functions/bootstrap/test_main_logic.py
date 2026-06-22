@@ -53,7 +53,13 @@ def _install_test_stubs():
             return types.SimpleNamespace(text="{}")
 
     genai.GenerativeModel = _DummyGenerativeModel
-    google_pkg = types.ModuleType("google")
+    
+    # Preserve the existing google module if already loaded (e.g. for protobuf/other subpackages)
+    if "google" in sys.modules:
+        google_pkg = sys.modules["google"]
+    else:
+        google_pkg = types.ModuleType("google")
+        
     google_pkg.generativeai = genai
     google_genai = types.ModuleType("google.genai")
 

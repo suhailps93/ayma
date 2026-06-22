@@ -13,6 +13,7 @@ import '../../theme.dart';
 import '../../widgets/ayma_button.dart';
 import '../../widgets/ayma_text_field.dart';
 import '../../widgets/public_profile_view.dart';
+import 'dart:ui';
 
 // ─── Top-level helpers ────────────────────────────────────────────────────────
 
@@ -38,19 +39,6 @@ String _cityOnly(String region) {
   return region.split(',').first.trim();
 }
 
-String _relativeDate(String isoDate) {
-  if (isoDate.isEmpty) return '';
-  try {
-    final dt = DateTime.parse(isoDate);
-    final diff = DateTime.now().difference(dt);
-    if (diff.inDays == 0) return 'Updated today';
-    if (diff.inDays == 1) return 'Updated yesterday';
-    if (diff.inDays < 7) return 'Updated ${diff.inDays}d ago';
-    return 'Updated $isoDate';
-  } catch (_) {
-    return 'Updated $isoDate';
-  }
-}
 
 // ─── ProfileScreen ────────────────────────────────────────────────────────────
 
@@ -382,33 +370,36 @@ class _TopTabs extends StatelessWidget {
   }
 }
 
-// ─── Tab 0: Private Profile (wiki) ───────────────────────────────────────────
+// ─── Tab 1: Private Profile (wiki) ───────────────────────────────────────────
 
 class _YourStoryPane extends ConsumerWidget {
   const _YourStoryPane({required this.profile});
+
   final UserProfile profile;
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final insightsAsync = ref.watch(insightsProvider);
-
     return insightsAsync.when(
       loading: () => Center(
         child: CircularProgressIndicator(
-            strokeWidth: 1.5, color: context.ac.accent),
+          strokeWidth: 1.5,
+          color: context.ac.accent,
+        ),
       ),
       error: (e, _) => Center(
-        child:
-            Text('Error: $e', style: TextStyle(color: context.ac.fgMute)),
+        child: Text(
+          'Error: $e',
+          style: TextStyle(color: context.ac.fgMute),
+        ),
       ),
       data: (insights) {
-        final i =
-            insights as Map<String, dynamic>? ?? const <String, dynamic>{};
+        final i = insights as Map<String, dynamic>? ?? const <String, dynamic>{};
         return ListView(
           padding: const EdgeInsets.fromLTRB(16, 12, 16, 20),
           children: [
             Text(
-              '${(profile.displayName.isEmpty ? 'YOU' : profile.displayName).toUpperCase()} · SINCE APRIL 2026',
+              '${profile.displayName.isEmpty ? 'SHS' : profile.displayName.toUpperCase()} · SINCE APRIL 2026',
               style: AymaFonts.mono(size: 9, color: context.ac.fgMute),
             ).animate().fadeIn(duration: 250.ms),
             const SizedBox(height: 8),
@@ -416,116 +407,78 @@ class _YourStoryPane extends ConsumerWidget {
               'Just between us.',
               style: AymaFonts.serif(size: 72, color: context.ac.fg),
             ).animate().fadeIn(duration: 320.ms),
-            const SizedBox(height: 12),
-            _AymaBanner().animate().fadeIn(duration: 300.ms),
             const SizedBox(height: 16),
-            _StoryCard(
+            Row(
+              children: [
+                Text(
+                  '⬡ PRIVATE',
+                  style: AymaFonts.mono(
+                    size: 10,
+                    color: context.ac.accent,
+                  ).copyWith(letterSpacing: 2.5),
+                ),
+                const SizedBox(width: 10),
+                Expanded(
+                  child: Divider(
+                    color: context.ac.lineSoft,
+                    thickness: 0.5,
+                    height: 1,
+                  ),
+                ),
+                const SizedBox(width: 10),
+                Text(
+                  'UPDATED AS WE TALK',
+                  style: AymaFonts.mono(
+                    size: 10,
+                    color: context.ac.fgMute,
+                  ).copyWith(letterSpacing: 2.0),
+                ),
+              ],
+            ),
+            const SizedBox(height: 16),
+            RichText(
+              text: TextSpan(
+                children: [
+                  TextSpan(
+                    text: "What I've come to know about you — ",
+                    style: AymaFonts.serif(
+                      size: 21,
+                      color: context.ac.fgDim,
+                      italic: true,
+                    ),
+                  ),
+                  TextSpan(
+                    text: 'only you can see this.',
+                    style: AymaFonts.serif(size: 21, color: context.ac.fg),
+                  ),
+                ],
+              ),
+            ),
+            const SizedBox(height: 20),
+            _PrivateSectionRow(
               label: 'WHO YOU ARE',
               content: i['about_me']?.toString() ?? '',
-              updatedAt: i['about_me_updated_at']?.toString() ?? '',
-              onTap: () => showModalBottomSheet(
-                context: context,
-                isScrollControlled: true,
-                useSafeArea: true,
-                backgroundColor: context.ac.bgCard,
-                shape: const RoundedRectangleBorder(
-                  borderRadius:
-                      BorderRadius.vertical(top: Radius.circular(20)),
-                ),
-                builder: (_) => _WikiCorrectSheet(
-                  label: 'WHO YOU ARE',
-                  content: i['about_me']?.toString() ?? '',
-                  sectionKey: 'about_me',
-                  onCorrected: (corrected) async {
-                    ref.invalidate(insightsProvider);
-                  },
-                ),
-              ),
-            )
-                .animate(delay: 40.ms)
-                .fadeIn(duration: 300.ms)
-                .slideY(begin: 0.03, end: 0),
-            const SizedBox(height: 10),
-            _StoryCard(
+              sectionKey: 'about_me',
+              title: 'Who you are',
+            ),
+            _PrivateSectionRow(
               label: "WHAT YOU'RE LOOKING FOR",
               content: i['preferences']?.toString() ?? '',
-              updatedAt: i['preferences_updated_at']?.toString() ?? '',
-              onTap: () => showModalBottomSheet(
-                context: context,
-                isScrollControlled: true,
-                useSafeArea: true,
-                backgroundColor: context.ac.bgCard,
-                shape: const RoundedRectangleBorder(
-                  borderRadius:
-                      BorderRadius.vertical(top: Radius.circular(20)),
-                ),
-                builder: (_) => _WikiCorrectSheet(
-                  label: "WHAT YOU'RE LOOKING FOR",
-                  content: i['preferences']?.toString() ?? '',
-                  sectionKey: 'preferences',
-                  onCorrected: (corrected) async {
-                    ref.invalidate(insightsProvider);
-                  },
-                ),
-              ),
-            )
-                .animate(delay: 80.ms)
-                .fadeIn(duration: 300.ms)
-                .slideY(begin: 0.03, end: 0),
-            const SizedBox(height: 10),
-            _StoryCard(
+              sectionKey: 'preferences',
+              title: "What you're looking for",
+            ),
+            _PrivateSectionRow(
               label: 'YOUR LIFE RIGHT NOW',
               content: i['context']?.toString() ?? '',
-              updatedAt: i['context_updated_at']?.toString() ?? '',
-              onTap: () => showModalBottomSheet(
-                context: context,
-                isScrollControlled: true,
-                useSafeArea: true,
-                backgroundColor: context.ac.bgCard,
-                shape: const RoundedRectangleBorder(
-                  borderRadius:
-                      BorderRadius.vertical(top: Radius.circular(20)),
-                ),
-                builder: (_) => _WikiCorrectSheet(
-                  label: 'YOUR LIFE RIGHT NOW',
-                  content: i['context']?.toString() ?? '',
-                  sectionKey: 'context',
-                  onCorrected: (corrected) async {
-                    ref.invalidate(insightsProvider);
-                  },
-                ),
-              ),
-            )
-                .animate(delay: 120.ms)
-                .fadeIn(duration: 300.ms)
-                .slideY(begin: 0.03, end: 0),
-            const SizedBox(height: 10),
-            _StoryCard(
+              sectionKey: 'context',
+              title: 'Your life right now',
+            ),
+            _PrivateSectionRow(
               label: 'FOR MATCHING',
               content: i['matching']?.toString() ?? '',
-              updatedAt: i['matching_updated_at']?.toString() ?? '',
-              onTap: () => showModalBottomSheet(
-                context: context,
-                isScrollControlled: true,
-                useSafeArea: true,
-                backgroundColor: context.ac.bgCard,
-                shape: const RoundedRectangleBorder(
-                  borderRadius:
-                      BorderRadius.vertical(top: Radius.circular(20)),
-                ),
-                builder: (_) => _WikiCorrectSheet(
-                  label: 'FOR MATCHING',
-                  content: i['matching']?.toString() ?? '',
-                  sectionKey: 'matching',
-                  onCorrected: (corrected) async {
-                    ref.invalidate(insightsProvider);
-                  },
-                ),
-              ),
-            )
-                .animate(delay: 160.ms)
-                .fadeIn(duration: 300.ms)
-                .slideY(begin: 0.03, end: 0),
+              sectionKey: 'matching',
+              title: 'For matching',
+            ),
           ],
         );
       },
@@ -533,128 +486,579 @@ class _YourStoryPane extends ConsumerWidget {
   }
 }
 
-// ─── Ayma banner ──────────────────────────────────────────────────────────────
+// ─── Chat message data class ──────────────────────────────────────────────────
 
-class _AymaBanner extends StatelessWidget {
+class _ChatMsg {
+  _ChatMsg({required this.text, required this.isUser, this.applyText});
+
+  final String text;
+  final bool isUser;
+  final String? applyText;
+}
+
+// ─── Private section row ──────────────────────────────────────────────────────
+
+class _PrivateSectionRow extends StatelessWidget {
+  const _PrivateSectionRow({
+    required this.label,
+    required this.content,
+    required this.sectionKey,
+    required this.title,
+  });
+
+  final String label;
+  final String content;
+  final String sectionKey;
+  final String title;
+
   @override
   Widget build(BuildContext context) {
-    return Container(
-      padding: const EdgeInsets.all(16),
-      decoration: BoxDecoration(
-        color: const Color(0xFF14110F),
-        borderRadius: BorderRadius.circular(16),
-        border: Border.all(
-            color: context.ac.accent.withValues(alpha: 0.2), width: 0.5),
-      ),
-      child: Row(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Container(
-            width: 8,
-            height: 8,
-            margin: const EdgeInsets.only(top: 4, right: 10),
-            decoration: BoxDecoration(
-              color: context.ac.accent,
-              shape: BoxShape.circle,
-            ),
+    final hasContent = content.trim().isNotEmpty;
+    return GestureDetector(
+      onTap: () => Navigator.of(context).push(
+        PageRouteBuilder(
+          transitionDuration: const Duration(milliseconds: 260),
+          pageBuilder: (_, __, ___) => _SectionDetailPage(
+            label: label,
+            content: content,
+            sectionKey: sectionKey,
+            title: title,
           ),
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
+          transitionsBuilder: (_, animation, __, child) {
+            final tween = Tween<Offset>(
+              begin: const Offset(1, 0),
+              end: Offset.zero,
+            ).animate(
+              CurvedAnimation(
+                parent: animation,
+                curve: Curves.easeOutCubic,
+              ),
+            );
+            return SlideTransition(position: tween, child: child);
+          },
+        ),
+      ),
+      child: Container(
+        decoration: const BoxDecoration(
+          border: Border(
+            top: BorderSide(color: Color(0xFF2A261F), width: 0.5),
+          ),
+        ),
+        padding: const EdgeInsets.symmetric(vertical: 22, horizontal: 2),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
               children: [
                 Text(
-                  'What I know about you. Only you can see this.',
-                  style: AymaFonts.sans(size: 18, color: context.ac.fg),
+                  label,
+                  style: AymaFonts.mono(
+                    size: 11,
+                    color: context.ac.fgMute,
+                  ).copyWith(letterSpacing: 3.0),
                 ),
-                const SizedBox(height: 6),
+                const Spacer(),
                 Text(
-                  'UPDATES EVERY TIME WE TALK',
-                  style: AymaFonts.mono(size: 9, color: context.ac.fgMute),
+                  '→',
+                  style: AymaFonts.mono(size: 14, color: context.ac.accent),
                 ),
               ],
             ),
-          ),
-        ],
+            const SizedBox(height: 12),
+            hasContent
+                ? Text(
+                    content,
+                    style: AymaFonts.serif(size: 17, color: context.ac.fgDim),
+                    maxLines: 3,
+                    overflow: TextOverflow.ellipsis,
+                  )
+                : Text(
+                    'Nothing here yet — keep chatting with Ayma!',
+                    style: AymaFonts.serif(
+                      size: 17,
+                      color: context.ac.fgMute,
+                      italic: true,
+                    ),
+                  ),
+            const SizedBox(height: 10),
+            Text(
+              'TAP TO OPEN & EDIT',
+              style: AymaFonts.mono(size: 10, color: context.ac.fgMute),
+            ),
+          ],
+        ),
       ),
     );
   }
 }
 
-// ─── Story card (expandable) ──────────────────────────────────────────────────
+// ─── Section detail page ──────────────────────────────────────────────────────
 
-class _StoryCard extends StatefulWidget {
-  const _StoryCard({
+class _SectionDetailPage extends StatefulWidget {
+  const _SectionDetailPage({
     required this.label,
     required this.content,
-    required this.updatedAt,
-    this.onTap,
+    required this.sectionKey,
+    required this.title,
   });
+
   final String label;
   final String content;
-  final String updatedAt;
-  final VoidCallback? onTap;
+  final String sectionKey;
+  final String title;
 
   @override
-  State<_StoryCard> createState() => _StoryCardState();
+  State<_SectionDetailPage> createState() => _SectionDetailPageState();
 }
 
-class _StoryCardState extends State<_StoryCard> {
+class _SectionDetailPageState extends State<_SectionDetailPage> {
+  late TextEditingController _contentCtrl;
+  final ScrollController _chatScrollCtrl = ScrollController();
+  final TextEditingController _composeCtrl = TextEditingController();
+  bool _chatOpen = false;
+  bool _typing = false;
+  final List<_ChatMsg> _messages = [];
+
+  @override
+  void initState() {
+    super.initState();
+    _contentCtrl = TextEditingController(text: widget.content);
+    _messages.add(
+      _ChatMsg(
+        text: 'This is your "${widget.title}" page. Highlight any line to tweak it, or tell me what to change.',
+        isUser: false,
+      ),
+    );
+  }
+
+  @override
+  void dispose() {
+    _contentCtrl.dispose();
+    _composeCtrl.dispose();
+    _chatScrollCtrl.dispose();
+    super.dispose();
+  }
+
+  void _scrollToBottom() {
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (_chatScrollCtrl.hasClients) {
+        _chatScrollCtrl.animateTo(
+          _chatScrollCtrl.position.maxScrollExtent,
+          duration: const Duration(milliseconds: 300),
+          curve: Curves.easeOut,
+        );
+      }
+    });
+  }
+
+  Future<void> _send(String draft) async {
+    setState(() {
+      _composeCtrl.clear();
+      _messages.add(_ChatMsg(text: draft, isUser: true));
+      _typing = true;
+    });
+    _scrollToBottom();
+    try {
+      final result = await ApiService.correctWikiSection(
+        section: widget.sectionKey,
+        feedback: draft,
+      );
+      final corrected = result['content']?.toString() ?? '';
+      setState(() {
+        _typing = false;
+        _messages.add(
+          _ChatMsg(
+            text: "Updated. Here's the revision:",
+            isUser: false,
+            applyText: corrected,
+          ),
+        );
+      });
+      _scrollToBottom();
+    } catch (e) {
+      setState(() {
+        _typing = false;
+        _messages.add(
+          _ChatMsg(
+            text: 'Sorry, something went wrong: $e',
+            isUser: false,
+          ),
+        );
+      });
+      _scrollToBottom();
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
-    final hasContent = widget.content.trim().isNotEmpty;
-    final relDate = _relativeDate(widget.updatedAt);
-    final trimmed = widget.content.trim();
-
-    return GestureDetector(
-      onTap: widget.onTap,
-      child: Container(
-        padding: const EdgeInsets.all(18),
-        decoration: BoxDecoration(
-          color: const Color(0xFF14110F),
-          borderRadius: BorderRadius.circular(18),
-          border: Border.all(color: const Color(0xFF282118), width: 0.5),
-        ),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Row(
-              mainAxisAlignment: MainAxisAlignment.spaceBetween,
-              crossAxisAlignment: CrossAxisAlignment.start,
+    return Scaffold(
+      backgroundColor: context.ac.bg,
+      body: Stack(
+        children: [
+          Positioned.fill(
+            child: Column(
               children: [
-                Text(widget.label,
-                    style: AymaFonts.mono(size: 9, color: context.ac.fgMute)),
-                if (relDate.isNotEmpty)
-                  Text(relDate,
-                      style: AymaFonts.mono(
-                          size: 9,
-                          color: context.ac.fgMute.withValues(alpha: 0.6))),
+                Container(
+                  decoration: BoxDecoration(
+                    border: Border(
+                      bottom: BorderSide(
+                        color: context.ac.lineSoft,
+                        width: 0.5,
+                      ),
+                    ),
+                  ),
+                  padding: const EdgeInsets.fromLTRB(22, 54, 22, 14),
+                  child: Row(
+                    children: [
+                      GestureDetector(
+                        onTap: () => Navigator.pop(context),
+                        child: Container(
+                          width: 42,
+                          height: 42,
+                          decoration: BoxDecoration(
+                            shape: BoxShape.circle,
+                            border: Border.all(
+                              color: context.ac.lineSoft.withValues(alpha: 0.12),
+                              width: 1,
+                            ),
+                            color: context.ac.fg.withValues(alpha: 0.04),
+                          ),
+                          child: Center(
+                            child: Text(
+                              '←',
+                              style: TextStyle(
+                                color: context.ac.fg,
+                                fontSize: 18,
+                              ),
+                            ),
+                          ),
+                        ),
+                      ),
+                      const SizedBox(width: 14),
+                      Expanded(
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text(
+                              '⬡ PRIVATE',
+                              style: AymaFonts.mono(
+                                size: 10,
+                                color: context.ac.accent,
+                              ),
+                            ),
+                            const SizedBox(height: 2),
+                            Text(
+                              widget.label,
+                              style: AymaFonts.mono(
+                                size: 11,
+                                color: context.ac.fgMute,
+                              ).copyWith(letterSpacing: 3.0),
+                            ),
+                          ],
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+                Expanded(
+                  child: SingleChildScrollView(
+                    padding: const EdgeInsets.fromLTRB(24, 24, 24, 220),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          widget.title,
+                          style: AymaFonts.serif(size: 42, color: context.ac.fg),
+                        ),
+                        const SizedBox(height: 8),
+                        Row(
+                          children: [
+                            Container(
+                              width: 6,
+                              height: 6,
+                              decoration: BoxDecoration(
+                                color: context.ac.accent,
+                                shape: BoxShape.circle,
+                              ),
+                            ),
+                            const SizedBox(width: 8),
+                            Expanded(
+                              child: Text(
+                                'HIGHLIGHT ANY LINE TO CHANGE IT — OR JUST ASK BELOW',
+                                style: AymaFonts.mono(
+                                  size: 10,
+                                  color: context.ac.fgMute,
+                                ).copyWith(letterSpacing: 1.5),
+                              ),
+                            ),
+                          ],
+                        ),
+                        const SizedBox(height: 24),
+                        TextField(
+                          controller: _contentCtrl,
+                          maxLines: null,
+                          style: AymaFonts.serif(
+                            size: 19,
+                            color: context.ac.fgDim,
+                          ).copyWith(height: 1.68, letterSpacing: 0.1),
+                          decoration: InputDecoration(
+                            hintText: 'Nothing here yet — keep chatting with Ayma!',
+                            hintStyle: AymaFonts.serif(
+                              size: 19,
+                              color: context.ac.fgMute,
+                            ),
+                            border: InputBorder.none,
+                            isDense: true,
+                            contentPadding: EdgeInsets.zero,
+                            filled: false,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
               ],
             ),
-            const SizedBox(height: 12),
-            hasContent
-                ? Text(trimmed,
-                    style: AymaFonts.serif(size: 16, color: context.ac.fg))
-                : Text('Nothing here yet — keep chatting with Ayma!',
-                    style: AymaFonts.serif(
-                        size: 15, color: context.ac.fgMute, italic: true)),
-            if (hasContent) ...[
-              const SizedBox(height: 14),
-              Divider(
-                  color: context.ac.lineSoft.withValues(alpha: 0.6),
-                  thickness: 0.5,
-                  height: 1),
-              const SizedBox(height: 12),
-              Row(
-                children: [
-                  Icon(Icons.edit_outlined, size: 12, color: context.ac.fgMute),
-                  const SizedBox(width: 5),
-                  Text('Tap to correct',
-                      style: AymaFonts.mono(size: 9, color: context.ac.fgMute)),
-                ],
-              ),
-            ],
-          ],
-        ),
+          ),
+          Positioned(
+            bottom: 0,
+            left: 0,
+            right: 0,
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                if (_chatOpen)
+                  ClipRRect(
+                    borderRadius: const BorderRadius.vertical(
+                      top: Radius.circular(22),
+                    ),
+                    child: BackdropFilter(
+                      filter: ImageFilter.blur(sigmaX: 10, sigmaY: 10),
+                      child: Container(
+                        color: const Color(0xEB14100C),
+                        child: Column(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            Padding(
+                              padding: const EdgeInsets.fromLTRB(16, 12, 16, 0),
+                              child: Column(
+                                children: [
+                                  Row(
+                                    children: [
+                                      Text(
+                                        'AYMA · ${widget.label}',
+                                        style: AymaFonts.mono(
+                                          size: 10,
+                                          color: context.ac.fgMute,
+                                        ),
+                                      ),
+                                      const Spacer(),
+                                      GestureDetector(
+                                        onTap: () => setState(() => _chatOpen = false),
+                                        child: Icon(
+                                          Icons.close,
+                                          size: 16,
+                                          color: context.ac.fgMute,
+                                        ),
+                                      ),
+                                    ],
+                                  ),
+                                  const SizedBox(height: 8),
+                                ],
+                              ),
+                            ),
+                            ConstrainedBox(
+                              constraints: const BoxConstraints(maxHeight: 200),
+                              child: ListView.builder(
+                                controller: _chatScrollCtrl,
+                                shrinkWrap: true,
+                                itemCount: _messages.length + (_typing ? 1 : 0),
+                                itemBuilder: (ctx, idx) {
+                                  if (_typing && idx == _messages.length) {
+                                    return Padding(
+                                      padding: const EdgeInsets.fromLTRB(16, 4, 16, 4),
+                                      child: Row(
+                                        children: [
+                                          const SizedBox(width: 16),
+                                          Text(
+                                            '•••',
+                                            style: AymaFonts.mono(
+                                              size: 12,
+                                              color: context.ac.fgMute,
+                                            ),
+                                          ),
+                                        ],
+                                      ),
+                                    );
+                                  }
+                                  final msg = _messages[idx];
+                                  return Padding(
+                                    padding: const EdgeInsets.fromLTRB(16, 4, 16, 4),
+                                    child: Align(
+                                      alignment: msg.isUser
+                                          ? Alignment.centerRight
+                                          : Alignment.centerLeft,
+                                      child: Column(
+                                        crossAxisAlignment: msg.isUser
+                                            ? CrossAxisAlignment.end
+                                            : CrossAxisAlignment.start,
+                                        mainAxisSize: MainAxisSize.min,
+                                        children: [
+                                          Container(
+                                            padding: const EdgeInsets.symmetric(
+                                              horizontal: 12,
+                                              vertical: 8,
+                                            ),
+                                            decoration: BoxDecoration(
+                                              color: msg.isUser
+                                                  ? context.ac.fg
+                                                  : context.ac.lineSoft,
+                                              borderRadius: BorderRadius.circular(14),
+                                            ),
+                                            child: Text(
+                                              msg.text,
+                                              style: AymaFonts.serif(
+                                                size: 14.5,
+                                                color: msg.isUser
+                                                    ? context.ac.bg
+                                                    : context.ac.fg,
+                                              ),
+                                            ),
+                                          ),
+                                          if (msg.applyText != null) ...[
+                                            const SizedBox(height: 4),
+                                            GestureDetector(
+                                              onTap: () => setState(
+                                                () => _contentCtrl.text = msg.applyText!,
+                                              ),
+                                              child: Container(
+                                                padding: const EdgeInsets.symmetric(
+                                                  horizontal: 10,
+                                                  vertical: 5,
+                                                ),
+                                                decoration: BoxDecoration(
+                                                  color: context.ac.accent.withValues(
+                                                    alpha: 0.15,
+                                                  ),
+                                                  borderRadius: BorderRadius.circular(8),
+                                                  border: Border.all(
+                                                    color: context.ac.accent.withValues(
+                                                      alpha: 0.3,
+                                                    ),
+                                                    width: 0.5,
+                                                  ),
+                                                ),
+                                                child: Text(
+                                                  'Apply',
+                                                  style: AymaFonts.mono(
+                                                    size: 10,
+                                                    color: context.ac.accent,
+                                                  ),
+                                                ),
+                                              ),
+                                            ),
+                                          ],
+                                        ],
+                                      ),
+                                    ),
+                                  );
+                                },
+                              ),
+                            ),
+                            const SizedBox(height: 8),
+                          ],
+                        ),
+                      ),
+                    ),
+                  ),
+                ClipRect(
+                  child: BackdropFilter(
+                    filter: ImageFilter.blur(sigmaX: 10, sigmaY: 10),
+                    child: Container(
+                      color: const Color(0xF014100C),
+                      decoration: BoxDecoration(
+                        border: Border(
+                          top: BorderSide(
+                            color: context.ac.lineSoft.withValues(alpha: 0.08),
+                            width: 0.5,
+                          ),
+                        ),
+                      ),
+                      child: Padding(
+                        padding: const EdgeInsets.fromLTRB(12, 10, 12, 28),
+                        child: Row(
+                          children: [
+                            Expanded(
+                              child: Container(
+                                decoration: BoxDecoration(
+                                  color: context.ac.lineSoft.withValues(alpha: 0.06),
+                                  borderRadius: BorderRadius.circular(999),
+                                  border: Border.all(
+                                    color: context.ac.lineSoft.withValues(alpha: 0.10),
+                                    width: 0.5,
+                                  ),
+                                ),
+                                padding: const EdgeInsets.fromLTRB(16, 6, 6, 6),
+                                child: TextField(
+                                  controller: _composeCtrl,
+                                  style: AymaFonts.sans(
+                                    size: 14,
+                                    color: context.ac.fg,
+                                  ),
+                                  decoration: InputDecoration(
+                                    hintText: 'Tell Ayma what to change...',
+                                    hintStyle: AymaFonts.sans(
+                                      size: 14,
+                                      color: context.ac.fgMute,
+                                    ),
+                                    border: InputBorder.none,
+                                    isDense: true,
+                                    contentPadding: EdgeInsets.zero,
+                                    filled: false,
+                                  ),
+                                  maxLines: null,
+                                  onTap: () => setState(() => _chatOpen = true),
+                                ),
+                              ),
+                            ),
+                            const SizedBox(width: 8),
+                            GestureDetector(
+                              onTap: () {
+                                final t = _composeCtrl.text.trim();
+                                if (t.isEmpty) {
+                                  return;
+                                }
+                                setState(() => _chatOpen = true);
+                                _send(t);
+                              },
+                              child: Container(
+                                width: 38,
+                                height: 38,
+                                decoration: BoxDecoration(
+                                  shape: BoxShape.circle,
+                                  color: context.ac.accent,
+                                ),
+                                child: const Center(
+                                  child: Text(
+                                    '↑',
+                                    style: TextStyle(
+                                      color: Colors.black,
+                                      fontSize: 18,
+                                    ),
+                                  ),
+                                ),
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ],
       ),
     );
   }

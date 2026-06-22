@@ -106,13 +106,26 @@ Daily matching cron: see [`cloud-scheduler.md`](cloud-scheduler.md).
 
 | Var | Purpose |
 |---|---|
-| `GOOGLE_API_KEY` | Gemini API |
+| `GOOGLE_API_KEY` | Gemini API key used by the backend and LiveKit agent |
 | `DATABASE_URL` | PostgreSQL connection string |
+| `LIVEKIT_URL` | LiveKit Cloud websocket URL |
+| `LIVEKIT_API_KEY` | LiveKit server API key for dispatch and worker registration |
+| `LIVEKIT_API_SECRET` | LiveKit server API secret for dispatch and worker registration |
 | `LIVE_MODEL` | Voice model (default: `gemini-3.1-flash-live-preview`) |
 | `TEXT_MODEL` | Text model (default: `gemini-3.5-flash`) |
 | `CRON_SECRET` | Auth header for `/run-matching-cron` |
 
-Full list with defaults: `functions/bootstrap/config.py`.
+Source of truth:
+- Runtime secrets and runtime overrides are stored on the Cloud Run service under `spec.template.spec.containers[0].env`.
+- `functions/bootstrap/config.py` only defines required env names and non-secret fallback defaults. Secrets are not stored in source.
+
+Inspect current runtime env:
+
+```bash
+gcloud run services describe ayma-bootstrap \
+  --region us-central1 \
+  --format="yaml(spec.template.spec.containers[0].env)"
+```
 
 ---
 

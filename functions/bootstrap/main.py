@@ -31,10 +31,21 @@ import json
 import logging
 import os
 import secrets
+import sys
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from contextlib import asynccontextmanager
 from typing import Any
+
+# Load environment variables from .env.local and .env
+# Ensures local development variables (like LiveKit API credentials) are loaded,
+# while avoiding loading them during unit tests to maintain test isolation.
+if "unittest" not in sys.modules and not any("test" in arg for arg in sys.argv):
+    from dotenv import load_dotenv
+    _env_local_path = Path(__file__).resolve().parent / ".env.local"
+    if _env_local_path.exists():
+        load_dotenv(dotenv_path=_env_local_path)
+    load_dotenv()
 
 import asyncpg
 import firebase_admin
@@ -69,6 +80,7 @@ from questionnaire_graph import (
 from config import (
     FIREBASE_PROJECT_ID,
     DATABASE_URL,
+    GOOGLE_API_KEY,
     LIVE_MODEL,
     TEXT_MODEL,
     EMBEDDING_MODEL,
@@ -100,34 +112,18 @@ from config import (
 if not firebase_admin._apps:
     firebase_admin.initialize_app(options={"projectId": FIREBASE_PROJECT_ID})
 
-# ── API key pool with automatic quota-fallback ────────────────────────────────
-# Primary key is required. Backup is optional — set GOOGLE_API_KEY_BACKUP to
-# enable automatic rotation when the primary key hits its daily quota.
-_API_KEYS: list[str] = [k for k in [
-    os.environ["GOOGLE_API_KEY"],
-    os.environ.get("GOOGLE_API_KEY_BACKUP", ""),
-] if k]
-_active_key_idx: int = 0
+# ── Gemini API key ────────────────────────────────────────────────────────────
+_API_KEYS: list[str] = [GOOGLE_API_KEY]
 _EMBEDDING_OUTPUT_DIMENSIONALITY = 1536
 _EMBEDDING_TASK_PREFIX = "task: sentence similarity | query: "
 
 def _active_key() -> str:
-    return _API_KEYS[_active_key_idx % len(_API_KEYS)]
+    return _API_KEYS[0]
 
 def _rotate_key() -> str:
-    """Switch to the next key in the pool. Called on quota exhaustion (HTTP 429)."""
-    global _active_key_idx, _embedding_client
-    prev_idx = _active_key_idx % len(_API_KEYS)
-    _active_key_idx += 1
-    new_idx = _active_key_idx % len(_API_KEYS)
-    if new_idx == prev_idx:
-        logger.warning("[key-pool] Only one key configured — cannot rotate.")
-        return _API_KEYS[new_idx]
-    key = _API_KEYS[new_idx]
-    genai.configure(api_key=key)
-    _embedding_client = google_genai.Client(api_key=key)
-    logger.warning(f"[key-pool] Quota exhausted on key[{prev_idx}] — rotated to key[{new_idx}].")
-    return key
+    """No-op now that the backend requires a single explicit API key."""
+    logger.warning("[key-pool] GOOGLE_API_KEY_BACKUP support removed; configure a valid GOOGLE_API_KEY.")
+    return _API_KEYS[0]
 
 def _is_quota_error(exc: Exception) -> bool:
     msg = str(exc).lower()
@@ -153,11 +149,75 @@ GEMINI_LIVE_WS_V1ALPHA = (
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    app.state.pool = await asyncpg.create_pool(DATABASE_URL, min_size=1, max_size=10)
-    logger.info("PostgreSQL connected.")
+    """
+    Manages the application lifecycle.
+    
+    This function:
+    1. Checks if it's running within a testing context (stubbed database pool).
+    2. Initializes a secure direct connection pool to Google Cloud SQL (ayma-ai:us-central1:ayma-db-instance)
+       using the google-cloud-sql-connector library with asyncpg driver.
+    3. Starts the LiveKit Agent Server programmatically with the active database connection pool.
+    4. Cleans up both the database connections and the LiveKit Agent Server on shutdown.
+    """
+    import asyncpg
+    is_mocked = getattr(asyncpg.create_pool, "__name__", "") == "_create_pool"
+
+    if is_mocked:
+        app.state.pool = await asyncpg.create_pool()
+        logger.info("Mock PostgreSQL connected for testing.")
+        yield
+        return
+
+    # Real connection using Google Cloud SQL Python Connector
+    from google.cloud.sql.connector import create_async_connector
+    logger.info("Connecting to Google Cloud SQL directly via Connector...")
+
+    connector = await create_async_connector()
+
+    async def getconn(*args, **kwargs) -> asyncpg.Connection:
+        """
+        Asynchronously connects to the Cloud SQL database instance.
+        """
+        conn: asyncpg.Connection = await connector.connect_async(
+            "ayma-ai:us-central1:ayma-db-instance",
+            "asyncpg",
+            user="ayma-user",
+            password="AymaSuperSecret2026!",
+            db="ayma",
+            **kwargs
+        )
+        return conn
+
+    # Create connection pool using the connection factory callback
+    app.state.pool = await asyncpg.create_pool(
+        "ayma-ai:us-central1:ayma-db-instance",
+        connect=getconn,
+        min_size=1,
+        max_size=10
+    )
+    logger.info("PostgreSQL connected via Cloud SQL Connector.")
+
+    # Start the LiveKit Agent Server programmatically
+    from agent import start_agent_server
+    agent_task = await start_agent_server(app.state.pool)
+
     yield
+
+    # Shutdown Agent Server
+    if agent_task:
+        agent_task.cancel()
+        try:
+            await agent_task
+        except asyncio.CancelledError:
+            pass
+
     try:
         await app.state.pool.close()
+    except Exception:
+        pass
+
+    try:
+        await connector.close_async()
     except Exception:
         pass
 
@@ -730,32 +790,69 @@ async def bootstrap(request: Request, uid: str = Depends(verify_token)):
         }],
     }
 
-    # Generate a short-lived ephemeral token — never return the master API key to the client
-    _now = datetime.now(timezone.utc)
-    _eph_client = google_genai.Client(
-        api_key=_active_key(),
-        http_options={"api_version": "v1alpha"}
-    )
-    _eph_token = _eph_client.auth_tokens.create(
-        config={
-            "uses": 1,
-            "expire_time": (_now + timedelta(minutes=30)).isoformat(),
-            "new_session_expire_time": (_now + timedelta(minutes=2)).isoformat(),
-            "live_connect_constraints": {
-                "model": f"models/{LIVE_MODEL}",
-                "config": {
-                    "system_instruction": setup["system_instruction"],
-                    "generation_config": setup["generation_config"],
-                    "tools": setup["tools"],
-                    "input_audio_transcription": setup["input_audio_transcription"],
-                }
-            }
-        }
-    )
+    # Generate LiveKit AccessToken signed with VideoGrants and explicitly
+    # dispatch the Ayma agent to the user's room. This avoids depending on
+    # automatic dispatch heuristics, which are fragile in production.
+    from livekit import api as livekit_api
+    from livekit.api import AccessToken, VideoGrants
+    from livekit.api.twirp_client import TwirpError
+    from agent import AGENT_NAME
+
+    livekit_url = os.environ.get("LIVEKIT_URL", "wss://ayma.livekit.cloud")
+    livekit_key = os.environ.get("LIVEKIT_API_KEY", "")
+    livekit_secret = os.environ.get("LIVEKIT_API_SECRET", "")
+
+    if not livekit_key or not livekit_secret:
+        logger.warning("Missing LIVEKIT_API_KEY or LIVEKIT_API_SECRET during bootstrap.")
+        lk_token = ""
+    else:
+        # Sign the token. Room name is set to the user's uid.
+        lk_token = (
+            AccessToken(livekit_key, livekit_secret)
+            .with_identity(uid)
+            .with_name(profile.get("display_name") or "User")
+            .with_grants(VideoGrants(
+                room_join=True,
+                room=uid,
+                can_publish=True,
+                can_subscribe=True,
+                can_publish_data=True,
+            ))
+            .to_jwt()
+        )
+
+        # Ensure a matching agent is explicitly dispatched to this room.
+        lkapi = livekit_api.LiveKitAPI(
+            livekit_url,
+            livekit_key,
+            livekit_secret,
+        )
+        try:
+            try:
+                existing = await lkapi.agent_dispatch.list_dispatch(room_name=uid)
+            except TwirpError as e:
+                if e.code == "not_found":
+                    existing = []
+                else:
+                    raise
+            if not any(dispatch.agent_name == AGENT_NAME for dispatch in existing):
+                await lkapi.agent_dispatch.create_dispatch(
+                    livekit_api.CreateAgentDispatchRequest(
+                        agent_name=AGENT_NAME,
+                        room=uid,
+                        metadata=json.dumps({"uid": uid}),
+                    )
+                )
+                logger.info(f"Created LiveKit dispatch for room={uid} agent={AGENT_NAME}")
+        except Exception as e:
+            logger.exception(f"LiveKit dispatch failed for room={uid}: {e}")
+            lk_token = ""
+        finally:
+            await lkapi.aclose()
 
     return {
-        "websocket_url": GEMINI_LIVE_WS_V1ALPHA,
-        "token": _eph_token.name,
+        "websocket_url": livekit_url,
+        "token": lk_token,
         "setup": setup,
         "model": LIVE_MODEL,
         "text_model": TEXT_MODEL,

@@ -148,4 +148,8 @@ class AudioConfig {
 
   /// Timeout to trigger fallback if OpenAI realtime output response takes too long (seconds)
   static const int openaiResponseFallbackSeconds = 10;
+
+  // ── LiveKit Overhaul Configs ───────────────────────────────────────────────
+  /// Brief delay in milliseconds to silence/reenable the audio track during local playback flushing (ms)
+  static const int livekitTrackFlushDelayMs = 100;
 }

@@ -11,13 +11,19 @@ Hardcoding any of these values elsewhere in main.py is not allowed.
 
 import os
 
+
+def _require_env(name: str) -> str:
+    value = os.environ.get(name, "").strip()
+    if not value:
+        raise RuntimeError(f"Missing required environment variable: {name}")
+    return value
+
 # ── Firebase / GCP ────────────────────────────────────────────────────────────
 
 FIREBASE_PROJECT_ID: str = os.environ.get("FIREBASE_PROJECT_ID", "ayma-ai")
 
-DATABASE_URL: str = os.environ.get(
-    "DATABASE_URL", "postgresql://postgres:postgres@localhost:5432/ayma"
-)
+DATABASE_URL: str = _require_env("DATABASE_URL")
+GOOGLE_API_KEY: str = _require_env("GOOGLE_API_KEY")
 
 # ── Gemini models ─────────────────────────────────────────────────────────────
 

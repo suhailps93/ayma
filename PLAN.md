@@ -215,10 +215,10 @@ Current emulator-specific note:
 
 ## Handoff State
 
-- Last completed: Added a new "Production-Ready Code Only" rule to `.agents/AGENTS.md` to restrict future agents from writing hacky code. Removed all commented-out code blocks in `lib/main.dart`, and deleted the root `test_extract.dart` scratch file. Fixed the Cloud Run startup / database 500 connection issue by resetting the GCP Cloud SQL `ayma-user` password to `AymaSuperSecret2026!` and redeploying the container. Disabled Firebase App Check in the client to allow Storage uploads to proceed without unconfigured API blocks, and wrapped the onboarding post-frame callback in a try-catch block to prevent UI thread crashes. Fixed false "No profile found" displays by holding profileProvider in a loading state while auth initializes. Terminated persistent background voice connections by disconnecting the WebSocket/audio service if the app backgrounds and the floating overlay is unavailable, and automatically disconnecting when the user logs out. Fixed "Bad state: Cannot use 'ref' after the widget was disposed" and defunct widget element assertions during ChatScreen unmounting by calling disconnect(notify: false) during dispose, and adding disconnected state guards to volume meter updates. Added clean parsing and summaries for incoming Gemini Live WebSocket events to prevent debug console spam.
-- Validated: `flutter analyze` runs successfully with 0 errors and 0 warnings.
-- Blocked on: `pipeline_test.py` hit `429 ResourceExhausted` (Gemini free tier quota limits) during the `Scoring Priya <-> Fatima` stage. Physical device testing is still required for voice/chat.
-- Next action: Test text chat and voice on physical device; configure a paid Gemini API key or rotate keys to bypass the 429 quota exhaustion; review remaining audit gaps from `pipeline_test.py` (rate limiting, logging, etc.).
+- Last completed: Overhauled the custom raw WebSocket streaming setup with a unified LiveKit Cloud and LiveKit Agents framework. Integrated the LiveKit Agent Server programmatically into FastAPI lifespan. Created the backend Agent worker in `agent.py` to manage real-time voice (Gemini Live) and text chat (LiveKit Data Channels) using a shared `ChatContext` and database connection. Refactored the client-side `AymaAudioService` using the `livekit_client` Flutter SDK to connect natively to LiveKit Rooms, enable local microphone tracking with AEC, handle remote audio playback automatically, map text chat to `localParticipant.publishData`, and mute/unmute tracks to support clean user interruptions.
+- Validated: `dart analyze` passes with 0 errors and 0 warnings. Backend Python code compiles and all 19 unittest test cases in `test_main_logic.py` pass successfully.
+- Blocked on: Physical device connection tests for LiveKit room session.
+- Next action: Test end-to-end LiveKit voice and text chat session on a physical mobile device.
 
 ---
 
