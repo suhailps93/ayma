@@ -1,0 +1,85 @@
+#!/usr/bin/env bash
+#
+# deploy-to-phone — build the Ayma Android app and get it onto a test phone.
+#
+# This closes the cloud -> phone iteration loop:
+#   1. Builds a release APK (signed with the debug key, so it installs on any
+#      phone with "install unknown apps" enabled).
+#   2. Copies the APK into the Cursor artifacts dir so it is downloadable from
+#      the Cursor web app (manual install path — always works).
+#   3. If Firebase credentials are present, uploads the build to Firebase App
+#      Distribution so registered tester phones get the new build automatically.
+#
+# Usage:
+#   ayma_flutter/scripts/deploy-to-phone ["release notes"]
+#   ayma_flutter/scripts/deploy-to-phone --backend <url> ["release notes"]
+#
+# By default the app talks to the production Cloud Run backend. To test against
+# a local/tunnelled backend instead (NO Cloud Run / Cloud SQL cost), pass
+# --backend with a URL the phone can reach, e.g. a free cloudflared tunnel to
+# the local `run-local` backend:
+#   functions/bootstrap/run-local &                       # local backend + Postgres
+#   cloudflared tunnel --url http://localhost:8080        # prints https://<x>.trycloudflare.com
+#   ayma_flutter/scripts/deploy-to-phone --backend https://<x>.trycloudflare.com "local build"
+#
+# Environment (for the automated App Distribution path):
+#   FIREBASE_TOKEN                 CI token from `firebase login:ci`   (or)
+#   GOOGLE_APPLICATION_CREDENTIALS path to a service-account JSON with the
+#                                  "Firebase App Distribution Admin" role
+#   AYMA_FAD_TESTERS               comma-separated tester emails (optional)
+#   AYMA_FAD_GROUPS                comma-separated tester group aliases (optional)
+#   AYMA_FAD_APP                   Firebase Android app id (defaults to Ayma's)
+#
+set -euo pipefail
+
+BACKEND_URL=""
+if [ "${1:-}" = "--backend" ]; then
+  BACKEND_URL="${2:?--backend requires a URL}"
+  shift 2
+fi
+
+NOTES="${1:-Ayma dev build $(date -u +%Y-%m-%dT%H:%MZ)}"
+APP_ID="${AYMA_FAD_APP:-1:235381544962:android:99993490ed0aee69c4ef1b}"
+
+ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+cd "$ROOT"
+
+BUILD_ARGS=(build apk --release)
+if [ -n "$BACKEND_URL" ]; then
+  BUILD_ARGS+=(--dart-define=AYMA_BOOTSTRAP_URL="$BACKEND_URL")
+  echo "==> Backend override: $BACKEND_URL (no Cloud Run / Cloud SQL cost if this is a local tunnel)"
+else
+  echo "==> Backend: production Cloud Run default (Env.bootstrapUrl)"
+fi
+
+echo "==> [1/3] Building release APK (this is fast after the first cached build)..."
+flutter "${BUILD_ARGS[@]}"
+
+APK="$ROOT/build/app/outputs/flutter-apk/app-release.apk"
+if [ ! -f "$APK" ]; then
+  echo "ERROR: expected APK not found at $APK" >&2
+  exit 1
+fi
+echo "    Built: $APK ($(du -h "$APK" | cut -f1))"
+
+echo "==> [2/3] Publishing a downloadable copy..."
+if [ -d /opt/cursor/artifacts ]; then
+  cp "$APK" /opt/cursor/artifacts/ayma-app-release.apk
+  echo "    Copied to /opt/cursor/artifacts/ayma-app-release.apk (download it from the Cursor web app and install on your phone)."
+else
+  echo "    /opt/cursor/artifacts not present — skipping artifact copy. APK is at: $APK"
+fi
+
+echo "==> [3/3] Firebase App Distribution..."
+if [ -n "${FIREBASE_TOKEN:-}" ] || [ -n "${GOOGLE_APPLICATION_CREDENTIALS:-}" ]; then
+  DIST_ARGS=(appdistribution:distribute "$APK" --app "$APP_ID" --release-notes "$NOTES")
+  [ -n "${AYMA_FAD_TESTERS:-}" ] && DIST_ARGS+=(--testers "$AYMA_FAD_TESTERS")
+  [ -n "${AYMA_FAD_GROUPS:-}" ]  && DIST_ARGS+=(--groups "$AYMA_FAD_GROUPS")
+  firebase "${DIST_ARGS[@]}"
+  echo "    Distributed. Registered tester phones will be notified of the new build."
+else
+  echo "    Skipped: no FIREBASE_TOKEN or GOOGLE_APPLICATION_CREDENTIALS set."
+  echo "    Set one (plus AYMA_FAD_TESTERS=you@example.com) to auto-push future builds to your phone."
+fi
+
+echo "==> Done."
