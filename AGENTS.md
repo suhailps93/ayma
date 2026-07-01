@@ -23,6 +23,18 @@ The startup update script already refreshes Python and Flutter dependencies. The
 - Run the backend: from `functions/bootstrap/`, activate `.venv`, export the vars above, then `uvicorn main:app --host 0.0.0.0 --port 8080`. Health check: `curl http://localhost:8080/health`.
 - Run the frontend against the local backend: `cd ayma_flutter && flutter run -d web-server --web-hostname 0.0.0.0 --web-port 8090 --dart-define=AYMA_BOOTSTRAP_URL=http://localhost:8080`. Backend CORS is `allow_origins=["*"]`, so the browser can call `localhost:8080` directly.
 
+### Iterating on the Flutter app and deploying to a physical phone
+
+The Cloud VM is not on the developer's local network, so direct/wireless `adb` to the phone is not possible from here. Instead, iterate by building an installable APK in the VM and getting it onto the phone. Helper: `ayma_flutter/scripts/deploy-to-phone ["release notes"]`.
+
+- The Android SDK (cmdline-tools, platform-tools, build-tools 35/36, platform android-35/36, NDK `28.2.13676358`) is installed at `~/Android/Sdk` and exported in `~/.bashrc`. The `firebase` CLI is installed via npm at `~/.npm-global/bin` (also on `PATH` via `~/.bashrc`).
+- `flutter build apk --release` works out of the box: `android/app/build.gradle.kts` signs the release build with the **debug** key, so the APK installs on any phone with "install unknown apps" enabled. The first Gradle build is slow (~4–5 min); subsequent incremental builds are ~10–15s thanks to the warm `~/.gradle` cache (persisted in the VM snapshot).
+- By default the app talks to the **production Cloud Run backend** (`Env.bootstrapUrl`), so a phone build is testable end-to-end without running the local backend. To point a build at a different backend, add `--dart-define=AYMA_BOOTSTRAP_URL=...`.
+- Two delivery paths, both handled by the script:
+  1. **Manual (always works, no secrets):** the script copies the APK to `/opt/cursor/artifacts/ayma-app-release.apk`, which is downloadable from the Cursor web app. Download it on the phone and install.
+  2. **Automated push (Firebase App Distribution):** if `FIREBASE_TOKEN` (from `firebase login:ci`) or `GOOGLE_APPLICATION_CREDENTIALS` (service account with the *Firebase App Distribution Admin* role) is set, the script uploads the build so registered tester phones get it automatically. Set `AYMA_FAD_TESTERS=you@example.com` (and/or `AYMA_FAD_GROUPS`). The Android Firebase app id is `1:235381544962:android:99993490ed0aee69c4ef1b`.
+- The close-the-loop cycle: edit Dart in `ayma_flutter/lib/` → `scripts/deploy-to-phone "what changed"` → install/receive on phone → test → repeat.
+
 ### Testing / validation without external credentials
 
 - Backend logic tests are self-contained (they stub FastAPI, Firebase, Gemini, asyncpg): `functions/bootstrap/.venv/bin/python -m unittest functions/bootstrap/test_main_logic.py`.
