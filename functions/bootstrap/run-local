@@ -1,0 +1,43 @@
+#!/usr/bin/env bash
+#
+# run-local — run the Ayma backend fully locally, with NO GCP cost.
+#
+# Replaces the two billed cloud services during development/testing:
+#   - "Ayma bootstrap" (Cloud Run)      -> local uvicorn on :8080
+#   - "Google database" (Cloud SQL)     -> local PostgreSQL (db "ayma")
+#
+# Gemini is the only pay-per-call dependency. A dummy GOOGLE_API_KEY lets the
+# server boot and serve every non-AI endpoint for free; real AI (chat/voice/
+# matching) only costs money when you actually call those endpoints with a real
+# key. Export GOOGLE_API_KEY=<real-key> before running to enable real AI.
+#
+# Usage:
+#   functions/bootstrap/run-local            # port 8080, hot reload
+#   PORT=9000 functions/bootstrap/run-local  # custom port
+#
+set -euo pipefail
+
+HERE="$(cd "$(dirname "$0")" && pwd)"
+cd "$HERE"
+
+# 1. Ensure local PostgreSQL is up (Cloud SQL replacement). Idempotent.
+if command -v pg_isready >/dev/null 2>&1 && pg_isready -q; then
+  echo "==> Local PostgreSQL already running."
+else
+  echo "==> Starting local PostgreSQL..."
+  sudo pg_ctlcluster 16 main start 2>/dev/null || true
+fi
+
+# 2. Local-only environment. Never points at Cloud SQL / Cloud Run.
+export DATABASE_URL="${DATABASE_URL:-postgresql://postgres:postgres@localhost:5432/ayma}"
+export GOOGLE_API_KEY="${GOOGLE_API_KEY:-dummy-key-for-local-dev}"
+export ADMIN_PASSWORD="${ADMIN_PASSWORD:-localadmin}"
+export FIREBASE_PROJECT_ID="${FIREBASE_PROJECT_ID:-ayma-ai}"
+
+if [ "$GOOGLE_API_KEY" = "dummy-key-for-local-dev" ]; then
+  echo "==> GOOGLE_API_KEY is a placeholder — non-AI endpoints work; real AI calls will fail (no Gemini cost)."
+fi
+
+echo "==> DATABASE_URL=$DATABASE_URL"
+echo "==> Starting backend on http://0.0.0.0:${PORT:-8080} (Ctrl-C to stop)"
+exec "$HERE/.venv/bin/uvicorn" main:app --host 0.0.0.0 --port "${PORT:-8080}" --reload

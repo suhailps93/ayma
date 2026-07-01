@@ -12,6 +12,15 @@
 #
 # Usage:
 #   ayma_flutter/scripts/deploy-to-phone ["release notes"]
+#   ayma_flutter/scripts/deploy-to-phone --backend <url> ["release notes"]
+#
+# By default the app talks to the production Cloud Run backend. To test against
+# a local/tunnelled backend instead (NO Cloud Run / Cloud SQL cost), pass
+# --backend with a URL the phone can reach, e.g. a free cloudflared tunnel to
+# the local `run-local` backend:
+#   functions/bootstrap/run-local &                       # local backend + Postgres
+#   cloudflared tunnel --url http://localhost:8080        # prints https://<x>.trycloudflare.com
+#   ayma_flutter/scripts/deploy-to-phone --backend https://<x>.trycloudflare.com "local build"
 #
 # Environment (for the automated App Distribution path):
 #   FIREBASE_TOKEN                 CI token from `firebase login:ci`   (or)
@@ -23,14 +32,28 @@
 #
 set -euo pipefail
 
+BACKEND_URL=""
+if [ "${1:-}" = "--backend" ]; then
+  BACKEND_URL="${2:?--backend requires a URL}"
+  shift 2
+fi
+
 NOTES="${1:-Ayma dev build $(date -u +%Y-%m-%dT%H:%MZ)}"
 APP_ID="${AYMA_FAD_APP:-1:235381544962:android:99993490ed0aee69c4ef1b}"
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 
+BUILD_ARGS=(build apk --release)
+if [ -n "$BACKEND_URL" ]; then
+  BUILD_ARGS+=(--dart-define=AYMA_BOOTSTRAP_URL="$BACKEND_URL")
+  echo "==> Backend override: $BACKEND_URL (no Cloud Run / Cloud SQL cost if this is a local tunnel)"
+else
+  echo "==> Backend: production Cloud Run default (Env.bootstrapUrl)"
+fi
+
 echo "==> [1/3] Building release APK (this is fast after the first cached build)..."
-flutter build apk --release
+flutter "${BUILD_ARGS[@]}"
 
 APK="$ROOT/build/app/outputs/flutter-apk/app-release.apk"
 if [ ! -f "$APK" ]; then
