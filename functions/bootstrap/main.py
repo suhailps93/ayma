@@ -1005,6 +1005,187 @@ class PostTurnRequest(BaseModel):
     session_id: str
     messages: list[dict]  # [{"role": "user"|"model", "text": "..."}]
 
+
+async def _process_post_turn_from_messages(
+    conn,
+    *,
+    uid: str,
+    session_id: str,
+    messages: list[dict],
+) -> dict[str, bool]:
+    if not messages:
+        return {"updated": False}
+
+    conversation = "\n".join(
+        f"{m['role'].upper()}: {m['text']}" for m in messages[-10:]
+    )
+
+    profile_row = await conn.fetchrow("SELECT * FROM users WHERE id = $1", uid)
+    if not profile_row:
+        return {"updated": False}
+    profile = _parse_row(profile_row)
+    active_questions = _active_questions_for_profile(profile)
+    user_name = profile.get("display_name") or "User"
+
+    user_lines = [m["text"] for m in messages[-10:] if m.get("role") == "user" and m.get("text", "").strip()]
+    raw_user_statements_str = profile.get("raw_user_statements") or "[]"
+    if user_lines:
+        try:
+            existing_statements = json.loads(profile.get("raw_user_statements") or "[]")
+        except Exception:
+            existing_statements = []
+        combined = existing_statements + user_lines
+        raw_user_statements_str = json.dumps(combined[-100:])
+        await conn.execute("UPDATE users SET raw_user_statements = $1 WHERE id = $2", raw_user_statements_str, uid)
+
+    questions_rows = await conn.fetch("""
+        SELECT key, text
+        FROM user_questions
+        WHERE user_id = $1 AND answered = FALSE AND is_followup = FALSE
+    """, uid)
+    pending_questions = [dict(r) for r in questions_rows]
+
+    field_catalog = "\n".join(
+        f"- {q.get('id')}: {q.get('question_text')}"
+        for q in active_questions
+        if q.get("id")
+    )
+    unanswered_questions_list = "\n".join(
+        f"- {q['key']}: {q['text']}" for q in pending_questions
+    )
+
+    intent = (_parse_json_field(profile.get("matching_prefs")).get("intent_type") or "long_term").lower()
+    all_narratives = get_llm_prompts(intent)
+    profile_answers_now = _parse_json_field(profile.get("profile_answers"))
+    pending_narratives = [p for p in all_narratives if not profile_answers_now.get(p["id"])]
+    if pending_narratives:
+        narrative_prompts_list = "\n".join(
+            f'- [narrative_id: {p["id"]}] "{p["prompt"]}"'
+            for p in pending_narratives
+        )
+    else:
+        narrative_prompts_list = "(all narrative prompts answered — no action needed)"
+
+    prompt = CONSOLIDATED_POST_TURN_PROMPT.format(
+        conversation=conversation,
+        user_name=user_name,
+        wiki_about_me=profile.get("wiki_about_me") or "(empty)",
+        wiki_context=profile.get("wiki_context") or "(empty)",
+        wiki_preferences=profile.get("wiki_preferences") or "(empty)",
+        wiki_matching=profile.get("wiki_matching") or "(empty)",
+        field_catalog=field_catalog,
+        unanswered_questions_list=unanswered_questions_list,
+        narrative_prompts_list=narrative_prompts_list,
+    )
+
+    payload = {}
+    try:
+        raw = await _gemini_call(
+            TEXT_MODEL, prompt,
+            generation_config={"response_mime_type": "application/json"},
+        )
+        payload = json.loads(raw)
+    except Exception as e:
+        logger.warning(f"[post-turn] Gemini extraction failed: {type(e).__name__}: {e}")
+
+    wiki_updates = payload.get("wiki_updates") or {}
+    wiki_about_me = wiki_updates.get("about_me") or profile.get("wiki_about_me") or ""
+    wiki_context = wiki_updates.get("context") or profile.get("wiki_context") or ""
+    wiki_preferences = wiki_updates.get("preferences") or profile.get("wiki_preferences") or ""
+    wiki_matching = wiki_updates.get("matching") or profile.get("wiki_matching") or ""
+
+    extracted_answers = payload.get("extracted_answers") or []
+    sensitive_public_opt_in = set(payload.get("sensitive_public_opt_in") or [])
+    extracted_summary = (payload.get("public_summary") or "").strip()
+    answered_keys = set(payload.get("answered_question_keys") or [])
+
+    existing_answers = profile.get("profile_answers") or {}
+    public_map = profile.get("profile_answers_public") or {}
+    private_map = profile.get("profile_answers_private") or {}
+    sensitive_map = profile.get("profile_answers_sensitive") or {}
+    visibility_map = profile.get("profile_field_visibility") or {}
+
+    for item in extracted_answers:
+        field_id = item.get("id")
+        if not field_id or field_id not in PROFILE_FIELD_META:
+            continue
+        if "value" not in item:
+            continue
+        value = item["value"]
+        meta = PROFILE_FIELD_META.get(field_id, {})
+        sensitive = bool(meta.get("sensitive_flag"))
+
+        existing_answers[field_id] = value
+        if sensitive:
+            sensitive_map[field_id] = value
+            public_allowed = field_id in sensitive_public_opt_in
+            visibility_map[field_id] = "public" if public_allowed else "private"
+            if public_allowed:
+                public_map[field_id] = value
+            else:
+                public_map.pop(field_id, None)
+                private_map[field_id] = value
+        else:
+            visibility_map[field_id] = "public"
+            public_map[field_id] = value
+            private_map.pop(field_id, None)
+
+    narrative_answers = payload.get("narrative_answers") or []
+    valid_narrative_ids = {p["id"] for p in all_narratives}
+    for item in narrative_answers:
+        nid = item.get("id")
+        answer_text = (item.get("answer") or "").strip()
+        if nid and nid in valid_narrative_ids and answer_text:
+            existing_answers[nid] = answer_text
+            entry = f"\n- [{nid}] {answer_text}"
+            if entry not in wiki_matching:
+                wiki_matching = (wiki_matching or "") + entry
+
+    structured_wiki = _render_structured_wiki(existing_answers)
+
+    profile_update_args = [
+        wiki_about_me, wiki_context, wiki_preferences, wiki_matching,
+        json.dumps(existing_answers), json.dumps(public_map), json.dumps(private_map),
+        json.dumps(sensitive_map), json.dumps(visibility_map), structured_wiki,
+        extracted_summary or profile.get("profile_ai_observations") or "",
+        extracted_summary or profile.get("profile_public") or "",
+        raw_user_statements_str, uid
+    ]
+
+    await conn.execute("""
+        UPDATE users SET
+            wiki_about_me = $1,
+            wiki_context = $2,
+            wiki_preferences = $3,
+            wiki_matching = $4,
+            profile_answers = $5,
+            profile_answers_public = $6,
+            profile_answers_private = $7,
+            profile_answers_sensitive = $8,
+            profile_field_visibility = $9,
+            wiki_profile_structured = $10,
+            profile_ai_observations = $11,
+            profile_public = $12,
+            raw_user_statements = $13,
+            updated_at = NOW()
+        WHERE id = $14
+    """, *profile_update_args)
+
+    all_answered_keys = answered_keys | set(existing_answers.keys())
+    if all_answered_keys:
+        await conn.execute("""
+            UPDATE user_questions
+            SET answered = TRUE, answered_at = NOW()
+            WHERE user_id = $1 AND key = ANY($2) AND answered = FALSE
+        """, uid, list(all_answered_keys))
+
+    await conn.execute("""
+        INSERT INTO user_memories (user_id, text, session_id)
+        VALUES ($1, $2, $3)
+    """, uid, conversation, session_id)
+
+    return {"updated": True}
+
 def _render_structured_wiki(profile_answers: dict) -> str:
     by_section: dict[str, list[tuple[str, object]]] = {}
     for field_id, value in profile_answers.items():
@@ -1035,197 +1216,17 @@ def _render_structured_wiki(profile_answers: dict) -> str:
 @app.post("/post-turn")
 @limiter.limit(RATE_POST_TURN)
 async def post_turn(request: Request, body: PostTurnRequest, uid: str = Depends(verify_token)):
-    if not body.messages:
-        return {"updated": False}
-
-    conversation = "\n".join(
-        f"{m['role'].upper()}: {m['text']}" for m in body.messages[-10:]
-    )
-
     pool = app.state.pool
     async with pool.acquire() as conn:
-        profile_row = await conn.fetchrow("SELECT * FROM users WHERE id = $1", uid)
-        if not profile_row:
-            return {"updated": False}
-        profile = _parse_row(profile_row)
-        active_questions = _active_questions_for_profile(profile)
-        user_name = profile.get("display_name") or "User"
-
-        # Store verbatim statements
-        user_lines = [m["text"] for m in body.messages[-10:] if m.get("role") == "user" and m.get("text", "").strip()]
-        raw_user_statements_str = "[]"
-        if user_lines:
-            try:
-                existing_statements = json.loads(profile.get("raw_user_statements") or "[]")
-            except Exception:
-                existing_statements = []
-            combined = existing_statements + user_lines
-            raw_user_statements_str = json.dumps(combined[-100:])
-            await conn.execute("UPDATE users SET raw_user_statements = $1 WHERE id = $2", raw_user_statements_str, uid)
-
-        # Fetch unanswered questions for the prompt checklist
-        questions_rows = await conn.fetch("""
-            SELECT key, text 
-            FROM user_questions 
-            WHERE user_id = $1 AND answered = FALSE AND is_followup = FALSE
-        """, uid)
-        pending_questions = [dict(r) for r in questions_rows]
-
-        # Assemble catalog & pending lists
-        field_catalog = "\n".join(
-            f"- {q.get('id')}: {q.get('question_text')}"
-            for q in active_questions
-            if q.get("id")
-        )
-        unanswered_questions_list = "\n".join(
-            f"- {q['key']}: {q['text']}" for q in pending_questions
+        result = await _process_post_turn_from_messages(
+            conn,
+            uid=uid,
+            session_id=body.session_id,
+            messages=body.messages,
         )
 
-        # Narrative prompts from questionnaire graph — only include ones not yet answered
-        intent = (_parse_json_field(profile.get("matching_prefs")).get("intent_type") or "long_term").lower()
-        all_narratives = get_llm_prompts(intent)
-        profile_answers_now = _parse_json_field(profile.get("profile_answers"))
-        pending_narratives = [p for p in all_narratives if not profile_answers_now.get(p["id"])]
-        if pending_narratives:
-            narrative_prompts_list = "\n".join(
-                f'- [narrative_id: {p["id"]}] "{p["prompt"]}"'
-                for p in pending_narratives
-            )
-        else:
-            narrative_prompts_list = "(all narrative prompts answered — no action needed)"
-
-        prompt = CONSOLIDATED_POST_TURN_PROMPT.format(
-            conversation=conversation,
-            user_name=user_name,
-            wiki_about_me=profile.get("wiki_about_me") or "(empty)",
-            wiki_context=profile.get("wiki_context") or "(empty)",
-            wiki_preferences=profile.get("wiki_preferences") or "(empty)",
-            wiki_matching=profile.get("wiki_matching") or "(empty)",
-            field_catalog=field_catalog,
-            unanswered_questions_list=unanswered_questions_list,
-            narrative_prompts_list=narrative_prompts_list,
-        )
-
-        # Call Gemini with automatic key-rotation fallback on quota exhaustion
-        payload = {}
-        try:
-            raw = await _gemini_call(
-                TEXT_MODEL, prompt,
-                generation_config={"response_mime_type": "application/json"},
-            )
-            payload = json.loads(raw)
-        except Exception as e:
-            logger.warning(f"[post-turn] Gemini extraction failed: {type(e).__name__}: {e}")
-
-        wiki_updates = payload.get("wiki_updates") or {}
-        # Use `or` fallback so an empty string from Gemini preserves existing wiki
-        wiki_about_me = wiki_updates.get("about_me") or profile.get("wiki_about_me") or ""
-        wiki_context = wiki_updates.get("context") or profile.get("wiki_context") or ""
-        wiki_preferences = wiki_updates.get("preferences") or profile.get("wiki_preferences") or ""
-        wiki_matching = wiki_updates.get("matching") or profile.get("wiki_matching") or ""
-
-        extracted_answers = payload.get("extracted_answers") or []
-        sensitive_public_opt_in = set(payload.get("sensitive_public_opt_in") or [])
-        extracted_summary = (payload.get("public_summary") or "").strip()
-        answered_keys = set(payload.get("answered_question_keys") or [])
-
-        existing_answers = profile.get("profile_answers") or {}
-        public_map = profile.get("profile_answers_public") or {}
-        private_map = profile.get("profile_answers_private") or {}
-        sensitive_map = profile.get("profile_answers_sensitive") or {}
-        visibility_map = profile.get("profile_field_visibility") or {}
-
-        for item in extracted_answers:
-            field_id = item.get("id")
-            if not field_id or field_id not in PROFILE_FIELD_META:
-                continue
-            if "value" not in item:
-                continue
-            value = item["value"]
-            meta = PROFILE_FIELD_META.get(field_id, {})
-            sensitive = bool(meta.get("sensitive_flag"))
-
-            existing_answers[field_id] = value
-            if sensitive:
-                sensitive_map[field_id] = value
-                public_allowed = field_id in sensitive_public_opt_in
-                visibility_map[field_id] = "public" if public_allowed else "private"
-                if public_allowed:
-                    public_map[field_id] = value
-                else:
-                    public_map.pop(field_id, None)
-                    private_map[field_id] = value
-            else:
-                visibility_map[field_id] = "public"
-                public_map[field_id] = value
-                private_map.pop(field_id, None)
-
-        # Save narrative answers from questionnaire graph prompts.
-        # These go into profile_answers keyed by narrative_id, and are also
-        # appended to wiki_matching so the matching engine can embed them.
-        narrative_answers = payload.get("narrative_answers") or []
-        valid_narrative_ids = {p["id"] for p in all_narratives}
-        for item in narrative_answers:
-            nid = item.get("id")
-            answer_text = (item.get("answer") or "").strip()
-            if nid and nid in valid_narrative_ids and answer_text:
-                existing_answers[nid] = answer_text
-                # Surface the answer in wiki_matching so it feeds the embedding
-                label = next((p["prompt"][:60] for p in all_narratives if p["id"] == nid), nid)
-                entry = f"\n- [{nid}] {answer_text}"
-                if entry not in wiki_matching:
-                    wiki_matching = (wiki_matching or "") + entry
-
-        structured_wiki = _render_structured_wiki(existing_answers)
-
-        profile_update_args = [
-            wiki_about_me, wiki_context, wiki_preferences, wiki_matching,
-            json.dumps(existing_answers), json.dumps(public_map), json.dumps(private_map),
-            json.dumps(sensitive_map), json.dumps(visibility_map), structured_wiki,
-            extracted_summary or profile.get("profile_ai_observations") or "",
-            extracted_summary or profile.get("profile_public") or "",
-            raw_user_statements_str, uid
-        ]
-
-        await conn.execute("""
-            UPDATE users SET
-                wiki_about_me = $1,
-                wiki_context = $2,
-                wiki_preferences = $3,
-                wiki_matching = $4,
-                profile_answers = $5,
-                profile_answers_public = $6,
-                profile_answers_private = $7,
-                profile_answers_sensitive = $8,
-                profile_field_visibility = $9,
-                wiki_profile_structured = $10,
-                profile_ai_observations = $11,
-                profile_public = $12,
-                raw_user_statements = $13,
-                updated_at = NOW()
-            WHERE id = $14
-        """, *profile_update_args)
-
-        # Mark questions as answered in Database
-        all_answered_keys = answered_keys | set(existing_answers.keys())
-        if all_answered_keys:
-            await conn.execute("""
-                UPDATE user_questions
-                SET answered = TRUE, answered_at = NOW()
-                WHERE user_id = $1 AND key = ANY($2) AND answered = FALSE
-            """, uid, list(all_answered_keys))
-
-        # Add audit memory log
-        await conn.execute("""
-            INSERT INTO user_memories (user_id, text, session_id)
-            VALUES ($1, $2, $3)
-        """, uid, conversation, body.session_id)
-
-    # Re-embed matching wiki in the background so pgvector stays fresh without
-    # blocking the post-turn response.
     asyncio.create_task(_refresh_wiki_embedding(uid, app.state.pool))
-
-    return {"updated": True}
+    return result
 
 # ── Health ────────────────────────────────────────────────────────────────────
 
@@ -1622,8 +1623,11 @@ async def get_public_profile(userId: str, uid: str = Depends(verify_token)):
                 pass
         
         if photo_order:
-            rank = {url: i for i, url in enumerate(photo_order)}
-            photos.sort(key=lambda u: rank.get(u, 999999))
+            if not photos:
+                photos = [u for u in photo_order if isinstance(u, str) and u.strip()]
+            else:
+                rank = {url: i for i, url in enumerate(photo_order)}
+                photos.sort(key=lambda u: rank.get(u, 999999))
             data["photos"] = photos
             
         data.pop("photo_order", None)
@@ -1846,7 +1850,7 @@ async def mark_question_answered(qid: str, uid: str = Depends(verify_token)):
 @app.get("/explore")
 async def explore(gender: str | None = None, ageMin: int | None = None, ageMax: int | None = None, query: str | None = None, uid: str = Depends(verify_token)):
     pool = app.state.pool
-    sql = "SELECT id, display_name, age, gender, location_region, profile_public FROM users WHERE onboarding_complete = TRUE AND id != $1"
+    sql = "SELECT id, display_name, age, gender, location_region, profile_public, photo_order FROM users WHERE onboarding_complete = TRUE AND id != $1"
     args = [uid]
     idx = 2
     
@@ -1874,9 +1878,18 @@ async def explore(gender: str | None = None, ageMin: int | None = None, ageMax: 
         people = []
         for r in rows:
             p = dict(r)
+            photo_order = []
+            if p.get("photo_order"):
+                try:
+                    photo_order = json.loads(p["photo_order"]) if isinstance(p["photo_order"], str) else p["photo_order"]
+                except Exception:
+                    photo_order = []
+            p["photo_order"] = [u for u in photo_order if isinstance(u, str) and u.strip()]
             # Retrieve single photo for preview
             media_rows = await conn.fetch("SELECT photo_url FROM user_media WHERE user_id = $1 ORDER BY created_at DESC LIMIT 1", p["id"])
             p["photo_url"] = media_rows[0]["photo_url"] if media_rows else ""
+            if not p["photo_url"] and p["photo_order"]:
+                p["photo_url"] = p["photo_order"][0]
             people.append(p)
         return people
 

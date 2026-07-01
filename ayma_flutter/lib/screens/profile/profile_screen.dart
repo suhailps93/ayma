@@ -1,44 +1,17 @@
-// Profile editor: public/private bio, photo carousel, wiki sections, and completeness.
+// Profile editor: public/private wiki sections and completeness.
+import 'dart:ui';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_animate/flutter_animate.dart';
-import 'package:go_router/go_router.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
-import 'package:image_picker/image_picker.dart';
+import 'package:go_router/go_router.dart';
 
 import '../../models/profile.dart';
 import '../../providers/providers.dart';
-import '../../services/backend_service.dart';
 import '../../services/api_service.dart';
 import '../../theme.dart';
 import '../../widgets/ayma_button.dart';
 import '../../widgets/ayma_text_field.dart';
-import '../../widgets/public_profile_view.dart';
-import 'dart:ui';
-
-// ─── Top-level helpers ────────────────────────────────────────────────────────
-
-String _first(Iterable<dynamic> values) {
-  for (final v in values) {
-    if (v != null && v.toString().trim().isNotEmpty) return v.toString().trim();
-  }
-  return '';
-}
-
-int? _age(Iterable<dynamic> values) {
-  for (final v in values) {
-    if (v == null) continue;
-    if (v is int && v > 0) return v;
-    final n = int.tryParse(v.toString());
-    if (n != null && n > 0) return n;
-  }
-  return null;
-}
-
-String _cityOnly(String region) {
-  if (region.isEmpty) return '';
-  return region.split(',').first.trim();
-}
-
 
 // ─── ProfileScreen ────────────────────────────────────────────────────────────
 
@@ -55,7 +28,6 @@ class _ProfileScreenState extends ConsumerState<ProfileScreen>
 
   bool _editingBasic = false;
   bool _saving = false;
-  bool _uploadingPhoto = false;
 
   final _bioCtrl = TextEditingController();
   final _notesCtrl = TextEditingController();
@@ -89,19 +61,6 @@ class _ProfileScreenState extends ConsumerState<ProfileScreen>
     super.dispose();
   }
 
-  void _startEdit(UserProfile profile) {
-    _bioCtrl.text = profile.profilePublic ?? '';
-    _notesCtrl.text = profile.profilePrivate ?? '';
-    _agentNameCtrl.text = profile.agentName;
-    _nameCtrl.text = profile.displayName;
-    _ageCtrl.text = profile.age?.toString() ?? '';
-    _locationCtrl.text = profile.locationRegion ?? '';
-    _genderVal = profile.gender;
-    _voicePref = profile.voicePreference;
-    _matchingPaused = profile.matchingPaused;
-    setState(() => _editingBasic = true);
-  }
-
   Future<void> _save(UserProfile profile) async {
     setState(() => _saving = true);
     try {
@@ -130,107 +89,6 @@ class _ProfileScreenState extends ConsumerState<ProfileScreen>
       }
     }
     if (mounted) setState(() => _saving = false);
-  }
-
-  Future<ImageSource?> _pickPhotoSource() async {
-    return showModalBottomSheet<ImageSource>(
-      context: context,
-      backgroundColor: context.ac.bgElev,
-      shape: const RoundedRectangleBorder(
-        borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
-      ),
-      builder: (_) => SafeArea(
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            ListTile(
-              leading:
-                  Icon(Icons.camera_alt_outlined, color: context.ac.fg),
-              title: Text('Take photo',
-                  style: TextStyle(color: context.ac.fg)),
-              onTap: () => Navigator.pop(context, ImageSource.camera),
-            ),
-            ListTile(
-              leading: Icon(Icons.photo_library_outlined,
-                  color: context.ac.fg),
-              title: Text('Choose from gallery',
-                  style: TextStyle(color: context.ac.fg)),
-              onTap: () => Navigator.pop(context, ImageSource.gallery),
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-
-  Future<void> _addPhoto(UserProfile profile) async {
-    final source = await _pickPhotoSource();
-    if (source == null) return;
-    final picker = ImagePicker();
-    final picked = await picker.pickImage(source: source, imageQuality: 85);
-    if (picked == null) return;
-    setState(() => _uploadingPhoto = true);
-    try {
-      final bytes = await picked.readAsBytes();
-      final url = await BackendService.uploadMedia(bytes, picked.name);
-      await ApiService.saveMediaRecord(photoUrl: url);
-      ref.invalidate(publicProfileProvider(profile.id));
-      ref.invalidate(insightsProvider);
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-              content: Text('Photo uploaded. Ayma is processing it now.')),
-        );
-      }
-    } catch (e) {
-      if (mounted) {
-        ScaffoldMessenger.of(context)
-            .showSnackBar(SnackBar(content: Text('Photo upload failed: $e')));
-      }
-    }
-    if (mounted) setState(() => _uploadingPhoto = false);
-  }
-
-  Future<void> _toggleLocked(UserProfile profile) async {
-    try {
-      await ApiService.updateProfile(
-          {'profile_public_locked': !profile.profilePublicLocked});
-      ref.invalidate(profileProvider);
-    } catch (e) {
-      if (mounted) {
-        ScaffoldMessenger.of(context)
-            .showSnackBar(SnackBar(content: Text('Failed: $e')));
-      }
-    }
-  }
-
-  Future<void> _deletePhoto(UserProfile profile, String photoUrl) async {
-    try {
-      await ApiService.deleteMediaByUrl(photoUrl);
-      ref.invalidate(publicProfileProvider(profile.id));
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('Photo deleted')),
-        );
-      }
-    } catch (e) {
-      if (mounted) {
-        ScaffoldMessenger.of(context)
-            .showSnackBar(SnackBar(content: Text('Delete failed: $e')));
-      }
-    }
-  }
-
-  Future<void> _reorderPhotos(UserProfile profile, List<String> ordered) async {
-    try {
-      await ApiService.updatePhotoOrder(ordered);
-      ref.invalidate(publicProfileProvider(profile.id));
-    } catch (e) {
-      if (mounted) {
-        ScaffoldMessenger.of(context)
-            .showSnackBar(SnackBar(content: Text('Reorder failed: $e')));
-      }
-    }
   }
 
   @override
@@ -310,16 +168,7 @@ class _ProfileScreenState extends ConsumerState<ProfileScreen>
                   child: TabBarView(
                     controller: _tabController,
                     children: [
-                      _PublicTabWithCompleteness(
-                        profile: profile,
-                        uploadingPhoto: _uploadingPhoto,
-                        onStartEdit: () => _startEdit(profile),
-                        onAddPhoto: () => _addPhoto(profile),
-                        onToggleLocked: () => _toggleLocked(profile),
-                        onDeletePhoto: (url) => _deletePhoto(profile, url),
-                        onReorderPhotos: (ordered) =>
-                            _reorderPhotos(profile, ordered),
-                      ),
+                      _PublicTabWithCompleteness(profile: profile),
                       _YourStoryPane(profile: profile),
                     ],
                   ),
@@ -370,6 +219,135 @@ class _TopTabs extends StatelessWidget {
   }
 }
 
+// ─── Shared story sections (Public + Private tabs) ───────────────────────────
+
+class _StorySectionsHeader extends StatelessWidget {
+  const _StorySectionsHeader({
+    required this.profile,
+    required this.title,
+    required this.badge,
+    required this.introLead,
+    required this.introEmphasis,
+  });
+
+  final UserProfile profile;
+  final String title;
+  final String badge;
+  final String introLead;
+  final String introEmphasis;
+
+  @override
+  Widget build(BuildContext context) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Text(
+          '${profile.displayName.isEmpty ? 'SHS' : profile.displayName.toUpperCase()} · SINCE APRIL 2026',
+          style: AymaFonts.mono(size: 9, color: context.ac.fgMute),
+        ).animate().fadeIn(duration: 250.ms),
+        const SizedBox(height: 8),
+        Text(
+          title,
+          style: AymaFonts.serif(size: 72, color: context.ac.fg),
+        ).animate().fadeIn(duration: 320.ms),
+        const SizedBox(height: 16),
+        Row(
+          children: [
+            Text(
+              '⬡ $badge',
+              style: AymaFonts.mono(
+                size: 10,
+                color: context.ac.accent,
+              ).copyWith(letterSpacing: 2.5),
+            ),
+            const SizedBox(width: 10),
+            Expanded(
+              child: Divider(
+                color: context.ac.lineSoft,
+                thickness: 0.5,
+                height: 1,
+              ),
+            ),
+            const SizedBox(width: 10),
+            Text(
+              'UPDATED AS WE TALK',
+              style: AymaFonts.mono(
+                size: 10,
+                color: context.ac.fgMute,
+              ).copyWith(letterSpacing: 2.0),
+            ),
+          ],
+        ),
+        const SizedBox(height: 16),
+        RichText(
+          text: TextSpan(
+            children: [
+              TextSpan(
+                text: introLead,
+                style: AymaFonts.serif(
+                  size: 21,
+                  color: context.ac.fgDim,
+                  italic: true,
+                ),
+              ),
+              TextSpan(
+                text: introEmphasis,
+                style: AymaFonts.serif(size: 21, color: context.ac.fg),
+              ),
+            ],
+          ),
+        ),
+      ],
+    );
+  }
+}
+
+class _WikiSectionRows extends StatelessWidget {
+  const _WikiSectionRows({
+    required this.insights,
+    required this.scopeLabel,
+  });
+
+  final Map<String, dynamic> insights;
+  final String scopeLabel;
+
+  @override
+  Widget build(BuildContext context) {
+    return Column(
+      children: [
+        _PrivateSectionRow(
+          label: 'WHO YOU ARE',
+          content: insights['about_me']?.toString() ?? '',
+          sectionKey: 'about_me',
+          title: 'Who you are',
+          scopeLabel: scopeLabel,
+        ),
+        _PrivateSectionRow(
+          label: "WHAT YOU'RE LOOKING FOR",
+          content: insights['preferences']?.toString() ?? '',
+          sectionKey: 'preferences',
+          title: "What you're looking for",
+          scopeLabel: scopeLabel,
+        ),
+        _PrivateSectionRow(
+          label: 'YOUR LIFE RIGHT NOW',
+          content: insights['context']?.toString() ?? '',
+          sectionKey: 'context',
+          title: 'Your life right now',
+          scopeLabel: scopeLabel,
+        ),
+        _PrivateSectionRow(
+          label: 'FOR MATCHING',
+          content: insights['matching']?.toString() ?? '',
+          sectionKey: 'matching',
+          title: 'For matching',
+          scopeLabel: scopeLabel,
+        ),
+      ],
+    );
+  }
+}
+
 // ─── Tab 1: Private Profile (wiki) ───────────────────────────────────────────
 
 class _YourStoryPane extends ConsumerWidget {
@@ -398,87 +376,15 @@ class _YourStoryPane extends ConsumerWidget {
         return ListView(
           padding: const EdgeInsets.fromLTRB(16, 12, 16, 20),
           children: [
-            Text(
-              '${profile.displayName.isEmpty ? 'SHS' : profile.displayName.toUpperCase()} · SINCE APRIL 2026',
-              style: AymaFonts.mono(size: 9, color: context.ac.fgMute),
-            ).animate().fadeIn(duration: 250.ms),
-            const SizedBox(height: 8),
-            Text(
-              'Just between us.',
-              style: AymaFonts.serif(size: 72, color: context.ac.fg),
-            ).animate().fadeIn(duration: 320.ms),
-            const SizedBox(height: 16),
-            Row(
-              children: [
-                Text(
-                  '⬡ PRIVATE',
-                  style: AymaFonts.mono(
-                    size: 10,
-                    color: context.ac.accent,
-                  ).copyWith(letterSpacing: 2.5),
-                ),
-                const SizedBox(width: 10),
-                Expanded(
-                  child: Divider(
-                    color: context.ac.lineSoft,
-                    thickness: 0.5,
-                    height: 1,
-                  ),
-                ),
-                const SizedBox(width: 10),
-                Text(
-                  'UPDATED AS WE TALK',
-                  style: AymaFonts.mono(
-                    size: 10,
-                    color: context.ac.fgMute,
-                  ).copyWith(letterSpacing: 2.0),
-                ),
-              ],
-            ),
-            const SizedBox(height: 16),
-            RichText(
-              text: TextSpan(
-                children: [
-                  TextSpan(
-                    text: "What I've come to know about you — ",
-                    style: AymaFonts.serif(
-                      size: 21,
-                      color: context.ac.fgDim,
-                      italic: true,
-                    ),
-                  ),
-                  TextSpan(
-                    text: 'only you can see this.',
-                    style: AymaFonts.serif(size: 21, color: context.ac.fg),
-                  ),
-                ],
-              ),
+            _StorySectionsHeader(
+              profile: profile,
+              title: 'Just between us.',
+              badge: 'PRIVATE',
+              introLead: "What I've come to know about you — ",
+              introEmphasis: 'only you can see this.',
             ),
             const SizedBox(height: 20),
-            _PrivateSectionRow(
-              label: 'WHO YOU ARE',
-              content: i['about_me']?.toString() ?? '',
-              sectionKey: 'about_me',
-              title: 'Who you are',
-            ),
-            _PrivateSectionRow(
-              label: "WHAT YOU'RE LOOKING FOR",
-              content: i['preferences']?.toString() ?? '',
-              sectionKey: 'preferences',
-              title: "What you're looking for",
-            ),
-            _PrivateSectionRow(
-              label: 'YOUR LIFE RIGHT NOW',
-              content: i['context']?.toString() ?? '',
-              sectionKey: 'context',
-              title: 'Your life right now',
-            ),
-            _PrivateSectionRow(
-              label: 'FOR MATCHING',
-              content: i['matching']?.toString() ?? '',
-              sectionKey: 'matching',
-              title: 'For matching',
-            ),
+            _WikiSectionRows(insights: i, scopeLabel: 'PRIVATE'),
           ],
         );
       },
@@ -504,12 +410,14 @@ class _PrivateSectionRow extends StatelessWidget {
     required this.content,
     required this.sectionKey,
     required this.title,
+    this.scopeLabel = 'PRIVATE',
   });
 
   final String label;
   final String content;
   final String sectionKey;
   final String title;
+  final String scopeLabel;
 
   @override
   Widget build(BuildContext context) {
@@ -523,6 +431,7 @@ class _PrivateSectionRow extends StatelessWidget {
             content: content,
             sectionKey: sectionKey,
             title: title,
+            scopeLabel: scopeLabel,
           ),
           transitionsBuilder: (_, animation, __, child) {
             final tween = Tween<Offset>(
@@ -600,12 +509,14 @@ class _SectionDetailPage extends StatefulWidget {
     required this.content,
     required this.sectionKey,
     required this.title,
+    this.scopeLabel = 'PRIVATE',
   });
 
   final String label;
   final String content;
   final String sectionKey;
   final String title;
+  final String scopeLabel;
 
   @override
   State<_SectionDetailPage> createState() => _SectionDetailPageState();
@@ -740,7 +651,7 @@ class _SectionDetailPageState extends State<_SectionDetailPage> {
                           crossAxisAlignment: CrossAxisAlignment.start,
                           children: [
                             Text(
-                              '⬡ PRIVATE',
+                              '⬡ ${widget.scopeLabel}',
                               style: AymaFonts.mono(
                                 size: 10,
                                 color: context.ac.accent,
@@ -975,8 +886,8 @@ class _SectionDetailPageState extends State<_SectionDetailPage> {
                   child: BackdropFilter(
                     filter: ImageFilter.blur(sigmaX: 10, sigmaY: 10),
                     child: Container(
-                      color: const Color(0xF014100C),
                       decoration: BoxDecoration(
+                        color: const Color(0xF014100C),
                         border: Border(
                           top: BorderSide(
                             color: context.ac.lineSoft.withValues(alpha: 0.08),
@@ -1064,121 +975,17 @@ class _SectionDetailPageState extends State<_SectionDetailPage> {
   }
 }
 
-// ─── Tab 1: Edit (public profile) ────────────────────────────────────────────
-
-class _EditPublicPane extends ConsumerWidget {
-  const _EditPublicPane({
-    required this.profile,
-    required this.uploadingPhoto,
-    required this.onStartEdit,
-    required this.onAddPhoto,
-    required this.onToggleLocked,
-    required this.onDeletePhoto,
-    required this.onReorderPhotos,
-  });
-
-  final UserProfile profile;
-  final bool uploadingPhoto;
-  final VoidCallback onStartEdit;
-  final VoidCallback onAddPhoto;
-  final VoidCallback onToggleLocked;
-  final ValueChanged<String> onDeletePhoto;
-  final ValueChanged<List<String>> onReorderPhotos;
-
-  @override
-  Widget build(BuildContext context, WidgetRef ref) {
-    final publicAsync = ref.watch(publicProfileProvider(profile.id));
-
-    return publicAsync.when(
-      loading: () => Center(
-        child: CircularProgressIndicator(
-            strokeWidth: 1.5, color: context.ac.accent),
-      ),
-      error: (e, _) => Center(
-        child:
-            Text('Error: $e', style: TextStyle(color: context.ac.fgMute)),
-      ),
-      data: (pub) {
-        final p = pub ?? const <String, dynamic>{};
-        final photos = ((p['photos'] as List?) ?? const [])
-            .whereType<String>()
-            .where((u) => u.isNotEmpty)
-            .toList();
-
-        // Use profile fields directly — they come from onboarding / edit saves
-        final name = profile.displayName.isNotEmpty
-            ? profile.displayName
-            : _first([p['display_name']]);
-        final age = profile.age ?? _age([p['age']]);
-        final gender = _first([profile.gender, p['gender']]);
-        final location =
-            _cityOnly(_first([profile.locationRegion, p['location_region']]));
-        final interestedIn = _first([
-          profile.matchingPrefs['interested_in'],
-          (p['matching_prefs'] as Map?)?['interested_in'],
-        ]);
-        final job = _first([p['job'], p['occupation']]);
-        final company = _first([p['company'], p['employer']]);
-        final jobPill = job.isNotEmpty
-            ? (company.isNotEmpty ? '$job · $company' : job)
-            : '';
-        final extraPills = <String>[
-          jobPill,
-          _first([p['height_text'], p['height']]),
-          _first([p['pronouns']]),
-          _first([p['religion']]),
-          _first([p['relationship_goal']]),
-        ].where((e) => e.isNotEmpty).toList();
-        final bio = _first([profile.profilePublic, p['profile_public']]);
-
-        return PublicProfileView(
-          photos: photos,
-          name: name,
-          age: age,
-          gender: gender,
-          location: location,
-          interestedIn: interestedIn,
-          bio: bio,
-          uploadingPhoto: uploadingPhoto,
-          onAddPhoto: onAddPhoto,
-          onStartEdit: onStartEdit,
-          onToggleLocked: onToggleLocked,
-          profilePublicLocked: profile.profilePublicLocked,
-          showEditControls: true,
-          onDeletePhoto: onDeletePhoto,
-          onReorderPhotos: onReorderPhotos,
-          extraPills: extraPills,
-          isOnline: true,
-        );
-      },
-    );
-  }
-}
-
-// ─── Tab 0 wrapper: Public + completeness bar ─────────────────────────────────
+// ─── Tab 0: Public profile (same sections as Private) ─────────────────────────
 
 class _PublicTabWithCompleteness extends ConsumerWidget {
-  const _PublicTabWithCompleteness({
-    required this.profile,
-    required this.uploadingPhoto,
-    required this.onStartEdit,
-    required this.onAddPhoto,
-    required this.onToggleLocked,
-    required this.onDeletePhoto,
-    required this.onReorderPhotos,
-  });
+  const _PublicTabWithCompleteness({required this.profile});
 
   final UserProfile profile;
-  final bool uploadingPhoto;
-  final VoidCallback onStartEdit;
-  final VoidCallback onAddPhoto;
-  final VoidCallback onToggleLocked;
-  final ValueChanged<String> onDeletePhoto;
-  final ValueChanged<List<String>> onReorderPhotos;
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final completenessAsync = ref.watch(profileCompletenessProvider);
+    final insightsAsync = ref.watch(insightsProvider);
     final pct = (completenessAsync.valueOrNull ?? 0.0).round();
 
     return Column(
@@ -1207,209 +1014,37 @@ class _PublicTabWithCompleteness extends ConsumerWidget {
           ),
         ),
         Expanded(
-          child: _EditPublicPane(
-            profile: profile,
-            uploadingPhoto: uploadingPhoto,
-            onStartEdit: onStartEdit,
-            onAddPhoto: onAddPhoto,
-            onToggleLocked: onToggleLocked,
-            onDeletePhoto: onDeletePhoto,
-            onReorderPhotos: onReorderPhotos,
-          ),
-        ),
-      ],
-    );
-  }
-}
-
-// ─── Photo carousel ───────────────────────────────────────────────────────────
-
-class _PhotoCarousel extends StatefulWidget {
-  const _PhotoCarousel({
-    required this.photos,
-    required this.uploadingPhoto,
-    required this.onAddPhoto,
-  });
-  final List<String> photos;
-  final bool uploadingPhoto;
-  final VoidCallback onAddPhoto;
-
-  @override
-  State<_PhotoCarousel> createState() => _PhotoCarouselState();
-}
-
-class _PhotoCarouselState extends State<_PhotoCarousel> {
-  int _page = 0;
-  late final PageController _ctrl;
-
-  @override
-  void initState() {
-    super.initState();
-    _ctrl = PageController();
-  }
-
-  @override
-  void dispose() {
-    _ctrl.dispose();
-    super.dispose();
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    final photos = widget.photos;
-    final hasPhotos = photos.isNotEmpty;
-    final h =
-        MediaQuery.sizeOf(context).width * 1.1; // slightly taller than square
-
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        // Section label + count
-        Row(
-          children: [
-            Text('PHOTOS',
-                style: AymaFonts.mono(size: 9, color: context.ac.fgMute)),
-            if (hasPhotos) ...[
-              const SizedBox(width: 8),
-              Text('· ${photos.length}',
-                  style: AymaFonts.mono(
-                      size: 9,
-                      color: context.ac.fgMute.withValues(alpha: 0.5))),
-            ],
-          ],
-        ),
-        const SizedBox(height: 10),
-
-        // Carousel or empty state
-        ClipRRect(
-          borderRadius: BorderRadius.circular(18),
-          child: SizedBox(
-            height: h,
-            child: hasPhotos
-                ? Stack(
-                    fit: StackFit.expand,
-                    children: [
-                      PageView.builder(
-                        controller: _ctrl,
-                        itemCount: photos.length,
-                        onPageChanged: (i) => setState(() => _page = i),
-                        itemBuilder: (_, i) => Image.network(
-                          photos[i],
-                          fit: BoxFit.cover,
-                          errorBuilder: (_, __, ___) =>
-                              Container(color: context.ac.bgCard),
-                        ),
-                      ),
-                      // STRONGEST badge on first photo
-                      if (_page == 0)
-                        Positioned(
-                          top: 12,
-                          left: 12,
-                          child: Container(
-                            padding: const EdgeInsets.symmetric(
-                                horizontal: 8, vertical: 4),
-                            decoration: BoxDecoration(
-                              color: context.ac.accent,
-                              borderRadius: BorderRadius.circular(6),
-                            ),
-                            child: Text('STRONGEST',
-                                style: AymaFonts.mono(
-                                    size: 8, color: Colors.black)),
-                          ),
-                        ),
-                      // Page dots
-                      if (photos.length > 1)
-                        Positioned(
-                          bottom: 12,
-                          left: 0,
-                          right: 0,
-                          child: Row(
-                            mainAxisAlignment: MainAxisAlignment.center,
-                            children: List.generate(photos.length, (i) {
-                              return AnimatedContainer(
-                                duration: const Duration(milliseconds: 200),
-                                margin:
-                                    const EdgeInsets.symmetric(horizontal: 3),
-                                width: _page == i ? 18 : 5,
-                                height: 4,
-                                decoration: BoxDecoration(
-                                  color: _page == i
-                                      ? context.ac.fg
-                                      : context.ac.fg.withValues(alpha: 0.35),
-                                  borderRadius: BorderRadius.circular(2),
-                                ),
-                              );
-                            }),
-                          ),
-                        ),
-                    ],
-                  )
-                : Container(
-                    color: context.ac.bgElev,
-                    child: Column(
-                      mainAxisAlignment: MainAxisAlignment.center,
-                      children: [
-                        Container(
-                          width: 56,
-                          height: 56,
-                          decoration: BoxDecoration(
-                            shape: BoxShape.circle,
-                            color: context.ac.accent.withValues(alpha: 0.08),
-                            border: Border.all(
-                                color: context.ac.accent.withValues(alpha: 0.2),
-                                width: 1),
-                          ),
-                          child: Icon(Icons.photo_library_outlined,
-                              color: context.ac.accent, size: 24),
-                        ),
-                        const SizedBox(height: 14),
-                        Text('No photos yet',
-                            style: AymaFonts.serif(
-                                size: 18, color: context.ac.fg)),
-                        const SizedBox(height: 6),
-                        Text('Add some to complete your profile',
-                            style: AymaFonts.sans(
-                                size: 12, color: context.ac.fgMute)),
-                      ],
-                    ),
+          child: insightsAsync.when(
+            loading: () => Center(
+              child: CircularProgressIndicator(
+                strokeWidth: 1.5,
+                color: context.ac.accent,
+              ),
+            ),
+            error: (e, _) => Center(
+              child: Text(
+                'Error: $e',
+                style: TextStyle(color: context.ac.fgMute),
+              ),
+            ),
+            data: (insights) {
+              final i =
+                  insights as Map<String, dynamic>? ?? const <String, dynamic>{};
+              return ListView(
+                padding: const EdgeInsets.fromLTRB(16, 12, 16, 20),
+                children: [
+                  _StorySectionsHeader(
+                    profile: profile,
+                    title: 'What they see.',
+                    badge: 'PUBLIC',
+                    introLead: 'This is how you appear to others — ',
+                    introEmphasis: 'tap any section to edit.',
                   ),
-          ),
-        ),
-        const SizedBox(height: 10),
-
-        // Add photo button
-        GestureDetector(
-          onTap: widget.uploadingPhoto ? null : widget.onAddPhoto,
-          child: Container(
-            padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
-            decoration: BoxDecoration(
-              color: context.ac.bgElev,
-              borderRadius: BorderRadius.circular(12),
-              border: Border.all(color: context.ac.lineSoft, width: 0.5),
-            ),
-            child: Row(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                if (widget.uploadingPhoto)
-                  SizedBox(
-                    width: 14,
-                    height: 14,
-                    child: CircularProgressIndicator(
-                        strokeWidth: 1.5, color: context.ac.accent),
-                  )
-                else
-                  Icon(Icons.add_photo_alternate_outlined,
-                      size: 16, color: context.ac.accent),
-                const SizedBox(width: 7),
-                Text(
-                  widget.uploadingPhoto ? 'Uploading…' : 'Add photo',
-                  style: TextStyle(
-                      color: context.ac.accent,
-                      fontSize: 13,
-                      fontWeight: FontWeight.w500),
-                ),
-              ],
-            ),
+                  const SizedBox(height: 20),
+                  _WikiSectionRows(insights: i, scopeLabel: 'PUBLIC'),
+                ],
+              );
+            },
           ),
         ),
       ],

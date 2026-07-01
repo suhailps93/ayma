@@ -160,6 +160,29 @@ class AymaAudioService extends ChangeNotifier {
           ' topic=${event.topic ?? ''}'
           ' from=${event.participant?.identity ?? 'unknown'}: $reply',
         );
+
+        try {
+          final payload = jsonDecode(reply);
+          if (payload is Map<String, dynamic>) {
+            final type = payload['type'] as String? ?? '';
+            final text = (payload['text'] as String? ?? '').trim();
+            final isFinal = (payload['is_final'] as bool?) ?? false;
+            if (text.isNotEmpty && isFinal) {
+              if (type == 'user_transcript') {
+                _addTranscript(text, isUser: true);
+                _userTalking = false;
+                notifyListeners();
+                return;
+              }
+              if (type == 'agent_transcript') {
+                _addTranscript(text, isUser: false);
+                _setState(SessionState.listening);
+                return;
+              }
+            }
+          }
+        } catch (_) {}
+
         _addTranscript(reply, isUser: false);
         _setState(SessionState.listening);
       });

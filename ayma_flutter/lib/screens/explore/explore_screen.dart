@@ -9,6 +9,7 @@ import '../../providers/providers.dart';
 import '../../services/api_service.dart';
 import '../../theme.dart';
 import '../../utils/distance_units.dart';
+import '../../utils/profile_photos.dart';
 import '../../widgets/public_profile_view.dart';
 import 'direct_message_screen.dart';
 
@@ -574,12 +575,11 @@ class _PeopleGrid extends StatelessWidget {
         final p = people[i];
         final rawLoc = (p['location_region'] as String?) ?? '';
         final city = rawLoc.isNotEmpty ? rawLoc.split(',').first.trim() : '';
-        final photos = (p['photo_order'] as List?)?.whereType<String>().toList() ?? [];
         return _ProfileCard(
           profile: p,
           name: (p['display_name'] as String?) ?? 'Someone',
           age: p['age'] as int?,
-          photoUrl: photos.isNotEmpty ? photos.first : null,
+          photoUrl: profilePrimaryPhotoUrl(p),
           location: city,
           isOnline: (p['is_online'] as bool?) ?? false,
           seed: p['id'].hashCode.abs() % 30 + 1,
@@ -898,9 +898,10 @@ class _ExploreProfileScreenState extends State<_ExploreProfileScreen> {
               child: CircularProgressIndicator(color: context.ac.accent),
             );
           }
-          final p = (snap.data != null && snap.data!.isNotEmpty)
-              ? snap.data!
-              : widget.profile;
+          final p = {
+            ...widget.profile,
+            if (snap.data != null) ...snap.data!,
+          };
           final userId = p['id'] as String? ?? '';
           final name = (p['display_name'] as String?)?.trim();
           final age = p['age'];
@@ -920,8 +921,7 @@ class _ExploreProfileScreenState extends State<_ExploreProfileScreen> {
             ((p['religion'] as String?) ?? '').trim(),
             ((p['relationship_goal'] as String?) ?? '').trim(),
           ].where((e) => e.isNotEmpty).toList();
-          final photos =
-              (p['photos'] as List?)?.cast<String>() ?? const <String>[];
+          final photos = profilePhotosFrom(p);
 
           return PublicProfileView(
             photos: photos,

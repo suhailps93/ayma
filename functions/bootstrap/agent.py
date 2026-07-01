@@ -34,6 +34,7 @@ from main import (
     _active_questions_for_profile,
     _answered_question_keys_from_profile,
     _active_key,
+    _process_post_turn_from_messages,
     COMMUNITY_CONFIG,
 )
 
@@ -288,6 +289,8 @@ def make_entrypoint():
         uid = ctx.room.name
         logger.info(f"Agent starting session for room={ctx.room.name} user={uid}")
 
+        pending_user_transcript = ""
+
         # Connect to the LiveKit room
         await ctx.connect()
         logger.info("Agent connected to LiveKit room.")
@@ -349,6 +352,8 @@ def make_entrypoint():
             api_key=api_key,
             voice=voice,
             instructions=system_prompt,
+            input_audio_transcription={},
+            output_audio_transcription={},
         )
 
         # Text LLM model for data tracks
@@ -365,6 +370,130 @@ def make_entrypoint():
         session = AgentSession(
             llm=rt_model,
         )
+
+        def _merge_transcript(existing: str, incoming: str) -> str:
+            next_text = (incoming or "").strip()
+            current = existing.strip()
+            if not next_text:
+                return current
+            if not current:
+                return next_text
+            if current == next_text or current.endswith(next_text):
+                return current
+            if next_text.startswith(current):
+                return next_text
+            return f"{current} {next_text}"
+
+        def _item_role(item: object) -> str:
+            role = getattr(item, "role", "")
+            return str(role).lower()
+
+        def _item_text(item: object) -> str:
+            content = getattr(item, "content", "")
+            if isinstance(content, str):
+                return content.strip()
+            if isinstance(content, list):
+                parts: list[str] = []
+                for part in content:
+                    text = getattr(part, "text", None)
+                    if isinstance(text, str) and text.strip():
+                        parts.append(text.strip())
+                    elif isinstance(part, dict):
+                        raw = part.get("text") or part.get("content")
+                        if isinstance(raw, str) and raw.strip():
+                            parts.append(raw.strip())
+                return " ".join(parts).strip()
+            text = getattr(item, "text", None)
+            if isinstance(text, str):
+                return text.strip()
+            return ""
+
+        async def _publish_event(payload: dict[str, object], topic: str) -> None:
+            try:
+                await ctx.room.local_participant.publish_data(
+                    payload=json.dumps(payload),
+                    reliable=True,
+                    topic=topic,
+                )
+            except Exception as e:
+                logger.warning(f"Failed to publish {topic} payload: {e}")
+
+        async def _persist_turn(user_text: str, model_text: str) -> None:
+            user_text = user_text.strip()
+            model_text = model_text.strip()
+            if not user_text or not model_text:
+                return
+            session_id = f"lk_{secrets.token_hex(4)}"
+            try:
+                async with _DbConn() as conn:
+                    await conn.execute(
+                        "INSERT INTO messages (user_id, session_id, role, text) VALUES "
+                        "($1, $2, 'user', $3), ($1, $2, 'model', $4)",
+                        uid, session_id, user_text, model_text
+                    )
+                    await _process_post_turn_from_messages(
+                        conn,
+                        uid=uid,
+                        session_id=session_id,
+                        messages=[
+                            {"role": "user", "text": user_text},
+                            {"role": "model", "text": model_text},
+                        ],
+                    )
+            except Exception as e:
+                logger.warning(f"Failed to persist turn to DB: {e}")
+
+        @session.on("user_input_transcribed")
+        def on_user_input_transcribed(event) -> None:
+            nonlocal pending_user_transcript
+            transcript = (getattr(event, "transcript", "") or "").strip()
+            is_final = bool(getattr(event, "is_final", False))
+            if not transcript:
+                return
+            pending_user_transcript = _merge_transcript(pending_user_transcript, transcript)
+            if is_final:
+                asyncio.create_task(_publish_event(
+                    {
+                        "type": "user_transcript",
+                        "text": pending_user_transcript,
+                        "is_final": True,
+                    },
+                    "ayma.transcript",
+                ))
+
+        @session.on("conversation_item_added")
+        def on_conversation_item_added(event) -> None:
+            nonlocal pending_user_transcript
+            item = getattr(event, "item", None)
+            if item is None:
+                return
+            role = _item_role(item)
+            text = _item_text(item)
+            if not text:
+                return
+            if "user" in role:
+                pending_user_transcript = _merge_transcript(pending_user_transcript, text)
+                asyncio.create_task(_publish_event(
+                    {
+                        "type": "user_transcript",
+                        "text": pending_user_transcript,
+                        "is_final": True,
+                    },
+                    "ayma.transcript",
+                ))
+                return
+            if "assistant" in role or "model" in role:
+                asyncio.create_task(_publish_event(
+                    {
+                        "type": "agent_transcript",
+                        "text": text,
+                        "is_final": True,
+                    },
+                    "ayma.transcript",
+                ))
+                user_text = pending_user_transcript
+                pending_user_transcript = ""
+                asyncio.create_task(_persist_turn(user_text, text))
 
         # ── Text Track Interception ───────────────────────────────────────────────
         @ctx.room.on("data_received")
@@ -427,8 +556,8 @@ def make_entrypoint():
                 # Append the model reply to the shared context
                 session.chat_ctx.add_message(role="assistant", content=reply_text)
 
-                # Commit text turn to database for profile sync
-                asyncio.create_task(commit_turn_to_db(text, reply_text))
+                # Commit text turn to database and post-turn memory pipeline
+                asyncio.create_task(_persist_turn(text, reply_text))
 
                 # Broadcast reply string to the user via data channel
                 await ctx.room.local_participant.publish_data(
@@ -445,23 +574,6 @@ def make_entrypoint():
                     )
                 except Exception:
                     pass
-
-        async def commit_turn_to_db(user_text: str, model_text: str):
-            """
-            Commits the conversation turn to the database so profile extraction
-            can run normally post-turn.
-            """
-            try:
-                session_id = f"lk_{secrets.token_hex(4)}"
-                async with _DbConn() as conn:
-                    # Append message turn
-                    await conn.execute(
-                        "INSERT INTO messages (user_id, session_id, role, text) VALUES "
-                        "($1, $2, 'user', $3), ($1, $2, 'model', $4)",
-                        uid, session_id, user_text, model_text
-                    )
-            except Exception as e:
-                logger.warning(f"Failed to commit text turn to DB: {e}")
 
         # Start the multimodal voice and data session orchestration
         await session.start(

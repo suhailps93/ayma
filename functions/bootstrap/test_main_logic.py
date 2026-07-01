@@ -11,6 +11,7 @@ import re
 
 def _install_test_stubs():
     os.environ.setdefault("GOOGLE_API_KEY", "test-key")
+    os.environ.setdefault("DATABASE_URL", "postgresql://test:test@localhost:5432/ayma")
     os.environ.setdefault("ADMIN_PASSWORD", "test-admin-pass")
 
     asyncpg = types.ModuleType("asyncpg")

@@ -373,6 +373,11 @@ class _OnboardingScreenState extends ConsumerState<OnboardingScreen> {
     }
   }
 
+  void _back() {
+    if (_step <= 0 || _saving) return;
+    setState(() => _step--);
+  }
+
   Future<void> _detectLocation() async {
     // Check and request permission before attempting GPS.
     // If denied, auto-expand the text field so the user can search manually.
@@ -513,7 +518,12 @@ class _OnboardingScreenState extends ConsumerState<OnboardingScreen> {
 
   @override
   Widget build(BuildContext context) {
-    return Scaffold(
+    return PopScope(
+      canPop: _step == 0,
+      onPopInvokedWithResult: (didPop, _) {
+        if (!didPop) _back();
+      },
+      child: Scaffold(
       backgroundColor: AymaColors.bg,
       resizeToAvoidBottomInset: true,
       body: SafeArea(
@@ -522,23 +532,50 @@ class _OnboardingScreenState extends ConsumerState<OnboardingScreen> {
             if (_step > 0)
               Padding(
                 padding:
-                    const EdgeInsets.symmetric(horizontal: 28, vertical: 18),
-                child: Row(
-                  children: List.generate(
-                    4,
-                    (i) => Expanded(
-                      child: Container(
-                        height: 2,
-                        margin: const EdgeInsets.symmetric(horizontal: 3),
-                        decoration: BoxDecoration(
-                          color: i < _step
-                              ? AymaColors.accent
-                              : AymaColors.lineSoft,
-                          borderRadius: BorderRadius.circular(1),
+                    const EdgeInsets.fromLTRB(28, 18, 28, 18),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    GestureDetector(
+                      onTap: _saving ? null : _back,
+                      child: Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          Icon(
+                            Icons.arrow_back_rounded,
+                            size: 18,
+                            color: AymaColors.fgMute,
+                          ),
+                          const SizedBox(width: 6),
+                          Text(
+                            'Back',
+                            style: AymaFonts.mono(
+                              size: 10,
+                              color: AymaColors.fgMute,
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                    const SizedBox(height: 14),
+                    Row(
+                      children: List.generate(
+                        4,
+                        (i) => Expanded(
+                          child: Container(
+                            height: 2,
+                            margin: const EdgeInsets.symmetric(horizontal: 3),
+                            decoration: BoxDecoration(
+                              color: i < _step
+                                  ? AymaColors.accent
+                                  : AymaColors.lineSoft,
+                              borderRadius: BorderRadius.circular(1),
+                            ),
+                          ),
                         ),
                       ),
                     ),
-                  ),
+                  ],
                 ),
               )
             else
@@ -568,6 +605,7 @@ class _OnboardingScreenState extends ConsumerState<OnboardingScreen> {
           ],
         ),
       ),
+    ),
     );
   }
 
