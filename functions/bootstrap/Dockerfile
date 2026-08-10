@@ -6,6 +6,7 @@ COPY main.py .
 COPY questionnaire_graph.py .
 COPY questionnaire_schema.json .
 COPY config.py .
+COPY agent.py .
 COPY prompts/ ./prompts/
 ENV PORT=8080
 CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8080", "--workers", "1"]

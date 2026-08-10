@@ -16,9 +16,8 @@ Architecture (dual-engine, mirrors the Aimma schema design):
          │           Ordinal/slider fields scored and weighted per intent type.
          │           Produces a float used to rank the filtered pool.
          │
-         └──► PASS 3: LLM semantic score  (Gemini + pgvector cosine similarity)
-                      Open narrative answers are embedded (gemini-embedding-2 →
-                      vector(1536)) and stored in users.matching_embedding.
+         └──► PASS 3: LLM semantic score  (Gemini)
+                      Open narrative answers are read directly by the LLM.
                       Gemini evaluates narrative tension/affinity for the top-N pairs.
 
 Questionnaire Routing Graph
@@ -43,7 +42,6 @@ Storage contract
 ----------------
 - Scalar fields (hard filters + heuristic weights) → users.matching_prefs  (JSONB)
 - Open narrative answers                           → users.profile_answers  (JSONB)
-- Embedding vector                                 → users.matching_embedding (vector 1536)
 """
 
 from enum import Enum
@@ -150,8 +148,8 @@ INTENT_HEURISTIC_WEIGHTS: dict[IntentType, list[tuple[str, float]]] = {
 # ─────────────────────────────────────────────────────────────────────────────
 # PASS 3 — LLM Narrative Prompts
 # ─────────────────────────────────────────────────────────────────────────────
-# Answers are stored in users.profile_answers[id] and embedded into
-# users.matching_embedding for cosine similarity search via pgvector.
+# Answers are stored in users.profile_answers[id] and read directly by the
+# LLM scorer for narrative tension/affinity evaluation.
 
 INTENT_LLM_PROMPTS: dict[IntentType, list[dict]] = {
     IntentType.CASUAL: [

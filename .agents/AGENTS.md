@@ -13,3 +13,9 @@ All agents operating in this workspace must adhere to the five fundamental princ
 3. **Surgical Changes**: Touch only what is strictly required to fulfill the request. Do not "improve" adjacent code, refactor things that aren't broken, or change formatting unless it is explicitly part of the task.
 4. **Goal-Driven Execution**: Define clear success criteria before beginning. Transform vague requests into concrete, verifiable steps.
 5. **Production-Ready Code Only**: Do not write temporary hacks or workaround code. Do not leave commented-out or dead code blocks in source files. Ensure all async/future error paths are explicitly caught and handled. Every change must target clean, production-grade maintainability.
+
+## Strict Database Rules (No Mocking)
+
+- **NEVER use mock databases or SQLite fallbacks**: Under no circumstances should mock databases, mock SQLite fallbacks, or `USE_MOCK_DB` flags be introduced, configured, or supported in the active backend code files.
+- **NEVER run with local database instances in production/Cloud Run**: Production data access must use the configured production data layer and must not contain plaintext credentials in code or docs. Legacy Cloud SQL credentials, if ever needed for historical operations, must come only from Secret Manager or deployment environment variables.
+- **Always load environment variables safely**: Load environment variables from `.env.local` or `.env` using `python-dotenv` at the top of the entrypoint file (`main.py`) to properly retrieve secrets/API keys (such as LiveKit URLs and keys), but bypass loading them when running unit tests (e.g., `unittest`) to preserve test isolation.

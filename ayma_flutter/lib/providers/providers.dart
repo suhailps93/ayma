@@ -39,7 +39,8 @@ final fcmRegistrationProvider = Provider<void>((ref) {
       if (user == null || kIsWeb) return;
       try {
         final messaging = FirebaseMessaging.instance;
-        final settings = await messaging.requestPermission(alert: true, badge: true, sound: true);
+        final settings = await messaging.requestPermission(
+            alert: true, badge: true, sound: true);
         if (settings.authorizationStatus == AuthorizationStatus.authorized ||
             settings.authorizationStatus == AuthorizationStatus.provisional) {
           final token = await messaging.getToken();
@@ -88,8 +89,19 @@ final profileProvider = FutureProvider<UserProfile?>((ref) async {
     return Completer<UserProfile?>().future;
   }
   final user = userAsync.valueOrNull;
-  if (user == null) return null;
-  return ApiService.getProfile();
+  if (user == null) {
+    debugPrint('DEBUG: profileProvider no signed-in Firebase user');
+    return null;
+  }
+  debugPrint(
+      'DEBUG: profileProvider loading uid=${user.uid} email=${user.email}');
+  final profile = await ApiService.getProfile();
+  debugPrint(
+    'DEBUG: profileProvider loaded uid=${profile?.id} '
+    'onboardingComplete=${profile?.onboardingComplete} '
+    'preboardingSeen=<profile endpoint>',
+  );
+  return profile;
 });
 
 final publicProfileProvider =
@@ -115,7 +127,8 @@ final userProfileByIdProvider =
 // ── Notifications ─────────────────────────────────────────────────────────────
 
 final notificationsProvider =
-    StateNotifierProvider<NotificationsNotifier, List<NotificationModel>>((ref) {
+    StateNotifierProvider<NotificationsNotifier, List<NotificationModel>>(
+        (ref) {
   final notifier = NotificationsNotifier(ref);
   ref.listen(currentUserProvider, (_, user) {
     if (user != null) unawaited(notifier.reload());
@@ -150,7 +163,10 @@ class NotificationsNotifier extends StateNotifier<List<NotificationModel>> {
   void add(NotificationModel n) => state = [n, ...state];
 
   Future<void> markRead(String id) async {
-    state = [for (final n in state) if (n.id == id) n.copyWith(read: true) else n];
+    state = [
+      for (final n in state)
+        if (n.id == id) n.copyWith(read: true) else n
+    ];
     await ApiService.markNotificationRead(id);
   }
 
@@ -171,9 +187,24 @@ class NotificationsNotifier extends StateNotifier<List<NotificationModel>> {
 // ── Onboarding ────────────────────────────────────────────────────────────────
 
 final onboardingStatusProvider = FutureProvider<bool>((ref) async {
-  final user = ref.watch(currentUserProvider);
-  if (user == null) return false;
-  return ApiService.getOnboardingStatus();
+  final userAsync = ref.watch(firebaseUserProvider);
+  if (userAsync.isLoading) {
+    return Completer<bool>().future;
+  }
+  final firebaseUser = userAsync.valueOrNull;
+  final user = firebaseUser == null
+      ? null
+      : AuthUser(id: firebaseUser.uid, email: firebaseUser.email);
+  if (user == null) {
+    debugPrint('DEBUG: onboardingStatusProvider no signed-in Firebase user');
+    return false;
+  }
+  debugPrint(
+      'DEBUG: onboardingStatusProvider loading uid=${user.id} email=${user.email}');
+  final complete = await ApiService.getOnboardingStatus();
+  debugPrint(
+      'DEBUG: onboardingStatusProvider resolved complete=$complete uid=${user.id}');
+  return complete;
 });
 
 final preboardingSeenProvider = FutureProvider<bool>((ref) async {
@@ -192,7 +223,8 @@ final insightsProvider = FutureProvider<Map<String, String>>((ref) async {
 
 // ── Profile Answers ───────────────────────────────────────────────────────────
 
-final profileAnswersProvider = FutureProvider<Map<String, dynamic>>((ref) async {
+final profileAnswersProvider =
+    FutureProvider<Map<String, dynamic>>((ref) async {
   final user = ref.watch(currentUserProvider);
   if (user == null) return {};
   return ApiService.getProfileAnswers();
@@ -223,7 +255,8 @@ Future<void> runVibeCheck(String matchId, WidgetRef ref) async {
   ref.invalidate(matchesProvider);
 }
 
-Future<void> toggleMatchSimulation(String matchId, bool show, WidgetRef ref) async {
+Future<void> toggleMatchSimulation(
+    String matchId, bool show, WidgetRef ref) async {
   await ApiService.toggleMatchSimulation(matchId, show);
   ref.invalidate(matchesProvider);
 }
@@ -279,6 +312,7 @@ final exploreProvider =
     gender: filters.gender,
     ageMin: filters.ageMin,
     ageMax: filters.ageMax,
+    radiusKm: filters.radiusKm,
     query: filters.query,
   );
   return {'people': people, 'prompts': []};

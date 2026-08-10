@@ -37,22 +37,7 @@ class Env {
     return 'https://ayma-bootstrap-235381544962.us-central1.run.app';
   }
 
-  static const _geminiApiKey =
-      String.fromEnvironment(
-        'AYMA_GEMINI_API_KEY',
-        defaultValue: 'AIzaSyBIVuA5HMa6409Bv0hHJfO4RpwrBcZH1c8',
-      );
-
   static String get liveProvider => _liveProvider.trim().toLowerCase();
-  
-  static String get geminiApiKey {
-    final key = _geminiApiKey.trim();
-    if ((key.startsWith("'") && key.endsWith("'")) ||
-        (key.startsWith('"') && key.endsWith('"'))) {
-      return key.substring(1, key.length - 1).trim();
-    }
-    return key;
-  }
 
   static String get openAiApiKey {
     final key = _openAiApiKey.trim();

@@ -24,7 +24,13 @@ final routerProvider = Provider<GoRouter>((ref) {
 
   ref.listen(authSessionProvider, (prev, next) => notifier.notify());
   ref.listen(authInitializedProvider, (prev, next) => notifier.notify());
-  ref.listen(onboardingStatusProvider, (prev, next) => notifier.notify());
+  void onProfileRelatedUpdate(AsyncValue<dynamic> next) {
+    notifier.notify();
+  }
+
+  ref.listen(profileProvider, (_, next) => onProfileRelatedUpdate(next));
+  ref.listen(
+      onboardingStatusProvider, (_, next) => onProfileRelatedUpdate(next));
 
   final router = GoRouter(
     initialLocation: '/chat',
@@ -37,31 +43,44 @@ final routerProvider = Provider<GoRouter>((ref) {
       if (!initialized) return null;
       if (path == '/admin') return null;
       if (user == null) return path == '/auth' ? null : '/auth';
-      if (path == '/auth') return '/chat';
 
-      final onboarding = ref.read(onboardingStatusProvider);
-      if (onboarding.isLoading) return null;
-      if (onboarding.hasValue) {
-        final complete = onboarding.valueOrNull ?? false;
-        if (!complete && path != '/onboarding') return '/onboarding';
-        if (complete && path == '/onboarding') return '/chat';
+      final onboardingAsync = ref.read(onboardingStatusProvider);
+      final complete = onboardingAsync.valueOrNull;
+
+      if (complete == null) {
+        return null;
+      }
+
+      if (path == '/auth') {
+        return complete ? '/chat' : '/onboarding';
+      }
+
+      if (!complete && path != '/onboarding') {
+        return '/onboarding';
+      }
+      if (complete && path == '/onboarding') {
+        return '/chat';
       }
 
       return null;
     },
     routes: [
-      GoRoute(path: '/auth',       builder: (_, __) => const AuthScreen()),
-      GoRoute(path: '/onboarding', builder: (_, __) => const OnboardingScreen()),
-      GoRoute(path: '/admin',      builder: (_, __) => const AdminScreen()),
+      GoRoute(path: '/auth', builder: (_, __) => const AuthScreen()),
+      GoRoute(
+          path: '/onboarding', builder: (_, __) => const OnboardingScreen()),
+      GoRoute(path: '/admin', builder: (_, __) => const AdminScreen()),
       ShellRoute(
         builder: (context, state, child) => ShellScreen(child: child),
         routes: [
-          GoRoute(path: '/chat',          builder: (_, __) => const ChatScreen()),
-          GoRoute(path: '/matches',       builder: (_, __) => const MatchesScreen()),
-          GoRoute(path: '/explore',       builder: (_, __) => const ExploreScreen()),
-          GoRoute(path: '/profile',       builder: (_, __) => const ProfileScreen()),
-          GoRoute(path: '/notifications', builder: (_, __) => const NotificationsScreen()),
-          GoRoute(path: '/settings',      builder: (_, __) => const SettingsScreen()),
+          GoRoute(path: '/chat', builder: (_, __) => const ChatScreen()),
+          GoRoute(path: '/matches', builder: (_, __) => const MatchesScreen()),
+          GoRoute(path: '/explore', builder: (_, __) => const ExploreScreen()),
+          GoRoute(path: '/profile', builder: (_, __) => const ProfileScreen()),
+          GoRoute(
+              path: '/notifications',
+              builder: (_, __) => const NotificationsScreen()),
+          GoRoute(
+              path: '/settings', builder: (_, __) => const SettingsScreen()),
         ],
       ),
     ],

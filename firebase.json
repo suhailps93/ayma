@@ -1,4 +1,8 @@
 {
+  "functions": {
+    "source": "functions/triggers",
+    "runtime": "python313"
+  },
   "storage": {
     "rules": "storage.rules"
   }

@@ -1,30 +1,40 @@
 // Speaker playback for live AI audio chunks (flutter_sound on mobile, WebPcmPlayer on web).
 // ignore_for_file: deprecated_member_use
 import 'dart:async';
-
 import 'package:flutter/foundation.dart';
 import 'package:flutter_sound/flutter_sound.dart';
 import 'package:logger/logger.dart' show Level;
 
+import '../config/audio_config.dart';
 import 'web_audio_stub.dart' if (dart.library.html) 'web_audio_impl.dart';
 
+/// Service responsible for managing speaker playback of raw linear PCM16 model audio chunks.
+/// Handles sample rate transitions dynamically and utilizes [FlutterSoundPlayer] on mobile
+/// or [WebPcmPlayer] on web.
 class AudioStreamerService {
+  /// The mobile native audio player instance.
   final _player = FlutterSoundPlayer(logLevel: Level.nothing);
+  
+  /// The web-specific PCM player wrapper.
   final _webPlayer = WebPcmPlayer();
 
   bool _initialized = false;
   Future<void>? _initFuture;
   bool _streaming = false;
   Future<void>? _startingFuture;
-  int _sampleRate = 24000;
-  int _channels = 1;
+  int _sampleRate = AudioConfig.outputSampleRate;
+  int _channels = AudioConfig.channelCount;
 
+  /// Ensures that the native speaker player is initialized.
   Future<void> _ensureInit() async {
     if (kIsWeb || _initialized) return;
     _initFuture ??= _player.openPlayer().then((_) => _initialized = true);
     await _initFuture;
   }
 
+  /// Appends raw PCM16 audio bytes to the playback sink.
+  /// If the player is not currently streaming, or the incoming format (sample rate / channels)
+  /// changes relative to the current player configuration, it dynamically re-initializes the session.
   Future<void> addPcm16(Uint8List data, {String mimeType = 'audio/pcm;rate=24000'}) async {
     if (kIsWeb) {
       _webPlayer.play(data);
@@ -37,14 +47,16 @@ class AudioStreamerService {
       _stopStreamPlayer();
       _sampleRate = cfg.sampleRate;
       _channels = cfg.channels;
-      // Only start once; subsequent concurrent callers await the same future.
+      // Only start once; subsequent concurrent callers await the same starting future.
       _startingFuture ??= _startStreamPlayer().whenComplete(() => _startingFuture = null);
     }
-    // If player is starting, wait for it so no chunks are dropped.
+    
+    // Wait for player to spin up so we do not drop leading chunks.
     if (_startingFuture != null) await _startingFuture;
     _player.uint8ListSink?.add(data);
   }
 
+  /// Starts the stream player with the current configuration parameters.
   Future<void> _startStreamPlayer() async {
     if (_streaming) return;
     _streaming = true;
@@ -54,13 +66,14 @@ class AudioStreamerService {
         interleaved: false,
         sampleRate: _sampleRate,
         numChannels: _channels,
-        bufferSize: 32768,
+        bufferSize: AudioConfig.playerBufferSize,
       );
     } catch (_) {
       _streaming = false;
     }
   }
 
+  /// Stops the active stream player instantly.
   void _stopStreamPlayer() {
     if (!_streaming && _player.isStopped) return;
     try {
@@ -70,6 +83,7 @@ class AudioStreamerService {
     _startingFuture = null;
   }
 
+  /// Halts playback on either web or mobile platforms.
   void stop() {
     if (kIsWeb) {
       _webPlayer.stop();
@@ -78,16 +92,18 @@ class AudioStreamerService {
     }
   }
 
+  /// Parses the sample rate and channel count parameters from the standard mimetype string.
   ({int sampleRate, int channels}) _parsePcmConfig(String mimeType) {
     final rateMatch = RegExp(r'rate=(\d+)', caseSensitive: false).firstMatch(mimeType);
     final channelsMatch =
         RegExp(r'channels=(\d+)', caseSensitive: false).firstMatch(mimeType);
     return (
-      sampleRate: int.tryParse(rateMatch?.group(1) ?? '') ?? 24000,
-      channels: int.tryParse(channelsMatch?.group(1) ?? '') ?? 1,
+      sampleRate: int.tryParse(rateMatch?.group(1) ?? '') ?? AudioConfig.fallbackOutputSampleRate,
+      channels: int.tryParse(channelsMatch?.group(1) ?? '') ?? AudioConfig.fallbackChannelCount,
     );
   }
 
+  /// Releases playing resources.
   void dispose() {
     stop();
     if (!kIsWeb && _initialized) {

@@ -1,25 +1,16 @@
-// Voice and text chat orchestration: mic/speaker, Gemini Live or OpenAI Realtime, transcript, post-turn.
+// Voice and text chat orchestration powered by LiveKit Cloud and LiveKit Agents.
 import 'dart:async';
 import 'dart:convert';
-import 'dart:math' as math;
-import 'dart:typed_data';
-
 import 'package:flutter/foundation.dart';
 import 'package:firebase_auth/firebase_auth.dart';
-import 'package:http/http.dart' as http;
-import 'package:permission_handler/permission_handler.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:speech_to_text/speech_to_text.dart' as stt;
+import 'package:permission_handler/permission_handler.dart';
+import 'package:livekit_client/livekit_client.dart';
 
+import '../config/audio_config.dart';
 import '../env.dart';
-import 'audio_recorder_service.dart';
-import 'audio_streamer_service.dart';
 import 'backend_service.dart';
-import 'api_service.dart';
-import 'gemini_live_client.dart';
-import 'openai_realtime_client.dart';
-
-// ignore_for_file: deprecated_member_use
 
 enum SessionState {
   disconnected,
@@ -68,26 +59,13 @@ class TranscriptLine {
   }
 }
 
-// Orchestrates the selected live client + recorder + streamer while preserving
-// the UI contract used by ChatScreen.
+/// Orchestrates LiveKit Room connection, audio track publishing, remote participant
+/// track subscription, and data channel messages for the Ayma app.
 class AymaAudioService extends ChangeNotifier {
-  static const String _geminiLiveModel = 'gemini-3.1-flash-live-preview';
-  static const String _geminiLiveWsApiKey =
-      'wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent';
-  static const String _geminiLiveWsEphemeral =
-      'wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1alpha.GenerativeService.BidiGenerateContentConstrained';
-
-  String get _transcriptStorageKey {
-    final uid = FirebaseAuth.instance.currentUser?.uid ?? 'guest';
-    return 'ayma.chat.transcript.$uid';
-  }
-
-  late final dynamic _client =
-      Env.liveProvider == 'gemini' ? GeminiLiveClient() : OpenAiRealtimeClient();
-  final _recorder = AudioRecorderService();
-  final _streamer = AudioStreamerService();
-
-  final List<StreamSubscription<dynamic>> _subs = [];
+  Room? _room;
+  EventsListener<RoomEvent>? _listener;
+  Timer? _volumeTimer;
+  final Set<String> _completedTextMessageIds = <String>{};
 
   SessionState _state = SessionState.disconnected;
   SessionState get state => _state;
@@ -95,8 +73,6 @@ class AymaAudioService extends ChangeNotifier {
   double _inputVolume = 0;
   double _outputVolume = 0;
   double _rawInputVolume = 0;
-  double _smoothedInputVol = 0;
-  Timer? _talkHoldoffTimer;
   double get inputVolume => _inputVolume;
   double get outputVolume => _outputVolume;
   double get rawInputVolume => _rawInputVolume;
@@ -114,46 +90,22 @@ class AymaAudioService extends ChangeNotifier {
 
   final List<Map<String, String>> _history = [];
 
-  String _pendingTurnUser = '';
-  String _pendingTurnModel = '';
-  Timer? _persistDebounce;
-  Timer? _outputDecayTimer;
-  int _audioBytesPerTurn = 0;
-  static const int _maxTranscriptLines = 180;
-
-  // ── Text-chat error state ─────────────────────────────────────────────────
-  /// Reason why the last text reply failed. Cleared when a reply succeeds.
   TextChatFailure _textChatFailure = TextChatFailure.none;
   TextChatFailure get textChatFailure => _textChatFailure;
-
-  /// User messages that got no reply yet (queued for retry).
-  final List<String> _pendingTextMessages = [];
-
-  void _setTextChatFailure(TextChatFailure f) {
-    if (_textChatFailure == f) return;
-    _textChatFailure = f;
-    notifyListeners();
-  }
-
-  String? _providerApiKey;
-  String? _systemPrompt;
-  String _sessionId = DateTime.now().millisecondsSinceEpoch.toString();
 
   final _speechToText = stt.SpeechToText();
   bool _sttAvailable = false;
   bool _wakeWordListening = false;
+  bool get wakeWordListening => _wakeWordListening;
 
-  Future<void>? _connectFuture;
+  Timer? _persistDebounce;
 
-  DateTime _lastMeterUiUpdate = DateTime.fromMillisecondsSinceEpoch(0);
-
-  final BytesBuilder _pendingMicAudio = BytesBuilder(copy: false);
-  Timer? _micFlushTimer;
-  static const _micFlushInterval = Duration(milliseconds: 120);
+  String get _transcriptStorageKey {
+    final uid = FirebaseAuth.instance.currentUser?.uid ?? 'guest';
+    return 'ayma.chat.transcript.$uid';
+  }
 
   AymaAudioService() {
-    _wireClientStreams();
-    _wireRecorderStreams();
     unawaited(initForUser());
   }
 
@@ -161,177 +113,346 @@ class AymaAudioService extends ChangeNotifier {
     await _restoreTranscript();
   }
 
-  // ── Playback drain helper ─────────────────────────────────────────────────────
+  // ── Connection Lifecycle ───────────────────────────────────────────────────
 
-  void _schedulePlaybackEnd() {
-    _outputDecayTimer?.cancel();
-    // PCM 16-bit mono @ 24 kHz → 48 000 bytes per second
-    const bytesPerMs = 48.0;
-    final bufferedMs = (_audioBytesPerTurn / bytesPerMs).clamp(200.0, 8000.0);
-    _audioBytesPerTurn = 0;
-    // Let the wave stay alive for the estimated playback duration + 250 ms buffer
-    _outputDecayTimer = Timer(Duration(milliseconds: bufferedMs.toInt() + 250), () {
-      _outputDecayTimer = null;
-      if (_state == SessionState.speaking || _state == SessionState.thinking) {
-        _setState(SessionState.listening);
-      }
-      _outputVolume = 0;
-      _notifyMetersThrottled();
-    });
-  }
-
-  // ── Wire live-client events → session state ────────────────────────────────
-
-  void _wireClientStreams() {
-    // setupComplete → start mic (mirrors ControlTray useEffect on `connected`)
-    _subs.add(_client.setupCompleteStream.listen((_) async {
-      _setState(SessionState.ready);
-      await _recorder.start();
-      _setState(SessionState.listening);
-    }));
-
-    // audio → streamer (mirrors onAudio → audioStreamer.addPCM16 in useLiveAPI)
-    _subs.add(_client.audioStream.listen((event) {
-      final chunk = event as LiveAudioChunk;
-      if (_speakerMuted) return;
-      // Feed streamer first, before any UI work, to minimize delivery latency
-      _audioBytesPerTurn += chunk.data.lengthInBytes;
-      unawaited(_streamer.addPcm16(chunk.data, mimeType: chunk.mimeType));
-      if (_state != SessionState.speaking) {
-        _setState(SessionState.speaking);
-      }
-      final now = DateTime.now();
-      if (now.difference(_lastMeterUiUpdate) >= const Duration(milliseconds: 33)) {
-        _outputVolume = _pcmRms(chunk.data);
-        _lastMeterUiUpdate = now;
-        notifyListeners();
-      }
-    }));
-
-    // interrupted → stop streamer (mirrors stopAudioStreamer in useLiveAPI)
-    _subs.add(_client.interruptedStream.listen((_) {
-      _outputDecayTimer?.cancel();
-      _outputDecayTimer = null;
-      _audioBytesPerTurn = 0;
-      _streamer.stop();
-      _outputVolume = 0;
-      final userText = _pendingTurnUser.trim();
-      if (userText.isNotEmpty) {
-        _addTranscript(userText, isUser: true);
-      }
-      final partialModel = _pendingTurnModel.trim();
-      if (partialModel.isNotEmpty) {
-        _addTranscript(partialModel, isUser: false);
-      }
-      unawaited(_commitTurnToBackend());
-      _pendingTurnModel = '';
-      _setState(SessionState.listening);
-    }));
-
-    _subs.add(_client.outputTranscriptStream.listen((text) {
-      _pendingTurnModel = _mergeTurnText(_pendingTurnModel, text);
-    }));
-
-    _subs.add(_client.inputTranscriptStream.listen((text) {
-      _pendingTurnUser = _mergeTurnText(_pendingTurnUser, text);
-      _checkGoodbyeWakeWord(_pendingTurnUser);
-      // Transcript arrival = provider-confirmed speech → activate user wave.
-      if (!_userTalking) {
-        _userTalking = true;
-        _notifyMetersThrottled();
-      }
-      _talkHoldoffTimer?.cancel();
-      _talkHoldoffTimer = Timer(const Duration(milliseconds: 1200), () {
-        _userTalking = false;
-        _notifyMetersThrottled();
-      });
-    }));
-
-    _subs.add(_client.turnCompleteStream.listen((_) {
-      final userText = _pendingTurnUser.trim();
-      if (userText.isNotEmpty) {
-        _addTranscript(userText, isUser: true);
-      }
-      final modelText = _pendingTurnModel.trim();
-      if (modelText.isNotEmpty) {
-        _addTranscript(modelText, isUser: false);
-      }
-      unawaited(_commitTurnToBackend());
-      _schedulePlaybackEnd();
-    }));
-
-    _subs.add(_client.toolCallStream.listen((calls) {
-      unawaited(_handleToolCalls(calls));
-    }));
-
-    _subs.add(_client.disconnectedStream.listen((_) {
-      _clearPendingMicAudio();
-      _talkHoldoffTimer?.cancel();
-      _talkHoldoffTimer = null;
-      _userTalking = false;
-      _pendingTurnUser = '';
-      _pendingTurnModel = '';
-      _setState(SessionState.disconnected);
-    }));
-  }
-
-  // ── Wire AudioRecorderService → client (mirrors ControlTray onData handler) ─
-
-  void _wireRecorderStreams() {
-    _subs.add(_recorder.pcmStream.listen((pcm16) {
-      _rawInputVolume = _pcmRms(pcm16);
-      if (!_muted) _bufferAudio(pcm16);
-      _notifyMetersThrottled();
-    }));
-
-    _subs.add(_recorder.volumeStream.listen((vol) {
-      _inputVolume = vol;
-      // EMA smoothing for visual amplitude only — VAD is driven by transcript events
-      final alpha = vol > _smoothedInputVol ? 0.35 : 0.15;
-      _smoothedInputVol = _smoothedInputVol * (1 - alpha) + vol * alpha;
-      _rawInputVolume = _smoothedInputVol;
-      _notifyMetersThrottled();
-    }));
-  }
-
-  // ── Mic audio buffering + echo suppression ────────────────────────────────────
-
-  void _bufferAudio(Uint8List pcm) {
-    if (!_client.isConnected || _state == SessionState.disconnected || _muted) return;
-    
-    // For autonomous barge-in to work, we MUST send microphone audio even
-    // while the model is speaking. The server uses VAD (Voice Activity Detection)
-    // to detect when the user interrupts the model.
-    // We rely on client-side AEC (configured in web_audio_impl.dart and 
-    // audio_recorder_service.dart) to filter out the model's own voice.
-    
-    _pendingMicAudio.add(pcm);
-    _micFlushTimer ??= Timer(_micFlushInterval, _flushBufferedAudio);
-  }
-
-  void _flushBufferedAudio() {
-    _micFlushTimer = null;
-    if (_pendingMicAudio.length == 0) return;
-    if (!_client.isConnected || _state == SessionState.disconnected || _muted) {
-      _clearPendingMicAudio();
-      return;
+  /// Connects to a unified LiveKit room session using signed credentials from the bootstrap API.
+  Future<void> connect({bool userInitiated = false}) async {
+    if (_state != SessionState.disconnected) {
+      await _disconnectTransport();
     }
-    final pcm = _pendingMicAudio.takeBytes();
-    _sendAudioToClient(pcm);
+    _setState(SessionState.connecting);
+
+    // Enforce mic permission natively
+    if (!kIsWeb) {
+      final permission = await Permission.microphone.request();
+      if (!permission.isGranted) {
+        _setState(SessionState.disconnected);
+        throw Exception('Microphone permission denied');
+      }
+    }
+
+    try {
+      // Call bootstrap endpoint to get ephemeral LiveKit room configuration
+      final bootstrap = await _bootstrapForProvider();
+      final wsUrl = bootstrap['websocket_url'] as String? ?? '';
+      final token = bootstrap['token'] as String? ?? '';
+
+      if (wsUrl.isEmpty || token.isEmpty) {
+        throw Exception(
+            'Missing LiveKit URL or AccessToken from bootstrap response.');
+      }
+
+      final r = Room();
+      _room = r;
+
+      // Connect natively to room
+      await r.connect(wsUrl, token);
+
+      // Enable microphone only for explicit voice sessions.
+      await _setMicrophoneEnabled(!_muted);
+
+      // Wire event listeners
+      final l = r.createListener();
+      _listener = l;
+
+      l.on<DataReceivedEvent>((event) {
+        final reply = utf8.decode(event.data);
+        debugPrint(
+          'DEBUG: Intercepted data track response'
+          ' topic=${event.topic ?? ''}'
+          ' from=${event.participant?.identity ?? 'unknown'}: $reply',
+        );
+
+        try {
+          final payload = jsonDecode(reply);
+          if (payload is Map<String, dynamic>) {
+            final type = payload['type'] as String? ?? '';
+            final text = (payload['text'] as String? ?? '').trim();
+            final isFinal = (payload['is_final'] as bool?) ?? false;
+            if (text.isNotEmpty && isFinal) {
+              if (type == 'user_transcript') {
+                _addTranscript(text, isUser: true);
+                _userTalking = false;
+                notifyListeners();
+                return;
+              }
+              if (type == 'agent_transcript') {
+                final clientMessageId =
+                    (payload['client_message_id'] as String? ?? '').trim();
+                if (clientMessageId.isNotEmpty &&
+                    _completedTextMessageIds.contains(clientMessageId)) {
+                  debugPrint(
+                    'DEBUG: Ignoring late LiveKit text reply for $clientMessageId',
+                  );
+                  return;
+                }
+                if (clientMessageId.isNotEmpty) {
+                  _completedTextMessageIds.add(clientMessageId);
+                }
+                _addTranscript(text, isUser: false);
+                _setState(SessionState.listening);
+                return;
+              }
+            }
+          }
+        } catch (_) {}
+
+        _addTranscript(reply, isUser: false);
+        _setState(SessionState.listening);
+      });
+
+      l.on<ParticipantConnectedEvent>((event) {
+        debugPrint(
+          'DEBUG: LiveKit participant connected'
+          ' identity=${event.participant.identity}'
+          ' sid=${event.participant.sid}',
+        );
+      });
+
+      l.on<TrackSubscribedEvent>((event) {
+        debugPrint(
+          'DEBUG: LiveKit track subscribed'
+          ' kind=${event.track.kind}'
+          ' participant=${event.participant.identity}',
+        );
+      });
+
+      l.on<RoomDisconnectedEvent>((event) {
+        debugPrint('DEBUG: Room disconnected natively.');
+        _handleRoomDisconnect();
+      });
+
+      // Start the amplitude and speaking status loop
+      _startVolumeLoop();
+
+      _setState(SessionState.ready);
+      _setState(SessionState.listening);
+    } catch (e) {
+      debugPrint('DEBUG: LiveKit connection failed: $e');
+      await _disconnectTransport();
+      _setState(SessionState.disconnected);
+      rethrow;
+    }
   }
 
-  void _clearPendingMicAudio() {
-    _micFlushTimer?.cancel();
-    _micFlushTimer = null;
-    if (_pendingMicAudio.length > 0) _pendingMicAudio.clear();
+  /// Disconnects from the LiveKit room session and cleans up tracks and event listeners.
+  void disconnect({bool notify = true}) {
+    unawaited(_disconnectTransport());
+    _setState(SessionState.disconnected, notify: notify);
   }
 
-  void _sendAudioToClient(Uint8List pcm) {
-    if (!_client.isConnected || _state == SessionState.disconnected || _muted) return;
-    _client.sendRealtimeAudio(pcm);
+  Future<void> _disconnectTransport() async {
+    _volumeTimer?.cancel();
+    _volumeTimer = null;
+    await _listener?.dispose();
+    _listener = null;
+    await _setMicrophoneEnabled(false);
+    await _room?.disconnect();
+    _room = null;
+    _inputVolume = 0;
+    _outputVolume = 0;
+    _rawInputVolume = 0;
+    _userTalking = false;
   }
 
-  // ── Wake word detection ──────────────────────────────────────────────────────
+  void _handleRoomDisconnect() {
+    disconnect();
+  }
+
+  // ── Periodic Volume & Speaking Status Check ───────────────────────────────
+
+  void _startVolumeLoop() {
+    _volumeTimer?.cancel();
+    _volumeTimer = Timer.periodic(
+      const Duration(milliseconds: AudioConfig.uiMeterUpdateIntervalMs),
+      (timer) {
+        final r = _room;
+        if (r == null || _state == SessionState.disconnected) {
+          timer.cancel();
+          return;
+        }
+
+        // Parse volume metrics
+        final localLevel = r.localParticipant?.audioLevel ?? 0.0;
+        _inputVolume = localLevel;
+        _rawInputVolume = localLevel;
+
+        double remoteLevel = 0.0;
+        bool remoteSpeaking = false;
+        for (final p in r.remoteParticipants.values) {
+          if (p.audioLevel > remoteLevel) {
+            remoteLevel = p.audioLevel;
+          }
+          if (p.isSpeaking) {
+            remoteSpeaking = true;
+          }
+        }
+        _outputVolume = remoteLevel;
+
+        // Sync speaking states
+        if (remoteSpeaking && _state != SessionState.speaking) {
+          _setState(SessionState.speaking);
+        } else if (!remoteSpeaking && _state == SessionState.speaking) {
+          _setState(SessionState.listening);
+        }
+
+        // VAD user speaking detection
+        final localSpeaking = r.localParticipant?.isSpeaking ?? false;
+        if (localSpeaking && !_userTalking) {
+          _userTalking = true;
+
+          // User started talking -> Interruption check!
+          // Flush local playing audio tracks immediately if speaking
+          if (_state == SessionState.speaking) {
+            debugPrint(
+                'DEBUG: Interruption detected. Flushing remote audio playback.');
+            flushLocalPlayback();
+          }
+          notifyListeners();
+        } else if (!localSpeaking && _userTalking) {
+          _userTalking = false;
+          notifyListeners();
+        }
+
+        notifyListeners();
+      },
+    );
+  }
+
+  /// Silences playback tracks instantly by disabling WebRTC MediaStreamTrack.
+  void flushLocalPlayback() {
+    final r = _room;
+    if (r == null) return;
+    for (final participant in r.remoteParticipants.values) {
+      for (final pub in participant.audioTrackPublications) {
+        final track = pub.track;
+        if (track != null) {
+          try {
+            track.mediaStreamTrack.enabled = false;
+            // Re-enable track after brief duration to capture subsequent model speech
+            Future.delayed(
+              const Duration(
+                  milliseconds: AudioConfig.livekitTrackFlushDelayMs),
+              () {
+                track.mediaStreamTrack.enabled = true;
+              },
+            );
+          } catch (e) {
+            debugPrint(
+                'DEBUG: Error disabling audio track for interruption: $e');
+          }
+        }
+      }
+    }
+  }
+
+  // ── Text messaging over REST ───────────────────────────────────────────────
+
+  /// Sends text through the production REST backend.
+  ///
+  /// Text mode is intentionally separate from LiveKit voice mode: typing must
+  /// not connect a room, request microphone access, or trigger spoken output.
+  Future<bool> sendText(
+    String text, {
+    List<Map<String, String>> attachments = const [],
+  }) async {
+    final trimmed = text.trim();
+    if (trimmed.isEmpty && attachments.isEmpty) return false;
+
+    final attachmentSummary = attachments.isEmpty
+        ? ''
+        : '\n\nShared attachments:\n${attachments.map((a) => '- ${a['kind'] ?? 'file'}: ${a['filename'] ?? a['url'] ?? 'attachment'}').join('\n')}';
+    final historyText = trimmed.isEmpty
+        ? attachmentSummary.trim()
+        : '$trimmed$attachmentSummary';
+
+    if (_room != null || _state != SessionState.disconnected) {
+      await _disconnectTransport();
+      _setState(SessionState.disconnected);
+    }
+
+    _addTranscript(
+      trimmed.isEmpty
+          ? '[Shared ${attachments.length} attachment${attachments.length == 1 ? '' : 's'}]'
+          : trimmed,
+      isUser: true,
+      historyText: historyText,
+      attachments: attachments,
+      allowRecentDuplicate: true,
+    );
+
+    return _sendTextViaRestFallback(historyText);
+  }
+
+  Future<bool> _sendTextViaRestFallback(String userText) async {
+    _setState(SessionState.thinking);
+    try {
+      final response = await BackendService.chat(messages: _history);
+      if (response.trim().isEmpty) {
+        throw Exception('Empty fallback response');
+      }
+      _addTranscript(response, isUser: false);
+      await BackendService.postTurn(
+        sessionId: 'rest_${DateTime.now().millisecondsSinceEpoch}',
+        messages: [
+          {'role': 'user', 'text': userText},
+          {'role': 'model', 'text': response},
+        ],
+      );
+      _setTextChatFailure(TextChatFailure.none);
+      _setState(SessionState.disconnected);
+      return true;
+    } catch (e) {
+      debugPrint('DEBUG: REST text fallback failed: $e');
+      _setTextChatFailure(
+        e.toString().contains('quota_exhausted')
+            ? TextChatFailure.quotaExhausted
+            : TextChatFailure.serverError,
+      );
+      _setState(
+          _room == null ? SessionState.disconnected : SessionState.listening);
+      return false;
+    }
+  }
+
+  /// Sends a text prompt request with the topic set to "speak" so the agent
+  /// speaks the response out programmatically.
+  Future<bool> sendLivePrompt(String prompt) async {
+    final text = prompt.trim();
+    if (text.isEmpty) return false;
+
+    if (_room == null || _state == SessionState.disconnected) {
+      await connect(userInitiated: true);
+    }
+
+    final deadline = DateTime.now()
+        .add(const Duration(seconds: AudioConfig.retryDeadlineSeconds));
+    final delayDur =
+        const Duration(milliseconds: AudioConfig.retryPollIntervalMs);
+    while (_state == SessionState.connecting &&
+        DateTime.now().isBefore(deadline)) {
+      await Future<void>.delayed(delayDur);
+    }
+
+    if (_room == null || _state == SessionState.disconnected) return false;
+
+    _addTranscript(text, isUser: true, allowRecentDuplicate: true);
+
+    try {
+      final payload = utf8.encode(text);
+      await _room?.localParticipant?.publishData(
+        payload,
+        reliable: true,
+        topic: 'speak',
+      );
+      return true;
+    } catch (e) {
+      debugPrint('DEBUG: sendLivePrompt failed: $e');
+      return false;
+    }
+  }
+
+  // ── Wake Word Detection ────────────────────────────────────────────────────
 
   Future<void> startWakeWordListening() async {
     if (_state != SessionState.disconnected || _wakeWordListening) return;
@@ -355,8 +476,8 @@ class AymaAudioService extends ChangeNotifier {
           unawaited(connect(userInitiated: true));
         }
       },
-      listenFor: const Duration(seconds: 8),
-      pauseFor: const Duration(seconds: 3),
+      listenFor: const Duration(seconds: AudioConfig.wakeWordListenForSeconds),
+      pauseFor: const Duration(seconds: AudioConfig.wakeWordPauseForSeconds),
       partialResults: true,
       onSoundLevelChange: null,
       cancelOnError: false,
@@ -365,7 +486,9 @@ class AymaAudioService extends ChangeNotifier {
     _speechToText.statusListener = (status) {
       if (status == 'done' || status == 'notListening') {
         if (_wakeWordListening && _state == SessionState.disconnected) {
-          Future.delayed(const Duration(milliseconds: 300), _listenForWakeWord);
+          Future.delayed(
+              const Duration(milliseconds: AudioConfig.wakeWordDelayMs),
+              _listenForWakeWord);
         }
       }
     };
@@ -378,138 +501,13 @@ class AymaAudioService extends ChangeNotifier {
     notifyListeners();
   }
 
-  bool get wakeWordListening => _wakeWordListening;
-
   void stopSpeaking() {
-    if (_client.isConnected && _state == SessionState.speaking) {
-      _client.interrupt();
-      // The server will send an 'interrupted' message back, 
-      // which we already handle in _wireClientStreams to stop playback.
+    if (_state == SessionState.speaking) {
+      flushLocalPlayback();
     }
   }
 
-  // ── Connection lifecycle ─────────────────────────────────────────────────────
-
-  Future<void> connect({bool userInitiated = false}) async {
-    if (_connectFuture != null) {
-      await _connectFuture;
-      return;
-    }
-    _connectFuture = _connect();
-    try {
-      await _connectFuture;
-    } finally {
-      _connectFuture = null;
-    }
-  }
-
-  Future<void> _connect() async {
-    stopWakeWordListening();
-    if (_state != SessionState.disconnected) {
-      _disconnectTransport();
-      _setState(SessionState.disconnected);
-    }
-
-    _setState(SessionState.connecting);
-    _sessionId = DateTime.now().millisecondsSinceEpoch.toString();
-
-    if (!kIsWeb) {
-      final permission = await Permission.microphone.request();
-      if (!permission.isGranted) {
-        _setState(SessionState.disconnected);
-        throw Exception('Microphone permission denied');
-      }
-    }
-
-    debugPrint('DEBUG: Attempting connect. Provider: ${Env.liveProvider}, Env key length: ${Env.geminiApiKey.length}');
-    if (Env.liveProvider == 'gemini' && Env.geminiApiKey.isNotEmpty) {
-      debugPrint('DEBUG: Using Gemini API Key Bypass');
-      _providerApiKey = Env.geminiApiKey;
-      Map<String, dynamic> bootstrap = const <String, dynamic>{};
-      try {
-        bootstrap =
-            await _bootstrapForProvider().timeout(const Duration(seconds: 15));
-      } catch (e) {
-        debugPrint('DEBUG: Gemini bootstrap unavailable, using local fallback setup: $e');
-      }
-      final bootstrapSetup = bootstrap['setup'] as Map<String, dynamic>?;
-      final setup =
-          bootstrapSetup ??
-          _localGeminiSetup(
-            model: (bootstrap['model'] as String?) ?? _geminiLiveModel,
-          );
-      _systemPrompt = _extractSystemPrompt(setup);
-      final wsUrl = _geminiLiveWsUrlForCredential(_providerApiKey!);
-      await _client.connect(wsUrl, _providerApiKey!, setup);
-      return;
-    }
-
-    final bootstrap = await _bootstrapForProvider();
-    final liveWsUrl = bootstrap['websocket_url'] as String?;
-    final apiKey = _credentialFromBootstrap(bootstrap);
-    final setup = bootstrap['setup'] as Map<String, dynamic>?;
-
-    debugPrint('DEBUG: Bootstrap credential length: ${(apiKey ?? '').length}, wsUrl: $liveWsUrl');
-
-    _providerApiKey = apiKey;
-    _systemPrompt = _extractSystemPrompt(setup);
-
-    try {
-      if (Env.liveProvider == 'gemini') {
-        if (liveWsUrl == null || liveWsUrl.isEmpty || (apiKey ?? '').isEmpty) {
-          throw Exception('Missing Gemini Live bootstrap data (url=${liveWsUrl?.length}, key=${apiKey?.length})');
-        }
-
-        if (setup == null) throw Exception('Bootstrap did not return a setup payload');
-        final Map<String, dynamic> payload = Map<String, dynamic>.from(setup);
-
-        await _client.connect(liveWsUrl, apiKey, payload);
-        return;
-      }
-
-      if (apiKey == null || apiKey.isEmpty) {
-        throw Exception(
-          'Missing OpenAI credential. Provide AYMA_OPENAI_API_KEY or return openai_api_key/client_secret from bootstrap.',
-        );
-      }
-
-      final model =
-          (bootstrap['openai_realtime_model'] as String?) ?? Env.openAiRealtimeModel;
-      await _client.connect(
-        apiKey: apiKey,
-        model: model,
-        session: _openAiSessionFromBootstrap(setup),
-      );
-    } catch (e) {
-      debugPrint('Live connection failed: $e');
-      _disconnectTransport();
-      _setState(SessionState.disconnected);
-      rethrow;
-    }
-  }
-
-  void disconnect({bool notify = true}) {
-    _disconnectTransport();
-    _clearPendingMicAudio();
-    _pendingTurnUser = '';
-    _pendingTurnModel = '';
-    _setState(SessionState.disconnected, notify: notify);
-  }
-
-  void _disconnectTransport() {
-    _client.disconnect();
-    _recorder.stop();
-    _streamer.stop();
-    _talkHoldoffTimer?.cancel();
-    _talkHoldoffTimer = null;
-    _userTalking = false;
-    _smoothedInputVol = 0;
-    _outputDecayTimer?.cancel();
-    _outputDecayTimer = null;
-    _audioBytesPerTurn = 0;
-  }
-
-  // ── Transcript persistence ────────────────────────────────────────────────────
+  // ── Transcript Persistence & Helpers ───────────────────────────────────────
 
   Future<void> clearLocalTranscript() async {
     _transcript.clear();
@@ -526,9 +524,6 @@ class AymaAudioService extends ChangeNotifier {
       notifyListeners();
       return;
     }
-    
-    // We don't use _restoredTranscript flag because we want to re-restore 
-    // when a DIFFERENT user signs in.
     try {
       final prefs = await SharedPreferences.getInstance();
       final raw = prefs.getString(_transcriptStorageKey);
@@ -537,9 +532,9 @@ class AymaAudioService extends ChangeNotifier {
       if (raw != null && raw.isNotEmpty) {
         final decoded = jsonDecode(raw) as List<dynamic>;
         _transcript.addAll(decoded
-              .whereType<Map<String, dynamic>>()
-              .map(TranscriptLine.fromMap)
-              .where((l) => l.text.isNotEmpty));
+            .whereType<Map<String, dynamic>>()
+            .map(TranscriptLine.fromMap)
+            .where((l) => l.text.isNotEmpty));
         for (final line in _transcript) {
           _history.add({
             'role': line.isUser ? 'user' : 'model',
@@ -564,7 +559,8 @@ class AymaAudioService extends ChangeNotifier {
 
   void _schedulePersistTranscript() {
     _persistDebounce?.cancel();
-    _persistDebounce = Timer(const Duration(milliseconds: 900), () {
+    _persistDebounce =
+        Timer(const Duration(milliseconds: AudioConfig.persistDebounceMs), () {
       unawaited(_persistTranscript());
     });
   }
@@ -577,19 +573,23 @@ class AymaAudioService extends ChangeNotifier {
     bool allowRecentDuplicate = false,
   }) {
     final normalized = text.trim();
-    if (normalized.isEmpty && (attachments == null || attachments.isEmpty)) return;
+    if (normalized.isEmpty && (attachments == null || attachments.isEmpty)) {
+      return;
+    }
 
     if (_transcript.isNotEmpty) {
       final last = _transcript.last;
       final isDuplicate = last.isUser == isUser &&
           last.text.trim() == normalized &&
-          DateTime.now().difference(last.time) < const Duration(seconds: 3);
+          DateTime.now().difference(last.time) <
+              const Duration(seconds: AudioConfig.duplicatePreventSeconds);
       if (isDuplicate && !allowRecentDuplicate) return;
     }
 
     final now = DateTime.now();
     _transcript.add(
-      TranscriptLine(normalized, isUser: isUser, time: now, attachments: attachments),
+      TranscriptLine(normalized,
+          isUser: isUser, time: now, attachments: attachments),
     );
     _trimTranscriptIfNeeded();
 
@@ -603,174 +603,25 @@ class AymaAudioService extends ChangeNotifier {
   }
 
   void _trimHistory() {
-    if (_history.length > 60) _history.removeRange(0, _history.length - 60);
+    if (_history.length > AudioConfig.maxHistoryLength) {
+      _history.removeRange(0, _history.length - AudioConfig.maxHistoryLength);
+    }
   }
 
   void _trimTranscriptIfNeeded() {
-    if (_transcript.length <= _maxTranscriptLines) return;
-    _transcript.removeRange(0, _transcript.length - _maxTranscriptLines);
+    if (_transcript.length <= AudioConfig.maxTranscriptLines) return;
+    _transcript.removeRange(
+        0, _transcript.length - AudioConfig.maxTranscriptLines);
   }
 
-  // ── Backend turn commit ───────────────────────────────────────────────────────
-
-  Future<void> _commitTurnToBackend() async {
-    final userText = _pendingTurnUser.trim();
-    final modelText = _pendingTurnModel.trim();
-    if (userText.isEmpty && modelText.isEmpty) return;
-
-    final messages = <Map<String, String>>[
-      if (userText.isNotEmpty) {'role': 'user', 'text': userText},
-      if (modelText.isNotEmpty) {'role': 'model', 'text': modelText},
-    ];
-
-    try {
-      await BackendService.postTurn(sessionId: _sessionId, messages: messages);
-      // Clear only after confirmed write, so transient failures can retry.
-      if (_pendingTurnUser.trim() == userText) _pendingTurnUser = '';
-      if (_pendingTurnModel.trim() == modelText) _pendingTurnModel = '';
-    } catch (e) {
-      debugPrint('post-turn memory sync failed: $e');
-    }
-  }
-
-  // ── Tool call handling ────────────────────────────────────────────────────────
-
-  Future<void> _handleToolCalls(List<LiveToolCall> calls) async {
-    final responses = <Map<String, dynamic>>[];
-    for (final call in calls) {
-      String output;
-      if (call.name == 'add_followup_question') {
-        output = await _execAddFollowup(call.args);
-      } else if (call.name == 'get_current_time') {
-        output = DateTime.now().toIso8601String();
-      } else {
-        output = 'Tool ${call.name} is not available.';
-      }
-      responses.add({
-        'id': call.id,
-        'name': call.name,
-        'response': {'output': output},
-      });
-    }
-    if (_client.isConnected) {
-      _client.sendToolResponse(responses);
-    }
-  }
-
-  Future<String> _execAddFollowup(Map<String, dynamic> args) async {
-    final question = (args['question'] as String? ?? '').trim();
-    if (question.isEmpty) return 'skipped: empty question';
-    try {
-      await ApiService.addFollowupQuestion(question, sessionId: _sessionId);
-      return 'noted';
-    } catch (e) {
-      return 'error: $e';
-    }
-  }
-
-  // ── Text chat (HTTP) ─────────────────────────────────────────────────────────
-
-  Future<bool> sendText(
-    String text, {
-    List<Map<String, String>> attachments = const [],
-  }) async {
-    final trimmed = text.trim();
-    if (trimmed.isEmpty && attachments.isEmpty) return false;
-
-    final attachmentSummary = attachments.isEmpty
-        ? ''
-        : '\n\nShared attachments:\n${attachments.map((a) => '- ${a['kind'] ?? 'file'}: ${a['filename'] ?? a['url'] ?? 'attachment'}').join('\n')}';
-    final historyText =
-        trimmed.isEmpty ? attachmentSummary.trim() : '$trimmed$attachmentSummary';
-
-    _addTranscript(
-      trimmed.isEmpty
-          ? '[Shared ${attachments.length} attachment${attachments.length == 1 ? '' : 's'}]'
-          : trimmed,
-      isUser: true,
-      historyText: historyText,
-      attachments: attachments,
-      allowRecentDuplicate: true,
-    );
-
-    if (_state == SessionState.disconnected) _setState(SessionState.thinking);
-
-    // Drain any previously-queued messages first (FIFO order)
-    final queue = List<String>.from(_pendingTextMessages);
-    _pendingTextMessages.clear();
-
-    bool anyFailed = false;
-    TextChatFailure failureReason = TextChatFailure.none;
-
-    Future<bool> trySend(String msg) async {
-      try {
-        final reply = await _providerTextChat(msg, attachments: []);
-        if (reply.isEmpty) {
-          anyFailed = true;
-          failureReason = TextChatFailure.serverError;
-          _pendingTextMessages.add(msg);
-          return false;
-        }
-        _pendingTurnUser = msg;
-        _pendingTurnModel = reply;
-        _addTranscript(reply, isUser: false);
-        unawaited(_commitTurnToBackend());
-        return true;
-      } on _QuotaExhaustedException {
-        anyFailed = true;
-        failureReason = TextChatFailure.quotaExhausted;
-        _pendingTextMessages.add(msg);
-        return false;
-      } catch (_) {
-        anyFailed = true;
-        failureReason = TextChatFailure.noConnection;
-        _pendingTextMessages.add(msg);
-        return false;
-      }
-    }
-
-    try {
-      // Retry queued messages first
-      for (final q in queue) {
-        await trySend(q);
-      }
-      // Now send the current message
-      final ok = await trySend(historyText);
-      if (!anyFailed) {
-        _setTextChatFailure(TextChatFailure.none);
-      } else {
-        _setTextChatFailure(failureReason);
-      }
-      return ok;
-    } finally {
-      if (_state == SessionState.thinking) _setState(SessionState.disconnected);
-    }
-  }
-
-  Future<bool> sendLivePrompt(String prompt) async {
-    final text = prompt.trim();
-    if (text.isEmpty) return false;
-
-    if (_state == SessionState.disconnected || !_client.isConnected) {
-      await connect(userInitiated: true);
-    }
-
-    final deadline = DateTime.now().add(const Duration(seconds: 6));
-    while (_state == SessionState.connecting && DateTime.now().isBefore(deadline)) {
-      await Future<void>.delayed(const Duration(milliseconds: 120));
-    }
-
-    if (!_client.isConnected || _state == SessionState.disconnected) return false;
-
-    _addTranscript(text, isUser: true, allowRecentDuplicate: true);
-    _client.sendText(text);
-    return true;
-  }
+  String _stamp(DateTime time, String text) =>
+      '[${time.toIso8601String()}] $text';
 
   Future<Map<String, dynamic>> _bootstrapForProvider() async {
     if (Env.liveProvider != 'gemini' && Env.openAiApiKey.isNotEmpty) {
       try {
-        return await BackendService.bootstrap().timeout(const Duration(seconds: 15));
+        return await BackendService.bootstrap().timeout(
+            const Duration(seconds: AudioConfig.bootstrapTimeoutSeconds));
       } catch (_) {
         return <String, dynamic>{};
       }
@@ -778,319 +629,45 @@ class AymaAudioService extends ChangeNotifier {
     return BackendService.bootstrap();
   }
 
-  Future<String> _providerTextChat(
-    String message, {
-    List<Map<String, String>> attachments = const [],
-  }) async {
-    return Env.liveProvider == 'gemini'
-        ? _geminiTextChat(message, attachments: attachments)
-        : _openAiTextChat(message, attachments: attachments);
-  }
-
-  Future<String> _geminiTextChat(
-    String message, {
-    List<Map<String, String>> attachments = const [],
-  }) async {
-    final msgs = [
-      for (final h in _history.sublist(0, math.max(0, _history.length - 1)))
-        {'role': h['role'] ?? 'user', 'text': h['text'] ?? ''},
-      {'role': 'user', 'text': message},
-    ];
-    try {
-      return await BackendService.chat(
-        messages: msgs,
-        systemPrompt: _systemPrompt,
-      );
-    } catch (e) {
-      if (e.toString().contains('quota_exhausted')) throw const _QuotaExhaustedException();
-      rethrow;
-    }
-  }
-
-  Future<String> _openAiTextChat(
-    String message, {
-    List<Map<String, String>> attachments = const [],
-  }) async {
-    final key = _providerApiKey;
-    if (key == null || key.isEmpty) return '';
-
-    final input = <Map<String, dynamic>>[
-      for (final h in _history.sublist(0, math.max(0, _history.length - 1)))
-        {
-          'role': h['role'] == 'model' ? 'assistant' : 'user',
-          'content': [
-            {'type': 'input_text', 'text': h['text'] ?? ''},
-          ],
-        },
-      {
-        'role': 'user',
-        'content': await _buildOpenAiUserContent(
-          message: message,
-          attachments: attachments,
-        ),
-      },
-    ];
-
-    final response = await http
-        .post(
-          Uri.parse('https://api.openai.com/v1/responses'),
-          headers: {
-            'Content-Type': 'application/json',
-            'Authorization': 'Bearer $key',
-          },
-          body: jsonEncode({
-            'model': Env.openAiTextModel.isEmpty ? 'gpt-4o-mini' : Env.openAiTextModel,
-            if ((_systemPrompt ?? '').isNotEmpty) 'instructions': _systemPrompt,
-            'input': input,
-          }),
-        )
-        .timeout(const Duration(seconds: 30));
-
-    if (response.statusCode != 200) {
-      debugPrint('OpenAI text chat failed: ${response.statusCode} ${response.body}');
-      return '';
-    }
-    final body = jsonDecode(response.body) as Map<String, dynamic>;
-    return _extractOpenAiOutputText(body).trim();
-  }
-
-  List<Map<String, dynamic>> _openAiToolsFromGeminiSetup(Map<String, dynamic>? setup) {
-    final declarations = setup?['tools'] is List
-        ? (setup?['tools'] as List)
-            .whereType<Map<String, dynamic>>()
-            .expand((tool) => (tool['function_declarations'] as List? ?? const []))
-            .whereType<Map<String, dynamic>>()
-            .toList()
-        : const <Map<String, dynamic>>[];
-
-    final source = declarations.isNotEmpty
-        ? declarations
-        : const [
-            {
-              'name': 'add_followup_question',
-              'description': 'Save a useful follow-up question to ask the user later.',
-              'parameters': {
-                'type': 'object',
-                'properties': {
-                  'question': {
-                    'type': 'string',
-                    'description': 'The concise follow-up question to save.'
-                  }
-                },
-                'required': ['question']
-              }
-            },
-            {
-              'name': 'get_current_time',
-              'description': 'Get the current local timestamp.',
-              'parameters': {'type': 'object', 'properties': {}}
-            },
-          ];
-
-    return [
-      for (final declaration in source)
-        {
-          'type': 'function',
-          'name': declaration['name'] as String? ?? '',
-          if ((declaration['description'] as String? ?? '').isNotEmpty)
-            'description': declaration['description'],
-          'parameters': declaration['parameters'] ??
-              {'type': 'object', 'properties': <String, dynamic>{}},
-        },
-    ].where((tool) => (tool['name'] as String).isNotEmpty).toList();
-  }
-
-  Map<String, dynamic> _openAiSessionFromBootstrap(Map<String, dynamic>? setup) {
-    return {
-      'type': 'realtime',
-      if ((_systemPrompt ?? '').isNotEmpty) 'instructions': _systemPrompt,
-      'audio': {
-        'input': {
-          'format': {
-            'type': 'audio/pcm',
-            'rate': 24000,
-          },
-          'turn_detection': {
-            'type': 'semantic_vad',
-            'eagerness': 'medium',
-            'interrupt_response': true,
-            'create_response': true,
-          },
-          'transcription': {
-            'model': 'gpt-4o-mini-transcribe',
-          },
-        },
-        'output': {
-          'format': {
-            'type': 'audio/pcm',
-            'rate': 24000,
-          },
-          'voice': Env.openAiVoice.isEmpty ? 'marin' : Env.openAiVoice,
-        },
-      },
-      'tools': _openAiToolsFromGeminiSetup(setup),
-    };
-  }
-
-  String _geminiLiveWsUrlForCredential(String credential) {
-    return credential.startsWith('AIza')
-        ? _geminiLiveWsApiKey
-        : _geminiLiveWsEphemeral;
-  }
-
-  Map<String, dynamic> _localGeminiSetup({required String model}) {
-    return {
-      'model': 'models/$model',
-      'system_instruction': {
-        'parts': [
-          {
-            'text':
-                'You are Ayma, a warm and perceptive voice-first companion. Keep replies natural, concise, and conversational.',
-          },
-        ],
-      },
-      'generation_config': {
-        'response_modalities': ['AUDIO'],
-      },
-      'input_audio_transcription': {},
-      'tools': [
-        {
-          'functionDeclarations': [
-            {
-              'name': 'add_followup_question',
-              'description':
-                  'Save a concise follow-up question or topic to revisit later.',
-              'parameters': {
-                'type': 'OBJECT',
-                'properties': {
-                  'question': {
-                    'type': 'STRING',
-                    'description': 'The reminder question to save.',
-                  },
-                },
-                'required': ['question'],
-              },
-            },
-          ],
-        },
-      ],
-    };
-  }
-
-  String? _credentialFromBootstrap(Map<String, dynamic> bootstrap) {
-    if (Env.liveProvider != 'gemini' && Env.openAiApiKey.isNotEmpty) {
-      return Env.openAiApiKey;
-    }
-    final clientSecret = bootstrap['client_secret'];
-    if (clientSecret is Map<String, dynamic>) {
-      final secretValue = clientSecret['value'] as String?;
-      if ((secretValue ?? '').isNotEmpty) return secretValue;
-    }
-    return bootstrap['openai_api_key'] as String? ??
-        bootstrap['token'] as String? ??
-        bootstrap['api_key'] as String?;
-  }
-
-  String _extractSystemPrompt(Map<String, dynamic>? setup) {
-    final geminiParts = setup?['system_instruction']?['parts'];
-    if (geminiParts is List) {
-      return geminiParts
-          .whereType<Map<String, dynamic>>()
-          .map((p) => p['text'] as String? ?? '')
-          .join('')
-          .trim();
-    }
-    return (setup?['instructions'] as String? ?? '').trim();
-  }
-
-  Future<List<Map<String, dynamic>>> _buildOpenAiUserContent({
-    required String message,
-    List<Map<String, String>> attachments = const [],
-  }) async {
-    final content = <Map<String, dynamic>>[
-      {'type': 'input_text', 'text': message},
-    ];
-
-    var imageCount = 0;
-    for (final att in attachments) {
-      final kind = (att['kind'] ?? '').toLowerCase();
-      final url = att['url'] ?? '';
-      if (kind != 'image' || url.isEmpty || imageCount >= 3 || !url.startsWith('http')) {
-        continue;
-      }
-      try {
-        final res = await http.get(Uri.parse(url)).timeout(const Duration(seconds: 12));
-        if (res.statusCode != 200 || res.bodyBytes.isEmpty) continue;
-        if (res.bodyBytes.length > 4 * 1024 * 1024) continue;
-        final mimeType = _detectImageMimeType(att, res.headers) ?? 'image/jpeg';
-        content.add({
-          'type': 'input_image',
-          'image_url': 'data:$mimeType;base64,${base64Encode(res.bodyBytes)}',
-        });
-        imageCount++;
-      } catch (_) {}
-    }
-    return content;
-  }
-
-  String _extractOpenAiOutputText(Map<String, dynamic> body) {
-    final direct = body['output_text'] as String?;
-    if ((direct ?? '').isNotEmpty) return direct!;
-
-    final buffer = StringBuffer();
-    final output = body['output'] as List<dynamic>? ?? const [];
-    for (final item in output.whereType<Map<String, dynamic>>()) {
-      final content = item['content'] as List<dynamic>? ?? const [];
-      for (final part in content.whereType<Map<String, dynamic>>()) {
-        final text = part['text'] as String? ?? part['transcript'] as String? ?? '';
-        if (text.isNotEmpty) {
-          if (buffer.isNotEmpty) buffer.write(' ');
-          buffer.write(text);
-        }
-      }
-    }
-    return buffer.toString();
-  }
-
-  String? _detectImageMimeType(
-    Map<String, String> attachment,
-    Map<String, String> headers,
-  ) {
-    final headerType = headers['content-type'];
-    if (headerType != null && headerType.startsWith('image/')) {
-      return headerType.split(';').first.trim();
-    }
-    final name = (attachment['filename'] ?? '').toLowerCase();
-    if (name.endsWith('.png')) return 'image/png';
-    if (name.endsWith('.webp')) return 'image/webp';
-    if (name.endsWith('.gif')) return 'image/gif';
-    if (name.endsWith('.jpg') || name.endsWith('.jpeg')) return 'image/jpeg';
-    return null;
-  }
-
-  // ── Controls ─────────────────────────────────────────────────────────────────
+  // ── Mute Controls ──────────────────────────────────────────────────────────
 
   void toggleMute() {
-    _muted = !_muted;
-    notifyListeners();
+    setMuted(!_muted);
   }
 
   void setMuted(bool muted) {
     if (_muted == muted) return;
     _muted = muted;
-    if (_muted) {
-      _clearPendingMicAudio();
-    }
+    unawaited(_setMicrophoneEnabled(!_muted));
     notifyListeners();
+  }
+
+  Future<void> _setMicrophoneEnabled(bool enabled) async {
+    final participant = _room?.localParticipant;
+    if (participant == null) return;
+    await participant.setMicrophoneEnabled(enabled);
+    for (final pub in participant.audioTrackPublications) {
+      final track = pub.track;
+      if (track != null) {
+        track.mediaStreamTrack.enabled = enabled;
+      }
+    }
   }
 
   void toggleSpeaker() {
     _speakerMuted = !_speakerMuted;
-    if (_speakerMuted) _streamer.stop();
+    final r = _room;
+    if (r == null) return;
+    for (final participant in r.remoteParticipants.values) {
+      for (final pub in participant.audioTrackPublications) {
+        final track = pub.track;
+        if (track != null) {
+          track.mediaStreamTrack.enabled = !_speakerMuted;
+        }
+      }
+    }
     notifyListeners();
   }
-
-  // ── Internal helpers ─────────────────────────────────────────────────────────
 
   void _setState(SessionState next, {bool notify = true}) {
     final changed = _state != next;
@@ -1099,74 +676,19 @@ class AymaAudioService extends ChangeNotifier {
     if (notify && changed) notifyListeners();
   }
 
-  void _notifyMetersThrottled() {
-    if (_state == SessionState.disconnected) return;
-    final now = DateTime.now();
-    if (now.difference(_lastMeterUiUpdate) < const Duration(milliseconds: 260)) return;
-    _lastMeterUiUpdate = now;
+  void _setTextChatFailure(TextChatFailure f) {
+    if (_textChatFailure == f) return;
+    _textChatFailure = f;
     notifyListeners();
   }
-
-  String _mergeTurnText(String existing, String incoming) {
-    final next = incoming.trim();
-    final cur = existing.trim();
-    if (next.isEmpty) return cur;
-    if (cur.isEmpty) return next;
-    if (cur == next || cur.endsWith(next)) return cur;
-    if (next.startsWith(cur)) return next;
-    return '$cur $next';
-  }
-
-  String _stamp(DateTime time, String text) => '[${time.toIso8601String()}] $text';
-
-  double _pcmRms(Uint8List pcm16) {
-    if (pcm16.length < 2) return 0;
-    final view = ByteData.sublistView(pcm16);
-    final count = pcm16.length ~/ 2;
-    double sum = 0;
-    for (int i = 0; i < count; i++) {
-      final s = view.getInt16(i * 2, Endian.little) / 32768.0;
-      sum += s * s;
-    }
-    return math.sqrt(sum / count).clamp(0.0, 1.0);
-  }
-
-  void _checkGoodbyeWakeWord(String transcript) {
-    final lower = transcript.toLowerCase();
-    if (lower.contains('goodbye ayma') ||
-        lower.contains('bye ayma') ||
-        lower.contains('goodbye, ayma') ||
-        lower.contains('bye, ayma') ||
-        lower.contains('stop ayma')) {
-      // Small delay so the transcript is committed first
-      Future.delayed(const Duration(milliseconds: 400), () {
-        if (_state != SessionState.disconnected) disconnect();
-      });
-    }
-  }
-
-  // ignore: unused_element — kept as escape hatch for live voice path
-  void _addAssistantFallbackMessage() {}
-
 
   @override
   void dispose() {
     stopWakeWordListening();
     _speechToText.stop();
-    _micFlushTimer?.cancel();
     _persistDebounce?.cancel();
-    _talkHoldoffTimer?.cancel();
-    _outputDecayTimer?.cancel();
-    for (final sub in _subs) {
-      sub.cancel();
-    }
-    _client.dispose();
-    _recorder.dispose();
-    _streamer.dispose();
+    _volumeTimer?.cancel();
+    unawaited(_disconnectTransport());
     super.dispose();
   }
-}
-
-class _QuotaExhaustedException implements Exception {
-  const _QuotaExhaustedException();
 }

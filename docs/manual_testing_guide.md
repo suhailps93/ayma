@@ -1,105 +1,113 @@
 # Manual Testing Guide
 
-How to bring up the backend, load the app on a device, and test all features end to end.
+How to load the Flutter app against the production backend and test the core Ayma flows end to end.
 
 ---
 
-## 1. Install dependencies (once)
+## 0. Backend Data Layer
 
-```bash
-pip install asyncpg google-generativeai fastapi uvicorn firebase-admin \
-  --break-system-packages
-```
+Ayma now uses **Cloud Firestore** for application data. PostgreSQL, `schema.sql`, `run_schema.py`, `cloud-sql-proxy`, and Cloud SQL start/stop steps are obsolete.
+
+Cloud Run scales to zero automatically. Firestore, Firebase Storage, Gemini, LiveKit, and Firebase Functions are billed by usage, so there is no database instance to shut down after testing.
 
 ---
 
-## 2. Start the backend
+## 1. Install Dependencies
 
 ```bash
-export DATABASE_URL="postgresql://user:pass@localhost:5432/ayma"
-psql $DATABASE_URL -f schema.sql   # first time only
-cd ayma/functions/bootstrap
-uvicorn main:app --host 0.0.0.0 --port 8080
-```
-
-### Verify backend is up
-
-```bash
-curl http://localhost:8080/health
-# → {"status":"ok"}
+cd ayma_flutter
+flutter pub get
+./scripts/check-flutter-env
 ```
 
 ---
 
-## 3. Load the app on a physical phone (Pixel)
+## 2. Use the Production Backend
 
-### 3a. Connect via ADB Wi-Fi
+Manual testing uses the deployed Cloud Run backend by default. Do not start local FastAPI unless you are debugging backend code.
 
-The Pixel 10 Pro Fold is on the local network. From the project root:
-
-```bash
-adb connect 10.0.0.203:45309
-adb devices   # should show 10.0.0.203:45309 device
+```text
+https://ayma-bootstrap-235381544962.us-central1.run.app
 ```
 
-If the port changes (after phone reboot), go to Developer Options → Wireless debugging → pair with QR/code.
+This URL is the production FastAPI service (`ayma-bootstrap`) running on Google Cloud Run in project `ayma-ai`, region `us-central1`. Firebase is still used for Auth, Firestore, and Storage; Cloud Run is the app's API/AI backend.
 
-### 3b. Run against production Cloud Run backend (default)
+Cloud Run scales to zero by default when there is no traffic. As long as `min-instances` stays unset or `0`, this backend should not have Cloud Run CPU/memory charges while nobody is using the app. You can still see tiny usage-based costs from stored data/artifacts/logs or other services, but Gemini, LiveKit, Firestore reads/writes, and Cloud Run request compute are primarily incurred when the app or cron jobs actually call them.
 
-```bash
-cd ayma/ayma_flutter
-flutter run -d 10.0.0.203:45309
-```
-
-The app will connect to `https://ayma-bootstrap-235381544962.us-central1.run.app`.
-
-### 3c. Run against local backend
-
-Your laptop's local IP (find with `ip addr` or `ifconfig`) must be reachable from the phone on the same Wi-Fi:
+### Verify Production Backend Is Up
 
 ```bash
-cd ayma/ayma_flutter
-flutter run -d 10.0.0.203:45309 \
-  --dart-define=AYMA_BOOTSTRAP_URL=http://192.168.X.X:8080
+curl https://ayma-bootstrap-235381544962.us-central1.run.app/health
+# {"status":"ok"}
 ```
 
-Replace `192.168.X.X` with your actual LAN IP.
+Authenticated endpoints require a Firebase ID token from the app.
 
 ---
 
-## 4. Load the app on the Android emulator
+## 3. Run the App on a Physical Phone
 
-### 4a. Check emulator is running
+### 3a. Connect With Wireless ADB
+
+The Pixel 10 Pro Fold is usually on local Wi-Fi at `10.0.0.203`, but the wireless debugging port changes.
+
+```bash
+adb mdns services
+adb connect 10.0.0.203:<connect-port>
+adb devices
+```
+
+If the device shows `offline` or the port changed after a reboot:
+
+```bash
+adb kill-server
+adb start-server
+adb pair 10.0.0.203:<pair-port> <6-digit-code>
+adb connect 10.0.0.203:<connect-port>
+```
+
+The pair/connect ports come from Android Developer Options -> Wireless debugging.
+
+### 3b. Run Against Production
+
+```bash
+cd ayma_flutter
+flutter run -d <device-id>
+```
+
+No `AYMA_BOOTSTRAP_URL` override is needed. The app uses the production backend from `Env.bootstrapUrl`.
+
+---
+
+## 4. Run the App on the Android Emulator
+
+### 4a. Check Emulator Is Running
 
 ```bash
 flutter devices
-# should list: sdk gphone64 x86 64 (emulator-5554)
 ```
 
-If not running, start it:
+If no emulator is running:
 
 ```bash
-flutter emulators --launch Medium_Phone_API_36.0
+flutter emulators
+flutter emulators --launch <emulator-id>
 ```
 
-### 4b. Run against local backend
-
-The emulator reaches the host machine at `10.0.2.2`:
+### 4b. Run Against Production
 
 ```bash
-cd ayma/ayma_flutter
-flutter run -d emulator-5554 \
-  --dart-define=AYMA_BOOTSTRAP_URL=http://10.0.2.2:8080
+cd ayma_flutter
+flutter run -d emulator-5554
 ```
 
-### 4c. Build and install APK manually
+### 4c. Build and Install APK Manually
 
-Use this when `flutter run` exits prematurely in background mode:
+Use this when `flutter run` exits early or you need to relaunch without the Flutter CLI attached:
 
 ```bash
-cd ayma/ayma_flutter
-flutter build apk --debug \
-  --dart-define=AYMA_BOOTSTRAP_URL=http://10.0.2.2:8080
+cd ayma_flutter
+flutter build apk --debug
 
 adb -s emulator-5554 install -r \
   build/app/outputs/flutter-apk/app-debug.apk
@@ -110,101 +118,187 @@ adb -s emulator-5554 shell \
 
 ---
 
-## 5. Feature checklist
+## 5. Smoke Validation Commands
 
-Run through these after any significant code change.
+Run these before or after a manual pass:
 
-### Onboarding
+```bash
+python3 -m unittest functions/bootstrap/test_main_logic.py
+python3 -m py_compile functions/bootstrap/main.py
+cd ayma_flutter && flutter analyze
+```
 
-| Step | What to check |
-|------|---------------|
-| Welcome (step 0) | Only shown on first sign-up. Re-login should skip directly to community select. |
-| Community select (step 1) | 7 cards render including "Find Your People" 🤝 and "Cofounder & Collaborator" 🚀. Selecting a card enables Continue. |
-| About you (step 2) | Name field, age slider, gender chips. Continue disabled until name + gender filled. |
-| Preferences (step 3) | Tapping Next auto-requests GPS permission. Tap "Don't allow" → location text field expands with city suggestions. Age range slider + interest chips work. |
-| Photos (step 4) | "Add photos" picker button + "Add photos later" skip link visible. "Get started" enabled immediately (photos optional). |
-| Submit | Tapping "Get started" or skipping photos navigates to /chat, NOT back to onboarding. |
+Optional matching unit tests:
 
-### Chat screen
-
-| Check | Expected |
-|-------|----------|
-| SESSION timer | Not visible during text-only chat. Only appears during live voice (WebSocket active). |
-| Send text message | Message appears in thread. |
-| Reply failure (quota) | Amber banner: "API quota reached — Ayma will reply when quota resets". No fake reply message. |
-| Photo in chat | Photo uploads to Firebase Storage for Gemini context. Does NOT appear in your profile media gallery. |
-
-### Shell tabs
-
-| Tab | Expected |
-|-----|----------|
-| Chat | Text input, voice button, conversation thread. |
-| Matches | Empty state "Ayma is still getting to know you" for fresh profiles. |
-| Explore | Profile cards + filter chips. |
-| Signals | Empty state "All caught up" for fresh profiles. |
-| Profile — Public | Profile card with community badge, bio, photos. |
-| Profile — Private | 4 wiki sections: WHO YOU ARE, WHAT YOU'RE LOOKING FOR, YOUR LIFE RIGHT NOW, FOR MATCHING. Empty state shows "Nothing here yet — keep chatting with Ayma!" |
-| Settings | Shows username and logout button. |
+```bash
+python3 -m unittest tests/unit/test_matching.py
+```
 
 ---
 
-## 6. ADB quick reference
+## 6. Feature Checklist
+
+Run through these after any significant code change.
+
+### Auth and Onboarding
+
+| Step | What to check |
+|------|---------------|
+| Auth | Email sign-in/sign-up works. Google, Apple, and phone sign-in buttons do not regress visually. |
+| Welcome | New users see the onboarding welcome. Completed users are redirected to `/chat`. |
+| Community select | 7 cards render: Western Dating, Indian Arranged Marriage, Muslim Matrimonial, West African Marriage, LGBTQ+ Dating, Find Your People, Cofounder & Collaborator. Selecting a card enables Continue. |
+| About you | Name field, age slider, and gender chips work. Continue stays disabled until required fields are filled. |
+| Preferences | Location permission request works. If denied, manual city entry and suggestions remain usable. Age range and interest controls persist. |
+| Photos | Add photos button and Add photos later link are visible. Get started is available because photos are optional. |
+| Submit | Get started completes onboarding and navigates to `/chat`, not back to onboarding. |
+
+### Chat and Voice
+
+| Check | Expected |
+|-------|----------|
+| Text message | Message appears immediately in the thread and sends over the LiveKit data channel after a room connection is established. |
+| Connection failure | Banner shows "No connection" and says saved messages will be answered when Ayma is back online. |
+| Quota failure | Banner shows "API quota reached" and says Ayma will reply when quota resets at midnight PT. |
+| Voice session | Starting voice creates a LiveKit room via `/bootstrap`; the center Ayma tab pulses while connected. |
+| Stop voice | Tapping the center Ayma tab while already on Chat and connected disconnects the session. |
+| Photo in chat | Attached media uploads to Firebase Storage for chat context. It does not become profile media unless added through Profile. |
+| Post-turn | After conversation turns, profile wiki/question answers update through `/post-turn`. |
+
+### Shell Tabs
+
+| Tab | Expected |
+|-----|----------|
+| Matches | Empty state says "Ayma is still getting to know you" for fresh profiles. Find matches now triggers `/run-matching`. |
+| Explore | Profile cards render with search/filter controls. Opening a card shows the public profile and DM actions. |
+| Ayma | Main chat surface with text input, attach button, and voice controls. |
+| Signals | Empty state says "All caught up" for fresh profiles; unread badge appears when notifications exist. |
+| You | Profile editor with public profile, private wiki, photos, completeness, and correction flow. |
+
+### Secondary Screens
+
+| Screen | Expected |
+|--------|----------|
+| Match detail | Shows score, rationale, both profile summaries, accept/reject controls, and vibe-check/simulation controls. |
+| Direct messages | Opening a profile DM thread loads `/messages/{other_user_id}` and sends via `/messages`. |
+| Settings | Available at `/settings`; includes matching pause, simulation transcript toggle, Ayma voice settings, privacy/export/delete actions, and logout. |
+| Admin | `/admin` loads the admin dashboard. Data access requires `X-Admin-Password` for backend admin endpoints. |
+
+---
+
+## 7. ADB Quick Reference
 
 ```bash
-# Screenshot → file
+# Screenshot to file
 adb -s emulator-5554 exec-out screencap -p > /tmp/screen.png
 
-# Dump UI tree (use to find tap coordinates)
+# Dump UI tree
 adb -s emulator-5554 shell uiautomator dump /data/local/tmp/ui.xml
 adb -s emulator-5554 shell cat /data/local/tmp/ui.xml
 
-# Tap at phone coordinates (not screenshot pixels)
-# Scale factor ≈ 0.657: phone_x = screenshot_x / 0.657
+# Tap at device coordinates
 adb -s emulator-5554 shell input tap X Y
 
-# Swipe up (scroll down)
+# Swipe up
 adb -s emulator-5554 shell input swipe 540 1200 540 400 500
 
 # Press BACK
 adb -s emulator-5554 shell input keyevent 4
 
-# Type text (only works when a text field already has focus)
+# Type text into a focused field
 adb -s emulator-5554 shell input text "YourText"
+
+# Flutter logs
+adb -s emulator-5554 logcat -s flutter
 ```
 
-> **Note:** `adb input text` works for simple alphanumeric strings when the field is already focused. For complex emoji or special characters, use a real keyboard.
+`adb input text` is reliable for simple alphanumeric strings. For spaces, punctuation, emoji, and long text, use a real keyboard or paste through the emulator/device UI.
+
+Project helpers:
+
+```bash
+./ayma_flutter/scripts/adb-ui devices
+./ayma_flutter/scripts/adb-ui screenshot
+./ayma_flutter/scripts/adb-ui dump
+```
 
 ---
 
-## 7. Deploy backend to Cloud Run (when ready)
+## 8. Deploy Backend to Cloud Run
 
 ```bash
-# Build and push Docker image
-cd ayma/functions/bootstrap
+cd functions/bootstrap
 gcloud builds submit --tag gcr.io/ayma-ai/ayma-bootstrap .
 
-# Deploy
+ENV_VARS="GOOGLE_API_KEY=<key>,LIVE_MODEL=gemini-3.1-flash-live-preview,TEXT_MODEL=gemini-3.5-flash,LIVEKIT_URL=<url>,LIVEKIT_API_KEY=<key>,LIVEKIT_API_SECRET=<secret>"
+
 gcloud run deploy ayma-bootstrap \
   --image gcr.io/ayma-ai/ayma-bootstrap \
   --region us-central1 \
-  --platform managed \
-  --allow-unauthenticated \
-  --set-env-vars DATABASE_URL=$DATABASE_URL,GEMINI_API_KEY=$GEMINI_API_KEY
+  --service-account vertex-express@ayma-ai.iam.gserviceaccount.com \
+  --set-env-vars "$ENV_VARS" \
+  --allow-unauthenticated
 ```
 
-Check the deployed revision:
+Inspect the deployed revision and runtime env:
+
 ```bash
 gcloud run revisions list --service ayma-bootstrap --region us-central1
+gcloud run services describe ayma-bootstrap \
+  --region us-central1 \
+  --format="yaml(spec.template.spec.containers[0].env)"
 ```
 
 ---
 
-## 8. Deploy Firebase Storage rules
+## 9. Deploy Firebase Rules and Triggers
 
-After editing `ayma/storage.rules`:
+After editing `storage.rules` or `functions/triggers`:
 
 ```bash
-cd ayma
-npx firebase-tools login   # only needed once
-npx firebase-tools deploy --only storage --project ayma-ai
+firebase deploy --only storage,functions
+```
+
+Storage-only deploy:
+
+```bash
+firebase deploy --only storage
+```
+
+Daily matching cron setup lives in [cloud-scheduler.md](/home/suhailps/latest_claude/ayma/docs/cloud-scheduler.md).
+
+---
+
+## 10. Optional Local Backend Debugging
+
+Only use this section when you are actively changing backend code and want the app to call your local FastAPI process. Normal manual testing should use production.
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r functions/bootstrap/requirements.txt
+
+export GOOGLE_API_KEY="your-gemini-key"
+export FIREBASE_PROJECT_ID="ayma-ai"
+export LIVEKIT_URL="wss://your-livekit-host"
+export LIVEKIT_API_KEY="your-livekit-api-key"
+export LIVEKIT_API_SECRET="your-livekit-api-secret"
+
+cd functions/bootstrap
+uvicorn main:app --host 0.0.0.0 --port 8080
+```
+
+Phone on same Wi-Fi:
+
+```bash
+cd ayma_flutter
+flutter run -d <device-id> \
+  --dart-define=AYMA_BOOTSTRAP_URL=http://192.168.X.X:8080
+```
+
+Emulator:
+
+```bash
+cd ayma_flutter
+flutter run -d emulator-5554 \
+  --dart-define=AYMA_BOOTSTRAP_URL=http://10.0.2.2:8080
 ```

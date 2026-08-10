@@ -9,6 +9,7 @@ import 'package:go_router/go_router.dart';
 import 'package:image_picker/image_picker.dart';
 
 import '../../models/community_profile.dart';
+import '../../models/profile.dart';
 import '../../providers/providers.dart';
 import '../../services/api_service.dart';
 import '../../services/backend_service.dart';
@@ -288,7 +289,12 @@ class _OnboardingScreenState extends ConsumerState<OnboardingScreen> {
       try {
         // Async fetch to verify latest backend values
         final alreadySeen = await ref.read(preboardingSeenProvider.future);
-        final latestProfile = await ref.read(profileProvider.future);
+        UserProfile? latestProfile;
+        try {
+          latestProfile = await ref.read(profileProvider.future);
+        } catch (e) {
+          debugPrint('DEBUG: Error loading profile: $e');
+        }
         if (!mounted) return;
 
         if (latestProfile != null && latestProfile.onboardingComplete) {
@@ -371,6 +377,11 @@ class _OnboardingScreenState extends ConsumerState<OnboardingScreen> {
     } else {
       _save();
     }
+  }
+
+  void _back() {
+    if (_step <= 0 || _saving) return;
+    setState(() => _step--);
   }
 
   Future<void> _detectLocation() async {
@@ -513,7 +524,12 @@ class _OnboardingScreenState extends ConsumerState<OnboardingScreen> {
 
   @override
   Widget build(BuildContext context) {
-    return Scaffold(
+    return PopScope(
+      canPop: _step == 0,
+      onPopInvokedWithResult: (didPop, _) {
+        if (!didPop) _back();
+      },
+      child: Scaffold(
       backgroundColor: AymaColors.bg,
       resizeToAvoidBottomInset: true,
       body: SafeArea(
@@ -522,23 +538,50 @@ class _OnboardingScreenState extends ConsumerState<OnboardingScreen> {
             if (_step > 0)
               Padding(
                 padding:
-                    const EdgeInsets.symmetric(horizontal: 28, vertical: 18),
-                child: Row(
-                  children: List.generate(
-                    4,
-                    (i) => Expanded(
-                      child: Container(
-                        height: 2,
-                        margin: const EdgeInsets.symmetric(horizontal: 3),
-                        decoration: BoxDecoration(
-                          color: i < _step
-                              ? AymaColors.accent
-                              : AymaColors.lineSoft,
-                          borderRadius: BorderRadius.circular(1),
+                    const EdgeInsets.fromLTRB(28, 18, 28, 18),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    GestureDetector(
+                      onTap: _saving ? null : _back,
+                      child: Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          Icon(
+                            Icons.arrow_back_rounded,
+                            size: 18,
+                            color: AymaColors.fgMute,
+                          ),
+                          const SizedBox(width: 6),
+                          Text(
+                            'Back',
+                            style: AymaFonts.mono(
+                              size: 10,
+                              color: AymaColors.fgMute,
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                    const SizedBox(height: 14),
+                    Row(
+                      children: List.generate(
+                        4,
+                        (i) => Expanded(
+                          child: Container(
+                            height: 2,
+                            margin: const EdgeInsets.symmetric(horizontal: 3),
+                            decoration: BoxDecoration(
+                              color: i < _step
+                                  ? AymaColors.accent
+                                  : AymaColors.lineSoft,
+                              borderRadius: BorderRadius.circular(1),
+                            ),
+                          ),
                         ),
                       ),
                     ),
-                  ),
+                  ],
                 ),
               )
             else
@@ -568,6 +611,7 @@ class _OnboardingScreenState extends ConsumerState<OnboardingScreen> {
           ],
         ),
       ),
+    ),
     );
   }
 
