@@ -28,7 +28,7 @@ class TestAllScreensWithFakeProfile(unittest.TestCase):
         self.active_uid = self.user1_id
 
         import main
-        main.ADMIN_PASSWORD = "AymaAdmin2026!"
+        main.ADMIN_PASSWORD = "test-admin-password"
         app.dependency_overrides[verify_token] = lambda: self.active_uid
 
     def tearDown(self):
@@ -180,10 +180,11 @@ class TestAllScreensWithFakeProfile(unittest.TestCase):
             print("✅ 15. Notifications Screen: Notifications loaded & marked read")
 
             # 11. Admin Console Screen
-            res = client.get("/admin/users", headers={"X-Admin-Password": "AymaAdmin2026!"})
+            admin_headers = {"X-Admin-Password": "test-admin-password"}
+            res = client.get("/admin/users", headers=admin_headers)
             self.assertEqual(res.status_code, 200)
 
-            res = client.get(f"/admin/users/{self.user1_id}", headers={"X-Admin-Password": "AymaAdmin2026!"})
+            res = client.get(f"/admin/users/{self.user1_id}", headers=admin_headers)
             self.assertEqual(res.status_code, 200)
             print("✅ 16. Admin Console Screen: Full system inspection & fake user detail loaded")
 

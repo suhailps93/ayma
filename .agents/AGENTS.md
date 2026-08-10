@@ -17,6 +17,5 @@ All agents operating in this workspace must adhere to the five fundamental princ
 ## Strict Database Rules (No Mocking)
 
 - **NEVER use mock databases or SQLite fallbacks**: Under no circumstances should mock databases, mock SQLite fallbacks, or `USE_MOCK_DB` flags be introduced, configured, or supported in the active backend code files.
-- **NEVER run with local database instances in production/Cloud Run**: The PostgreSQL database must always connect directly using the Google Cloud SQL Python Connector (`create_async_connector` + `connector.connect_async`) targeting `"ayma-ai:us-central1:ayma-db-instance"` with user `"ayma-user"`, password `"AymaSuperSecret2026!"`, and db `"ayma"`.
+- **NEVER run with local database instances in production/Cloud Run**: Production data access must use the configured production data layer and must not contain plaintext credentials in code or docs. Legacy Cloud SQL credentials, if ever needed for historical operations, must come only from Secret Manager or deployment environment variables.
 - **Always load environment variables safely**: Load environment variables from `.env.local` or `.env` using `python-dotenv` at the top of the entrypoint file (`main.py`) to properly retrieve secrets/API keys (such as LiveKit URLs and keys), but bypass loading them when running unit tests (e.g., `unittest`) to preserve test isolation.
-
