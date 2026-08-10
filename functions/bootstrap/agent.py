@@ -1,8 +1,8 @@
 """
 LiveKit Agent Worker for Ayma.
 
-Provides a unified single-session environment for real-time voice (Gemini Live) 
-and text chat (LiveKit Data Channels) sharing the same database pool and ChatContext.
+Provides a unified single-session environment for real-time voice (Gemini Live)
+and text chat (LiveKit Data Channels) sharing the same Firestore data layer.
 """
 
 import asyncio
@@ -10,11 +10,9 @@ import json
 import logging
 import os
 import secrets
-from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
 
-import asyncpg
+from google.cloud.firestore import AsyncClient
 from livekit.agents import (
     Agent,
     AgentSession,
@@ -23,26 +21,58 @@ from livekit.agents import (
     JobExecutorType,
     function_tool,
     ChatContext,
-    ChatMessage
 )
 from livekit.plugins import google
 from livekit.plugins.google.realtime import RealtimeModel
 
-# Import database parsing and question selection helpers from main.py
 from main import (
-    _parse_row,
     _active_questions_for_profile,
-    _answered_question_keys_from_profile,
     _active_key,
     _process_post_turn_from_messages,
+    add_followup_question_doc,
     COMMUNITY_CONFIG,
+    get_enabled_skills,
+    get_pending_user_questions,
+    get_user_doc,
+    get_relevant_user_memories,
 )
 
-from config import DATABASE_URL, LIVE_MODEL, TEXT_MODEL
+from config import FIREBASE_PROJECT_ID, LIVE_MODEL, TEXT_MODEL
 
 logger = logging.getLogger("ayma.agent")
 
 AGENT_NAME = "ayma-agent"
+AGENT_PROFILE_FETCH_TIMEOUT_S = 5
+AGENT_CONTEXT_FETCH_TIMEOUT_S = 5
+AGENT_MEMORY_FETCH_TIMEOUT_S = 3
+
+_db_by_loop: dict[int, AsyncClient] = {}
+
+
+def _get_db() -> AsyncClient:
+    loop_key = id(asyncio.get_running_loop())
+    db = _db_by_loop.get(loop_key)
+    if db is None:
+        db = AsyncClient(project=FIREBASE_PROJECT_ID)
+        _db_by_loop[loop_key] = db
+    return db
+
+
+async def _with_timeout(
+    label: str,
+    coro,
+    timeout_s: int,
+    fallback,
+    warnings: list[str] | None = None,
+):
+    try:
+        return await asyncio.wait_for(coro, timeout=timeout_s)
+    except Exception as e:
+        msg = f"{label} failed or timed out after {timeout_s}s: {type(e).__name__}: {e}"
+        logger.error(f"AGENT CONTEXT WARNING: {msg}")
+        if warnings is not None:
+            warnings.append(msg)
+        return fallback
 
 # ── Dynamic Prompt Loading (No prompts in code) ──────────────────────────────────
 
@@ -57,7 +87,10 @@ def load_prompt_file(filename: str) -> str:
 
 
 def build_system_prompt_dynamic(
-    profile: dict, skills: list[dict], pending_questions: list[dict]
+    profile: dict,
+    skills: list[dict],
+    pending_questions: list[dict],
+    memories: list[dict] | None = None,
 ) -> str:
     """
     Constructs the conversational system prompt dynamically from prompt files.
@@ -164,6 +197,11 @@ def build_system_prompt_dynamic(
     if profile.get("wiki_profile_structured"):
         parts.append(f"## Structured Match Profile\n{profile['wiki_profile_structured']}")
 
+    if memories:
+        mem_lines = [f"- {m['text']}" for m in memories if m.get("text")]
+        if mem_lines:
+            parts.append(f"## Relevant Memories & Key Facts\n" + "\n".join(mem_lines))
+
     # Questionnaire tasks
     if pending_questions:
         required = [q for q in pending_questions if q.get("category") == "required"]
@@ -244,46 +282,18 @@ class AgentTools:
         """
         logger.info(f"Tool executed: add_followup_question for user={self.uid} question={question}")
         try:
-            async with _DbConn() as conn:
-                q_id = f"followup_{secrets.token_hex(4)}"
-                await conn.execute(
-                    "INSERT INTO user_questions (user_id, question_id, key, text, category, sort_order, answered, is_followup) "
-                    "VALUES ($1, $2, $3, $4, 'followup', 99, FALSE, TRUE)",
-                    self.uid, q_id, q_id, question
-                )
+            q_id = f"followup_{secrets.token_hex(4)}"
+            await add_followup_question_doc(_get_db(), self.uid, q_id, question)
             return "Saved follow-up question successfully."
         except Exception as e:
             logger.error(f"Failed to add followup question: {e}")
             return f"Error saving follow-up question: {e}"
 
 
-async def _open_db_connection() -> asyncpg.Connection:
-    """Create a fresh DB connection inside the current event loop/job context."""
-    return await asyncpg.connect(DATABASE_URL)
-
-
-class _DbConn:
-    """Async context manager for a short-lived asyncpg connection."""
-
-    def __init__(self) -> None:
-        self._conn: asyncpg.Connection | None = None
-
-    async def __aenter__(self) -> asyncpg.Connection:
-        self._conn = await _open_db_connection()
-        return self._conn
-
-    async def __aexit__(self, exc_type, exc, tb) -> None:
-        if self._conn is not None:
-            await self._conn.close()
-            self._conn = None
-
-
 # ── LiveKit Agent Session Entrypoint ───────────────────────────────────────────────
 
 def make_entrypoint():
-    """
-    Returns the entrypoint function bound to the database connection pool.
-    """
+    """Returns the LiveKit session entrypoint."""
     async def entrypoint(ctx: JobContext):
         # The room name is set to the user's Firebase UID during token bootstrap.
         uid = ctx.room.name
@@ -295,41 +305,70 @@ def make_entrypoint():
         await ctx.connect()
         logger.info("Agent connected to LiveKit room.")
 
-        # 1. Fetch the user profile and setup constraints from PostgreSQL
-        async with _DbConn() as conn:
-            profile_row = await conn.fetchrow("SELECT * FROM users WHERE id = $1", uid)
-            if not profile_row:
-                logger.error(f"No profile found in database for user={uid}")
-                return
+        db = _get_db()
+        context_warnings: list[str] = []
+        logger.info(f"Loading agent context for user={uid}")
+        profile = await _with_timeout(
+            "profile fetch",
+            get_user_doc(db, uid),
+            AGENT_PROFILE_FETCH_TIMEOUT_S,
+            {},
+            context_warnings,
+        )
+        if not profile:
+            logger.info(f"Fresh user without profile found in Firestore for user={uid}, creating default profile fallback.")
+            profile = {
+                "user_id": uid,
+                "display_name": "Friend",
+                "community_profile": "dating_western",
+                "onboarding_complete": False,
+            }
 
-            profile = _parse_row(profile_row)
-            answered_keys = _answered_question_keys_from_profile(profile)
-
-            # Fetch pending questions (unanswered)
-            questions_rows = await conn.fetch("""
-                SELECT key, text, category, sort_order as "order", is_followup
-                FROM user_questions
-                WHERE user_id = $1 AND answered = FALSE
-                ORDER BY 
-                  CASE category 
-                    WHEN 'required' THEN 0 
-                    WHEN 'deeper' THEN 1 
-                    WHEN 'matching_prefs' THEN 2 
-                    ELSE 3 
-                  END, 
-                  sort_order
-            """, uid)
-            pending_questions = [dict(r) for r in questions_rows]
-
-            # Fetch custom user skills
-            skills_rows = await conn.fetch(
-                "SELECT name, content FROM user_skills WHERE user_id = $1 AND enabled = TRUE",
-                uid
+        pending_questions = await _with_timeout(
+            "pending questions fetch",
+            get_pending_user_questions(db, uid),
+            AGENT_CONTEXT_FETCH_TIMEOUT_S,
+            [],
+            context_warnings,
+        )
+        skills = await _with_timeout(
+            "enabled skills fetch",
+            get_enabled_skills(db, uid),
+            AGENT_CONTEXT_FETCH_TIMEOUT_S,
+            [],
+            context_warnings,
+        )
+        memories = await _with_timeout(
+            "relevant memories fetch",
+            get_relevant_user_memories(db, uid, query_text=profile.get("display_name"), limit=5),
+            AGENT_MEMORY_FETCH_TIMEOUT_S,
+            [],
+            context_warnings,
+        )
+        logger.info(
+            f"Loaded agent context for user={uid}: "
+            f"questions={len(pending_questions)} skills={len(skills)} memories={len(memories)}"
+        )
+        if context_warnings:
+            logger.error(
+                "AGENT CONTEXT DEGRADED for user=%s: %s",
+                uid,
+                " | ".join(context_warnings),
             )
-            skills = [dict(r) for r in skills_rows]
 
         # 2. Build the system prompt dynamic from prompt templates
-        system_prompt = build_system_prompt_dynamic(profile, skills, pending_questions)
+        system_prompt = build_system_prompt_dynamic(
+            profile, skills, pending_questions, memories=memories
+        )
+        if context_warnings:
+            system_prompt += (
+                "\n\n## TESTING WARNING — CONTEXT DEGRADED\n"
+                "Memory/profile context retrieval had a problem while starting this session. "
+                "For this testing session, begin your next user-facing reply with: "
+                "\"[context warning: memory/profile retrieval degraded]\". "
+                "Then continue normally and do not pretend you loaded missing memories.\n"
+                "Details: " + " | ".join(context_warnings)
+            )
 
         # 3. Determine custom voice configuration
         voice_pref = (profile.get("voice_preference") or "").strip().lower()
@@ -361,6 +400,8 @@ def make_entrypoint():
             model=TEXT_MODEL,
             api_key=api_key,
         )
+        text_chat_ctx = ChatContext()
+        text_chat_ctx.add_message(role="system", content=system_prompt)
 
         # Initialize the tools class
         tools_inst = AgentTools(uid=uid)
@@ -425,23 +466,17 @@ def make_entrypoint():
                 return
             session_id = f"lk_{secrets.token_hex(4)}"
             try:
-                async with _DbConn() as conn:
-                    await conn.execute(
-                        "INSERT INTO messages (user_id, session_id, role, text) VALUES "
-                        "($1, $2, 'user', $3), ($1, $2, 'model', $4)",
-                        uid, session_id, user_text, model_text
-                    )
-                    await _process_post_turn_from_messages(
-                        conn,
-                        uid=uid,
-                        session_id=session_id,
-                        messages=[
-                            {"role": "user", "text": user_text},
-                            {"role": "model", "text": model_text},
-                        ],
-                    )
+                await _process_post_turn_from_messages(
+                    _get_db(),
+                    uid=uid,
+                    session_id=session_id,
+                    messages=[
+                        {"role": "user", "text": user_text},
+                        {"role": "model", "text": model_text},
+                    ],
+                )
             except Exception as e:
-                logger.warning(f"Failed to persist turn to DB: {e}")
+                logger.warning(f"Failed to persist turn to Firestore: {e}")
 
         @session.on("user_input_transcribed")
         def on_user_input_transcribed(event) -> None:
@@ -506,18 +541,28 @@ def make_entrypoint():
             payload = data_packet.data
             try:
                 if isinstance(payload, bytes):
-                    text = payload.decode("utf-8")
+                    raw_text = payload.decode("utf-8")
                 else:
-                    text = str(payload)
+                    raw_text = str(payload)
+
+                client_message_id = None
+                text = raw_text
+                try:
+                    envelope = json.loads(raw_text)
+                    if isinstance(envelope, dict) and envelope.get("type") == "user_text":
+                        text = str(envelope.get("text") or "")
+                        client_message_id = str(envelope.get("id") or "") or None
+                except Exception:
+                    pass
 
                 logger.info(f"Intercepted text track input: {text}")
 
                 # Create asynchronous task to compute reply safely
-                asyncio.create_task(handle_text_input(text))
+                asyncio.create_task(handle_text_input(text, client_message_id=client_message_id))
             except Exception as e:
                 logger.error(f"Error handling data packet: {e}")
 
-        async def handle_text_input(text: str):
+        async def handle_text_input(text: str, *, client_message_id: str | None = None):
             """
             Runs the LLM text completion and broadcasts response.
             Interrupts the active voice stream on incoming user text commands.
@@ -528,19 +573,14 @@ def make_entrypoint():
             except RuntimeError:
                 pass
 
-            # Append the user text message to the shared context
-            session.chat_ctx.add_message(role="user", content=text)
+            # Keep a separate text context; AgentSession does not expose a
+            # public chat_ctx in livekit-agents 1.6.x.
+            text_chat_ctx.add_message(role="user", content=text)
 
             try:
-                # Add the system instruction context if not already present
-                if not any(msg.role == "system" for msg in session.chat_ctx.messages):
-                    session.chat_ctx.messages.insert(
-                        0, ChatMessage(role="system", content=system_prompt)
-                    )
-
                 # Run text LLM with standard tools
                 response = await text_llm.chat(
-                    chat_ctx=session.chat_ctx,
+                    chat_ctx=text_chat_ctx,
                     tools=tools,
                 ).collect()
 
@@ -554,14 +594,19 @@ def make_entrypoint():
                 logger.info(f"Text LLM generated reply: {reply_text}")
 
                 # Append the model reply to the shared context
-                session.chat_ctx.add_message(role="assistant", content=reply_text)
+                text_chat_ctx.add_message(role="assistant", content=reply_text)
 
                 # Commit text turn to database and post-turn memory pipeline
                 asyncio.create_task(_persist_turn(text, reply_text))
 
                 # Broadcast reply string to the user via data channel
                 await ctx.room.local_participant.publish_data(
-                    payload=reply_text,
+                    payload=json.dumps({
+                        "type": "agent_transcript",
+                        "text": reply_text,
+                        "is_final": True,
+                        "client_message_id": client_message_id,
+                    }),
                     reliable=True,
                 )
             except Exception as e:
@@ -569,7 +614,12 @@ def make_entrypoint():
                 # Send error message back to client
                 try:
                     await ctx.room.local_participant.publish_data(
-                        payload="I encountered an issue processing your request. Please try again.",
+                        payload=json.dumps({
+                            "type": "agent_transcript",
+                            "text": "I encountered an issue processing your request. Please try again.",
+                            "is_final": True,
+                            "client_message_id": client_message_id,
+                        }),
                         reliable=True,
                     )
                 except Exception:
@@ -591,7 +641,7 @@ def make_entrypoint():
 
 # ── Agent Worker Server Management ───────────────────────────────────────────────
 
-async def start_agent_server(pool: asyncpg.Pool) -> asyncio.Task | None:
+async def start_agent_server() -> asyncio.Task | None:
     """
     Initializes and starts the LiveKit AgentServer programmatically.
     Returns the running async task or None if LiveKit credentials are not set.

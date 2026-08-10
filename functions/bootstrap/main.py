@@ -1,5 +1,5 @@
 """
-Ayma Bootstrap — Cloud Run function backed by PostgreSQL.
+Ayma Bootstrap — Cloud Run function backed by Firestore.
 
 Endpoints:
   POST /bootstrap      — verify Firebase ID token, build system prompt, return Gemini Live creds
@@ -10,7 +10,7 @@ Endpoints:
   GET  /profile/{userId}/public — fetch public profile of a match candidate
   GET  /insights       — fetch memory wiki blocks + media
   GET  /matches        — fetch matches
-  POST /matches/{match_id}/status — accept/reject a match
+  POST /matches/{pair_id}/status — accept/reject a match
   GET  /notifications  — fetch unread & recent notifications
   POST /notifications/{notif_id}/read — mark notification as read
   POST /notifications/read-all — mark all notifications read
@@ -29,7 +29,9 @@ Endpoints:
 import asyncio
 import json
 import logging
+import math
 import os
+import re
 import secrets
 import sys
 from datetime import datetime, timezone, timedelta
@@ -47,15 +49,20 @@ if "unittest" not in sys.modules and not any("test" in arg for arg in sys.argv):
         load_dotenv(dotenv_path=_env_local_path)
     load_dotenv()
 
-import asyncpg
 import firebase_admin
 import google.generativeai as genai
 from google import genai as google_genai
+from google.api_core.exceptions import AlreadyExists
+from google.cloud import firestore
+from google.cloud.firestore import AsyncClient
+from google.cloud.firestore_v1.base_query import FieldFilter
+from google.cloud.firestore_v1.vector import Vector
+from google.cloud.firestore_v1.base_vector_query import DistanceMeasure
 from google.genai import types as google_genai_types
 from fastapi import Depends, FastAPI, Header, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
-from firebase_admin import auth, messaging
+from firebase_admin import auth, app_check, messaging
 from pydantic import BaseModel
 from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
@@ -79,11 +86,11 @@ from questionnaire_graph import (
 )
 from config import (
     FIREBASE_PROJECT_ID,
-    DATABASE_URL,
     GOOGLE_API_KEY,
     LIVE_MODEL,
     TEXT_MODEL,
     EMBEDDING_MODEL,
+    ADMIN_PASSWORD,
     RATE_BOOTSTRAP,
     RATE_POST_TURN,
     RATE_CHAT_TEXT,
@@ -105,6 +112,7 @@ from config import (
     PHOTO_ANALYSIS_MAX,
     PUSH_PREVIEW_LEN,
     CRON_SECRET,
+    APP_CHECK_ENFORCE,
 )
 
 # ── Init ──────────────────────────────────────────────────────────────────────
@@ -132,7 +140,6 @@ def _is_quota_error(exc: Exception) -> bool:
 GOOGLE_API_KEY = _active_key()  # kept for bootstrap token response
 genai.configure(api_key=GOOGLE_API_KEY)
 _embedding_client = google_genai.Client(api_key=GOOGLE_API_KEY)
-ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", "").strip()
 
 # ── Rate limiting ─────────────────────────────────────────────────────────────
 limiter = Limiter(key_func=get_remote_address)
@@ -151,55 +158,34 @@ GEMINI_LIVE_WS_V1ALPHA = (
 async def lifespan(app: FastAPI):
     """
     Manages the application lifecycle.
-    
-    This function:
-    1. Checks if it's running within a testing context (stubbed database pool).
-    2. Initializes a secure direct connection pool to Google Cloud SQL (ayma-ai:us-central1:ayma-db-instance)
-       using the google-cloud-sql-connector library with asyncpg driver.
-    3. Starts the LiveKit Agent Server programmatically with the active database connection pool.
-    4. Cleans up both the database connections and the LiveKit Agent Server on shutdown.
+
+    Firestore backs the app data layer. Launches LiveKit agent server as a background
+    task so FastAPI binds to PORT 8080 immediately.
     """
-    import asyncpg
-    is_mocked = getattr(asyncpg.create_pool, "__name__", "") == "_create_pool"
+    app.state.db = AsyncClient(project=FIREBASE_PROJECT_ID)
+    agent_task: asyncio.Task | None = None
+    try:
+        # Import lazily after main.py has finished defining the Firestore helper
+        # functions that agent.py imports. A module-level import creates a
+        # circular import and silently prevents the LiveKit worker from starting.
+        from agent import start_agent_server
 
-    if is_mocked:
-        app.state.pool = await asyncpg.create_pool()
-        logger.info("Mock PostgreSQL connected for testing.")
-        yield
-        return
+        agent_task = await start_agent_server()
+        if agent_task is None:
+            logger.warning("LiveKit AgentServer did not start.")
+        else:
+            logger.info("LiveKit AgentServer task scheduled.")
 
-    # Real connection using Google Cloud SQL Python Connector
-    from google.cloud.sql.connector import create_async_connector
-    logger.info("Connecting to Google Cloud SQL directly via Connector...")
+            def _log_agent_done(task: asyncio.Task) -> None:
+                if task.cancelled():
+                    return
+                exc = task.exception()
+                if exc is not None:
+                    logger.error(f"LiveKit AgentServer task exited: {exc}")
 
-    connector = await create_async_connector()
-
-    async def getconn(*args, **kwargs) -> asyncpg.Connection:
-        """
-        Asynchronously connects to the Cloud SQL database instance.
-        """
-        conn: asyncpg.Connection = await connector.connect_async(
-            "ayma-ai:us-central1:ayma-db-instance",
-            "asyncpg",
-            user="ayma-user",
-            password="AymaSuperSecret2026!",
-            db="ayma",
-            **kwargs
-        )
-        return conn
-
-    # Create connection pool using the connection factory callback
-    app.state.pool = await asyncpg.create_pool(
-        "ayma-ai:us-central1:ayma-db-instance",
-        connect=getconn,
-        min_size=1,
-        max_size=10
-    )
-    logger.info("PostgreSQL connected via Cloud SQL Connector.")
-
-    # Start the LiveKit Agent Server programmatically
-    from agent import start_agent_server
-    agent_task = await start_agent_server(app.state.pool)
+            agent_task.add_done_callback(_log_agent_done)
+    except Exception as e:
+        logger.exception(f"LiveKit AgentServer failed to start: {e}")
 
     yield
 
@@ -211,15 +197,11 @@ async def lifespan(app: FastAPI):
         except asyncio.CancelledError:
             pass
 
-    try:
-        await app.state.pool.close()
-    except Exception:
-        pass
-
-    try:
-        await connector.close_async()
-    except Exception:
-        pass
+    if getattr(app.state, "db", None) is not None:
+        try:
+            await app.state.db.close()
+        except Exception:
+            pass
 
 
 app = FastAPI(title="ayma-bootstrap", lifespan=lifespan)
@@ -256,39 +238,30 @@ async def _send_push(fcm_token: str, title: str, body: str, data: dict | None = 
     except Exception as e:
         logger.warning(f"FCM send failed: {e}")
 
-async def _get_fcm_token(uid: str, conn) -> str:
-    row = await conn.fetchrow("SELECT fcm_token FROM users WHERE id = $1", uid)
-    return (row["fcm_token"] or "") if row else ""
-
-# ── Auto-embed wiki after updates ─────────────────────────────────────────────
-
-async def _refresh_wiki_embedding(uid: str, pool) -> None:
-    """Background task: re-embed matching wiki so pgvector stays fresh."""
-    try:
-        async with pool.acquire() as conn:
-            row = await conn.fetchrow(
-                "SELECT wiki_matching, wiki_preferences FROM users WHERE id = $1", uid
-            )
-            if not row:
-                return
-            text = f"{row['wiki_preferences'] or ''}\n{row['wiki_matching'] or ''}".strip()
-            if not text:
-                return
-            embedding = await _generate_embedding(text)
-            if embedding:
-                vec = f"[{','.join(map(str, embedding))}]"
-                await conn.execute(
-                    "UPDATE users SET matching_embedding = $1::vector WHERE id = $2", vec, uid
-                )
-                logger.info(f"[embedding] refreshed for {uid}")
-    except Exception as e:
-        logger.warning(f"[embedding] refresh failed for {uid}: {e}")
-
 security = HTTPBearer()
 
 # ── Auth ──────────────────────────────────────────────────────────────────────
 
-def verify_token(credentials: HTTPAuthorizationCredentials = Depends(security)) -> str:
+def _verify_app_check_token(request: Request) -> None:
+    token = request.headers.get("X-Firebase-AppCheck")
+    if not token:
+        if APP_CHECK_ENFORCE:
+            raise HTTPException(status_code=401, detail="Missing App Check token")
+        logger.warning("App Check token missing (monitor mode)")
+        return
+    try:
+        app_check.verify_token(token)
+    except Exception as exc:
+        if APP_CHECK_ENFORCE:
+            raise HTTPException(status_code=401, detail="Invalid App Check token")
+        logger.warning(f"App Check verification failed (monitor mode): {exc}")
+
+
+def verify_token(
+    request: Request,
+    credentials: HTTPAuthorizationCredentials = Depends(security),
+) -> str:
+    _verify_app_check_token(request)
     try:
         decoded = auth.verify_id_token(credentials.credentials)
         return decoded["uid"]
@@ -662,89 +635,741 @@ def _parse_row(row) -> dict:
             except Exception:
                 res[field] = [] if field == "photo_order" else {}
     # Convert SQLite boolean integer fields to actual booleans
-    for field in ["onboarding_complete", "matching_paused", "preboarding_seen", 
-                  "profile_public_locked", "profile_public_user_edited", 
+    for field in ["onboarding_complete", "matching_paused", "preboarding_seen",
+                  "profile_public_locked", "profile_public_user_edited",
                   "show_simulation_transcript"]:
         if field in res and res[field] is not None:
             res[field] = bool(res[field])
     return res
+
+# ── Firestore users/{uid} helpers (Step 3a migration) ─────────────────────────
+# 1:1 field mapping of the `users` SQL table (schema.sql), minus the dead
+# `matching_embedding` column (Step 2 removed its only caller). JSONB columns
+# map to native Firestore maps/lists; TIMESTAMP columns use SERVER_TIMESTAMP.
+
+_USER_DOC_DEFAULTS: dict = {
+    "display_name": None,
+    "profile_public": "",
+    "profile_private": "",
+    "profile_ai_observations": "",
+    "agent_name": "Ayma",
+    "voice_preference": "Charon",
+    "matching_prefs": {},
+    "age": None,
+    "gender": None,
+    "location_region": None,
+    "location_coords": {},
+    "onboarding_complete": False,
+    "matching_paused": False,
+    "preboarding_seen": False,
+    "photo_order": [],
+    "voice_settings": {},
+    "profile_public_locked": False,
+    "community_profile": "dating_standard",
+    "profile_public_user_edited": False,
+    "profile_public_pending": "",
+    "wiki_about_me": "",
+    "wiki_context": "",
+    "wiki_preferences": "",
+    "wiki_matching": "",
+    "wiki_profile_structured": "",
+    "profile_answers": {},
+    "profile_answers_public": {},
+    "profile_answers_private": {},
+    "profile_answers_sensitive": {},
+    "profile_field_visibility": {},
+    "raw_user_statements": [],
+    "explore_attrs": {},
+    "fcm_token": None,
+}
+
+
+def _user_doc_ref(db, uid):
+    return db.collection("users").document(uid)
+
+
+def parse_user_doc(snapshot) -> dict:
+    """Mirrors `_parse_row`'s role, but for a Firestore users/{uid} document."""
+    if not snapshot or not snapshot.exists:
+        return {}
+
+    res = snapshot.to_dict() or {}
+    res["id"] = snapshot.id
+
+    for key, default_value in _USER_DOC_DEFAULTS.items():
+        if key not in res:
+            if isinstance(default_value, dict):
+                res[key] = dict(default_value)
+            elif isinstance(default_value, list):
+                res[key] = list(default_value)
+            else:
+                res[key] = default_value
+
+    for key, value in list(res.items()):
+        if isinstance(value, datetime):
+            res[key] = _serialize_value(value)
+
+    return res
+
+
+async def get_user_doc(db, uid: str) -> dict:
+    snapshot = await _user_doc_ref(db, uid).get()
+    return parse_user_doc(snapshot)
+
+
+async def ensure_user_doc(db, uid: str, display_name: str = "User") -> dict:
+    """Idempotent create-if-missing, mirrors `INSERT ... ON CONFLICT DO NOTHING`."""
+    ref = _user_doc_ref(db, uid)
+    snapshot = await ref.get()
+    if snapshot.exists:
+        return parse_user_doc(snapshot)
+
+    payload = {
+        **_USER_DOC_DEFAULTS,
+        "id": uid,
+        "display_name": display_name,
+        "created_at": firestore.SERVER_TIMESTAMP,
+        "updated_at": firestore.SERVER_TIMESTAMP,
+    }
+
+    try:
+        await ref.create(payload)
+    except AlreadyExists:
+        pass
+
+    return await get_user_doc(db, uid)
+
+
+async def update_user_doc(db, uid: str, fields: dict) -> None:
+    await _user_doc_ref(db, uid).set(
+        {
+            **fields,
+            "updated_at": firestore.SERVER_TIMESTAMP,
+        },
+        merge=True,
+    )
+
+# ── Firestore matches/{pairId} helpers (Step 3b migration) ───────────────────
+# pairId = "_".join(sorted([uid_a, uid_b])) — deterministic ID replacing the
+# Postgres `UNIQUE (user_a, user_b)` constraint + `ON CONFLICT DO UPDATE` upsert.
+# `match_simulations` becomes the `matches/{pairId}/simulations` subcollection.
+
+_MATCH_DOC_DEFAULTS: dict = {
+    "user_a": None,
+    "user_b": None,
+    "score": None,
+    "rationale": "",
+    "summary_a": "",
+    "summary_b": "",
+    "synergy_score": None,
+    "synergy_summary": "",
+    "status": "pending",
+    "show_simulation_transcript": True,
+}
+
+
+def _pair_id(uid_a: str, uid_b: str) -> str:
+    return "_".join(sorted([uid_a, uid_b]))
+
+
+def _match_doc_ref(db, pid: str):
+    return db.collection("matches").document(pid)
+
+
+def parse_match_doc(snapshot) -> dict:
+    """Mirrors `parse_user_doc`'s role, but for a Firestore matches/{pairId} document."""
+    if not snapshot or not snapshot.exists:
+        return {}
+
+    res = snapshot.to_dict() or {}
+    res["id"] = snapshot.id
+
+    for key, default_value in _MATCH_DOC_DEFAULTS.items():
+        if key not in res:
+            if isinstance(default_value, dict):
+                res[key] = dict(default_value)
+            elif isinstance(default_value, list):
+                res[key] = list(default_value)
+            else:
+                res[key] = default_value
+
+    for key, value in list(res.items()):
+        if isinstance(value, datetime):
+            res[key] = _serialize_value(value)
+
+    return res
+
+
+async def get_match_doc(db, pid: str) -> dict:
+    snapshot = await _match_doc_ref(db, pid).get()
+    return parse_match_doc(snapshot)
+
+
+async def upsert_match_doc(db, uid_a: str, uid_b: str, fields: dict) -> str:
+    """set(merge=True) on the deterministic pairId doc — the direct equivalent
+    of `INSERT ... ON CONFLICT (user_a, user_b) DO UPDATE`."""
+    pid = _pair_id(uid_a, uid_b)
+    ref = _match_doc_ref(db, pid)
+    snapshot = await ref.get()
+
+    payload = {
+        **fields,
+        "user_a": uid_a,
+        "user_b": uid_b,
+        "updated_at": firestore.SERVER_TIMESTAMP,
+    }
+    if not snapshot.exists:
+        payload["created_at"] = firestore.SERVER_TIMESTAMP
+        if "status" not in fields:
+            payload["status"] = "pending"
+
+    await ref.set(payload, merge=True)
+    return pid
+
+
+async def get_matches_for_user(db, uid: str) -> list[dict]:
+    """Both directions of the match pair — Firestore has no OR query, so this
+    runs two equality queries and merges results."""
+    seen: set[str] = set()
+    matches: list[dict] = []
+
+    query_a = db.collection("matches").where(filter=FieldFilter("user_a", "==", uid))
+    async for snapshot in query_a.stream():
+        if snapshot.id in seen:
+            continue
+        seen.add(snapshot.id)
+        matches.append(parse_match_doc(snapshot))
+
+    query_b = db.collection("matches").where(filter=FieldFilter("user_b", "==", uid))
+    async for snapshot in query_b.stream():
+        if snapshot.id in seen:
+            continue
+        seen.add(snapshot.id)
+        matches.append(parse_match_doc(snapshot))
+
+    return matches
+
+
+def _match_simulations_ref(db, pid: str):
+    return _match_doc_ref(db, pid).collection("simulations")
+
+
+async def replace_match_simulations(db, pid: str, turns: list[dict]) -> None:
+    """Deletes existing simulation turns and writes new ones — mirrors the old
+    `DELETE FROM match_simulations WHERE match_id = ...` + per-line INSERT."""
+    ref = _match_simulations_ref(db, pid)
+    snapshots = [snapshot async for snapshot in ref.stream()]
+    for snapshot in snapshots:
+        await snapshot.reference.delete()
+
+    for turn in turns:
+        await ref.add({
+            "sender_uid": turn["sender_uid"],
+            "turn_index": turn["turn_index"],
+            "message_text": turn["message_text"],
+            "created_at": firestore.SERVER_TIMESTAMP,
+        })
+
+
+async def get_match_simulations(db, pid: str) -> list[dict]:
+    rows = []
+    query = _match_simulations_ref(db, pid).order_by("turn_index")
+    async for snapshot in query.stream():
+        data = snapshot.to_dict() or {}
+        rows.append({
+            "sender_uid": data.get("sender_uid"),
+            "turn_index": data.get("turn_index"),
+            "message_text": data.get("message_text"),
+            "created_at": _serialize_value(data.get("created_at")) if data.get("created_at") is not None else None,
+        })
+    return rows
+
+
+async def _all_match_counts(db) -> dict[str, int]:
+    """Admin-only, low-traffic: a full matches collection scan is acceptable here."""
+    counts: dict[str, int] = {}
+    query = db.collection("matches").select(["user_a", "user_b"])
+    async for snapshot in query.stream():
+        data = snapshot.to_dict() or {}
+        user_a = data.get("user_a")
+        user_b = data.get("user_b")
+        if user_a:
+            counts[user_a] = counts.get(user_a, 0) + 1
+        if user_b:
+            counts[user_b] = counts.get(user_b, 0) + 1
+    return counts
+
+# ── Firestore conversations/{pairId}/messages helpers (Step 3c migration) ────
+# pairId reuses `_pair_id` from the matches helpers above, so a conversation
+# shares its parent key with the corresponding match doc.
+
+def _conversation_messages_ref(db, pid: str):
+    return db.collection("conversations").document(pid).collection("messages")
+
+
+def _parse_message_doc(snapshot) -> dict:
+    """Mirrors `parse_user_doc`'s role, but for a Firestore
+    conversations/{pairId}/messages/{messageId} document."""
+    if not snapshot or not snapshot.exists:
+        return {}
+
+    data = snapshot.to_dict() or {}
+    created_at = data.get("created_at")
+    return {
+        "id": snapshot.id,
+        "from_user_id": data.get("from_user_id"),
+        "to_user_id": data.get("to_user_id"),
+        "text": data.get("text") or "",
+        "read": bool(data.get("read", False)),
+        "created_at": _serialize_value(created_at) if created_at is not None else None,
+    }
+
+
+async def send_message(db, from_uid: str, to_uid: str, text: str) -> dict:
+    """Writes a conversation message doc — mirrors
+    `INSERT INTO messages (from_user_id, to_user_id, text) VALUES (...)`."""
+    pid = _pair_id(from_uid, to_uid)
+    _, doc_ref = await _conversation_messages_ref(db, pid).add({
+        "from_user_id": from_uid,
+        "to_user_id": to_uid,
+        "text": text,
+        "read": False,
+        "created_at": firestore.SERVER_TIMESTAMP,
+    })
+    snapshot = await doc_ref.get()
+    return _parse_message_doc(snapshot)
+
+
+async def get_conversation_messages(db, uid_a: str, uid_b: str, limit: int = MESSAGES_LIMIT) -> list[dict]:
+    """Reads one deterministic conversation thread — mirrors the old
+    `WHERE (from=a AND to=b) OR (from=b AND to=a) ORDER BY created_at ASC LIMIT ...`."""
+    pid = _pair_id(uid_a, uid_b)
+    rows = []
+    query = _conversation_messages_ref(db, pid).order_by("created_at").limit(limit)
+    async for snapshot in query.stream():
+        rows.append(_parse_message_doc(snapshot))
+    return rows
+
+
+async def get_all_messages_for_user(db, uid: str) -> list[dict]:
+    """Firestore collection-group query across every
+    conversations/{pairId}/messages subcollection, analogous to
+    `get_matches_for_user`'s two-query merge, used by the admin detail endpoint."""
+    seen: set[str] = set()
+    messages: list[dict] = []
+
+    try:
+        query_from = db.collection_group("messages").where(filter=FieldFilter("from_user_id", "==", uid))
+        async for snapshot in query_from.stream():
+            if snapshot.id in seen:
+                continue
+            seen.add(snapshot.id)
+            messages.append(_parse_message_doc(snapshot))
+
+        query_to = db.collection_group("messages").where(filter=FieldFilter("to_user_id", "==", uid))
+        async for snapshot in query_to.stream():
+            if snapshot.id in seen:
+                continue
+            seen.add(snapshot.id)
+            messages.append(_parse_message_doc(snapshot))
+    except Exception as e:
+        logger.warning(f"Failed to query collection_group messages ({uid}): {e}")
+
+    messages.sort(
+        key=lambda m: (m.get("created_at") or "", m.get("id") or ""),
+        reverse=True,
+    )
+    return messages
+
+
+async def _all_message_counts(db) -> dict[str, int]:
+    """Admin-only, low-traffic: mirrors `_all_match_counts`."""
+    counts: dict[str, int] = {}
+    query = db.collection_group("messages").select(["from_user_id", "to_user_id"])
+    async for snapshot in query.stream():
+        data = snapshot.to_dict() or {}
+        from_user_id = data.get("from_user_id")
+        to_user_id = data.get("to_user_id")
+        if from_user_id:
+            counts[from_user_id] = counts.get(from_user_id, 0) + 1
+        if to_user_id:
+            counts[to_user_id] = counts.get(to_user_id, 0) + 1
+    return counts
+
+# ── Firestore users/{uid} subcollection helpers (Step 3d migration) ──────────
+
+_QUESTION_CATEGORY_ORDER = {
+    "required": 0,
+    "deeper": 1,
+    "matching_prefs": 2,
+    "followup": 3,
+}
+
+
+def _user_subcollection_ref(db, uid: str, name: str):
+    return _user_doc_ref(db, uid).collection(name)
+
+
+def _parse_subcollection_doc(snapshot) -> dict:
+    data = snapshot.to_dict() or {}
+    data["id"] = snapshot.id
+    for key, value in list(data.items()):
+        if isinstance(value, datetime):
+            data[key] = _serialize_value(value)
+    return data
+
+
+async def get_enabled_skills(db, uid: str) -> list[dict]:
+    rows = []
+    query = _user_subcollection_ref(db, uid, "user_skills").where(
+        filter=FieldFilter("enabled", "==", True)
+    )
+    async for snapshot in query.stream():
+        rows.append(_parse_subcollection_doc(snapshot))
+    rows.sort(key=lambda row: row.get("skill_id") or row.get("id") or "")
+    return rows
+
+
+async def list_user_questions(db, uid: str) -> list[dict]:
+    rows = []
+    async for snapshot in _user_subcollection_ref(db, uid, "user_questions").stream():
+        row = _parse_subcollection_doc(snapshot)
+        row.setdefault("user_id", uid)
+        row.setdefault("question_id", snapshot.id)
+        row["answered"] = bool(row.get("answered", False))
+        row["is_followup"] = bool(row.get("is_followup", False))
+        rows.append(row)
+    rows.sort(
+        key=lambda row: (
+            row.get("answered", False),
+            row.get("is_followup", False),
+            row.get("sort_order", 99),
+            row.get("question_id") or row.get("id") or "",
+        )
+    )
+    return rows
+
+
+async def user_questions_exist(db, uid: str) -> bool:
+    query = _user_subcollection_ref(db, uid, "user_questions").limit(1)
+    async for _ in query.stream():
+        return True
+    return False
+
+
+async def seed_user_questions_if_empty(
+    db,
+    uid: str,
+    active_questions: list[dict],
+    answered_keys: set[str],
+) -> None:
+    if await user_questions_exist(db, uid):
+        return
+
+    batch = db.batch()
+    now_iso = datetime.now(timezone.utc).isoformat()
+    for question in active_questions:
+        qid = question.get("id")
+        if not qid:
+            continue
+        answered = qid in answered_keys
+        batch.set(
+            _user_subcollection_ref(db, uid, "user_questions").document(qid),
+            {
+                "user_id": uid,
+                "question_id": qid,
+                "key": qid,
+                "text": question.get("question_text", ""),
+                "category": _question_category(question),
+                "sort_order": 99,
+                "answered": answered,
+                "answered_at": now_iso if answered else None,
+                "is_followup": False,
+            },
+        )
+    await batch.commit()
+
+
+async def get_pending_user_questions(
+    db,
+    uid: str,
+    *,
+    include_followup: bool = True,
+) -> list[dict]:
+    rows = []
+    for row in await list_user_questions(db, uid):
+        if row.get("answered"):
+            continue
+        if not include_followup and row.get("is_followup"):
+            continue
+        rows.append(
+            {
+                "question_id": row.get("question_id") or row.get("id"),
+                "key": row.get("key"),
+                "text": row.get("text"),
+                "category": row.get("category"),
+                "order": row.get("sort_order", 99),
+                "is_followup": bool(row.get("is_followup", False)),
+            }
+        )
+    rows.sort(
+        key=lambda row: (
+            _QUESTION_CATEGORY_ORDER.get(row.get("category"), 99),
+            row.get("order", 99),
+            row.get("question_id") or "",
+        )
+    )
+    return rows
+
+
+async def mark_user_questions_answered_by_keys(db, uid: str, keys: set[str]) -> None:
+    if not keys:
+        return
+    batch = db.batch()
+    changed = False
+    for row in await list_user_questions(db, uid):
+        if row.get("key") not in keys or row.get("answered"):
+            continue
+        batch.set(
+            _user_subcollection_ref(db, uid, "user_questions").document(row["question_id"]),
+            {
+                "answered": True,
+                "answered_at": firestore.SERVER_TIMESTAMP,
+            },
+            merge=True,
+        )
+        changed = True
+    if changed:
+        await batch.commit()
+
+
+async def add_followup_question_doc(db, uid: str, question_id: str, question_text: str) -> None:
+    await _user_subcollection_ref(db, uid, "user_questions").document(question_id).set(
+        {
+            "user_id": uid,
+            "question_id": question_id,
+            "key": question_id,
+            "text": question_text,
+            "category": "followup",
+            "sort_order": 1,
+            "answered": False,
+            "answered_at": None,
+            "is_followup": True,
+        },
+        merge=True,
+    )
+
+
+async def mark_question_answered_doc(db, uid: str, question_id: str) -> None:
+    await _user_subcollection_ref(db, uid, "user_questions").document(question_id).set(
+        {
+            "answered": True,
+            "answered_at": firestore.SERVER_TIMESTAMP,
+        },
+        merge=True,
+    )
+
+
+async def add_user_memory(db, uid: str, text: str, session_id: str | None) -> None:
+    doc_data = {
+        "user_id": uid,
+        "text": text,
+        "session_id": session_id,
+        "created_at": firestore.SERVER_TIMESTAMP,
+    }
+    try:
+        vector_vals = _embed_text_with_gemini_v2(text)
+        if vector_vals:
+            doc_data["embedding"] = Vector(vector_vals)
+    except Exception as e:
+        logger.warning(f"Failed to generate embedding for user memory ({uid}): {e}")
+
+    await _user_subcollection_ref(db, uid, "user_memories").add(doc_data)
+
+
+async def list_user_memories(db, uid: str) -> list[dict]:
+    rows = []
+    async for snapshot in _user_subcollection_ref(db, uid, "user_memories").stream():
+        row = _parse_subcollection_doc(snapshot)
+        row.setdefault("user_id", uid)
+        rows.append(row)
+    rows.sort(key=lambda row: (row.get("created_at") or "", row.get("id") or ""), reverse=True)
+    return rows
+
+
+async def get_relevant_user_memories(
+    db, uid: str, query_text: str | None = None, limit: int = 5
+) -> list[dict]:
+    """
+    Retrieves user memories. If query_text is provided, uses Firestore native vector search
+    (find_nearest with COSINE distance) to return top-K relevant memories.
+    Falls back to recent memory list if query embedding fails or vector index is not available.
+    """
+    if query_text:
+        try:
+            query_vals = _embed_text_with_gemini_v2(query_text)
+            if query_vals:
+                memories_ref = _user_subcollection_ref(db, uid, "user_memories")
+                vector_query = memories_ref.find_nearest(
+                    vector_field="embedding",
+                    query_vector=Vector(query_vals),
+                    distance_measure=DistanceMeasure.COSINE,
+                    limit=limit,
+                )
+                rows = []
+                async for snapshot in vector_query.stream():
+                    row = _parse_subcollection_doc(snapshot)
+                    row.setdefault("user_id", uid)
+                    rows.append(row)
+                if rows:
+                    return rows
+        except Exception as e:
+            logger.warning(
+                f"Vector search failed for user memories ({uid}), falling back to recent list: {e}"
+            )
+
+    all_memories = await list_user_memories(db, uid)
+    return all_memories[:limit]
+
+
+async def list_user_media(db, uid: str, limit: int | None = None) -> list[dict]:
+    rows = []
+    async for snapshot in _user_subcollection_ref(db, uid, "user_media").stream():
+        row = _parse_subcollection_doc(snapshot)
+        row.setdefault("user_id", uid)
+        rows.append(row)
+    rows.sort(key=lambda row: (row.get("created_at") or "", row.get("id") or ""), reverse=True)
+    if limit is not None:
+        rows = rows[:limit]
+    return rows
+
+
+async def save_user_media(db, uid: str, photo_url: str, caption: str | None) -> None:
+    await _user_subcollection_ref(db, uid, "user_media").add(
+        {
+            "user_id": uid,
+            "photo_url": photo_url,
+            "caption": caption,
+            "created_at": firestore.SERVER_TIMESTAMP,
+        }
+    )
+
+
+async def delete_user_media_by_url_doc(db, uid: str, photo_url: str) -> None:
+    snapshots = [
+        snapshot
+        async for snapshot in _user_subcollection_ref(db, uid, "user_media")
+        .where(filter=FieldFilter("photo_url", "==", photo_url))
+        .stream()
+    ]
+    for snapshot in snapshots:
+        await snapshot.reference.delete()
+
+
+async def create_notification(
+    db,
+    uid: str,
+    notif_type: str,
+    title: str,
+    body: str,
+    meta: dict | None = None,
+) -> str:
+    _, doc_ref = await _user_subcollection_ref(db, uid, "notifications").add(
+        {
+            "user_id": uid,
+            "type": notif_type,
+            "title": title,
+            "body": body,
+            "meta": meta or {},
+            "read": False,
+            "created_at": firestore.SERVER_TIMESTAMP,
+        }
+    )
+    return doc_ref.id
+
+
+async def get_notifications_for_user(db, uid: str, limit: int = NOTIFICATIONS_LIMIT) -> list[dict]:
+    rows = []
+    async for snapshot in _user_subcollection_ref(db, uid, "notifications").stream():
+        row = _parse_subcollection_doc(snapshot)
+        row.setdefault("user_id", uid)
+        row["meta"] = row.get("meta") or {}
+        row["read"] = bool(row.get("read", False))
+        rows.append(row)
+    rows.sort(key=lambda row: (row.get("created_at") or "", row.get("id") or ""), reverse=True)
+    return rows[:limit]
+
+
+async def mark_notification_read_doc(db, uid: str, notif_id: str) -> None:
+    await _user_subcollection_ref(db, uid, "notifications").document(notif_id).set(
+        {
+            "read": True,
+        },
+        merge=True,
+    )
+
+
+async def mark_all_notifications_read_docs(db, uid: str) -> None:
+    batch = db.batch()
+    changed = False
+    async for snapshot in _user_subcollection_ref(db, uid, "notifications").where(
+        filter=FieldFilter("read", "==", False)
+    ).stream():
+        batch.set(snapshot.reference, {"read": True}, merge=True)
+        changed = True
+    if changed:
+        await batch.commit()
+
+
+async def _all_user_subcollection_counts(db, collection_name: str) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    query = db.collection_group(collection_name).select(["user_id"])
+    async for snapshot in query.stream():
+        data = snapshot.to_dict() or {}
+        user_id = data.get("user_id")
+        if user_id:
+            counts[user_id] = counts.get(user_id, 0) + 1
+    return counts
+
+
+async def _all_unread_notification_counts(db) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    try:
+        query = db.collection_group("notifications").where(
+            filter=FieldFilter("read", "==", False)
+        ).select(["user_id"])
+        async for snapshot in query.stream():
+            data = snapshot.to_dict() or {}
+            user_id = data.get("user_id")
+            if user_id:
+                counts[user_id] = counts.get(user_id, 0) + 1
+    except Exception as e:
+        logger.warning(f"Failed to query collection_group notifications: {e}")
+    return counts
 
 # ── Bootstrap ─────────────────────────────────────────────────────────────────
 
 @app.post("/bootstrap")
 @limiter.limit(RATE_BOOTSTRAP)
 async def bootstrap(request: Request, uid: str = Depends(verify_token)):
-    pool = app.state.pool
-    async with pool.acquire() as conn:
-        profile_row = await conn.fetchrow("SELECT * FROM users WHERE id = $1", uid)
-        if not profile_row:
-            display_name = "User"
-            try:
-                user_record = auth.get_user(uid)
-                if user_record.display_name:
-                    display_name = user_record.display_name
-            except Exception:
-                pass
-            
-            await conn.execute(
-                "INSERT INTO users (id, display_name) VALUES ($1, $2) ON CONFLICT (id) DO NOTHING",
-                uid, display_name
-            )
-            profile_row = await conn.fetchrow("SELECT * FROM users WHERE id = $1", uid)
-        
-        profile = _parse_row(profile_row)
-        active_questions = _active_questions_for_profile(profile)
-        answered_keys = _answered_question_keys_from_profile(profile)
+    db = app.state.db
 
-        # Fetch custom skills
-        skills_rows = await conn.fetch(
-            "SELECT name, content FROM user_skills WHERE user_id = $1 AND enabled = TRUE",
-            uid
-        )
-        skills = [dict(r) for r in skills_rows]
+    profile = await get_user_doc(db, uid)
+    if not profile:
+        display_name = "User"
+        try:
+            user_record = auth.get_user(uid)
+            if user_record.display_name:
+                display_name = user_record.display_name
+        except Exception:
+            pass
+        profile = await ensure_user_doc(db, uid, display_name=display_name)
 
-        # Seed questions if empty
-        questions_exist = await conn.fetchval(
-            "SELECT EXISTS(SELECT 1 FROM user_questions WHERE user_id = $1)",
-            uid
-        )
-        if not questions_exist:
-            to_insert = []
-            for q in active_questions:
-                qid = q.get("id")
-                qtext = q.get("question_text", "")
-                category = _question_category(q)
-                answered = qid in answered_keys
-                
-                to_insert.append((
-                    uid, qid, qid, qtext, category, 99, answered,
-                    datetime.now(timezone.utc).isoformat() if answered else None,
-                    False
-                ))
-            
-            if to_insert:
-                await conn.executemany("""
-                    INSERT INTO user_questions (
-                        user_id, question_id, key, text, category, sort_order, answered, answered_at, is_followup
-                    ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-                    ON CONFLICT DO NOTHING
-                """, to_insert)
-
-        # Fetch pending questions (unanswered)
-        questions_rows = await conn.fetch("""
-            SELECT key, text, category, sort_order as "order", is_followup
-            FROM user_questions
-            WHERE user_id = $1 AND answered = FALSE
-            ORDER BY 
-              CASE category 
-                WHEN 'required' THEN 0 
-                WHEN 'deeper' THEN 1 
-                WHEN 'matching_prefs' THEN 2 
-                ELSE 3 
-              END, 
-              sort_order
-        """, uid)
-        pending_questions = [dict(r) for r in questions_rows]
+    active_questions = _active_questions_for_profile(profile)
+    answered_keys = _answered_question_keys_from_profile(profile)
+    skills = await get_enabled_skills(db, uid)
+    await seed_user_questions_if_empty(db, uid, active_questions, answered_keys)
+    pending_questions = await get_pending_user_questions(db, uid)
 
     system_prompt = _build_system_prompt(profile, skills, pending_questions)
     voice_pref = (profile.get("voice_preference") or "").strip()
@@ -1007,7 +1632,7 @@ class PostTurnRequest(BaseModel):
 
 
 async def _process_post_turn_from_messages(
-    conn,
+    db,
     *,
     uid: str,
     session_id: str,
@@ -1020,30 +1645,19 @@ async def _process_post_turn_from_messages(
         f"{m['role'].upper()}: {m['text']}" for m in messages[-10:]
     )
 
-    profile_row = await conn.fetchrow("SELECT * FROM users WHERE id = $1", uid)
-    if not profile_row:
+    profile = await get_user_doc(db, uid)
+    if not profile:
         return {"updated": False}
-    profile = _parse_row(profile_row)
     active_questions = _active_questions_for_profile(profile)
     user_name = profile.get("display_name") or "User"
 
     user_lines = [m["text"] for m in messages[-10:] if m.get("role") == "user" and m.get("text", "").strip()]
-    raw_user_statements_str = profile.get("raw_user_statements") or "[]"
+    raw_user_statements = list(profile.get("raw_user_statements") or [])
     if user_lines:
-        try:
-            existing_statements = json.loads(profile.get("raw_user_statements") or "[]")
-        except Exception:
-            existing_statements = []
-        combined = existing_statements + user_lines
-        raw_user_statements_str = json.dumps(combined[-100:])
-        await conn.execute("UPDATE users SET raw_user_statements = $1 WHERE id = $2", raw_user_statements_str, uid)
+        raw_user_statements = (raw_user_statements + user_lines)[-100:]
+        await update_user_doc(db, uid, {"raw_user_statements": raw_user_statements})
 
-    questions_rows = await conn.fetch("""
-        SELECT key, text
-        FROM user_questions
-        WHERE user_id = $1 AND answered = FALSE AND is_followup = FALSE
-    """, uid)
-    pending_questions = [dict(r) for r in questions_rows]
+    pending_questions = await get_pending_user_questions(db, uid, include_followup=False)
 
     field_catalog = "\n".join(
         f"- {q.get('id')}: {q.get('question_text')}"
@@ -1142,47 +1756,30 @@ async def _process_post_turn_from_messages(
                 wiki_matching = (wiki_matching or "") + entry
 
     structured_wiki = _render_structured_wiki(existing_answers)
-
-    profile_update_args = [
-        wiki_about_me, wiki_context, wiki_preferences, wiki_matching,
-        json.dumps(existing_answers), json.dumps(public_map), json.dumps(private_map),
-        json.dumps(sensitive_map), json.dumps(visibility_map), structured_wiki,
-        extracted_summary or profile.get("profile_ai_observations") or "",
-        extracted_summary or profile.get("profile_public") or "",
-        raw_user_statements_str, uid
-    ]
-
-    await conn.execute("""
-        UPDATE users SET
-            wiki_about_me = $1,
-            wiki_context = $2,
-            wiki_preferences = $3,
-            wiki_matching = $4,
-            profile_answers = $5,
-            profile_answers_public = $6,
-            profile_answers_private = $7,
-            profile_answers_sensitive = $8,
-            profile_field_visibility = $9,
-            wiki_profile_structured = $10,
-            profile_ai_observations = $11,
-            profile_public = $12,
-            raw_user_statements = $13,
-            updated_at = NOW()
-        WHERE id = $14
-    """, *profile_update_args)
+    await update_user_doc(
+        db,
+        uid,
+        {
+            "wiki_about_me": wiki_about_me,
+            "wiki_context": wiki_context,
+            "wiki_preferences": wiki_preferences,
+            "wiki_matching": wiki_matching,
+            "profile_answers": existing_answers,
+            "profile_answers_public": public_map,
+            "profile_answers_private": private_map,
+            "profile_answers_sensitive": sensitive_map,
+            "profile_field_visibility": visibility_map,
+            "wiki_profile_structured": structured_wiki,
+            "profile_ai_observations": extracted_summary or profile.get("profile_ai_observations") or "",
+            "profile_public": extracted_summary or profile.get("profile_public") or "",
+            "raw_user_statements": raw_user_statements,
+            "explore_attrs": _build_explore_attrs(public_map),
+        },
+    )
 
     all_answered_keys = answered_keys | set(existing_answers.keys())
-    if all_answered_keys:
-        await conn.execute("""
-            UPDATE user_questions
-            SET answered = TRUE, answered_at = NOW()
-            WHERE user_id = $1 AND key = ANY($2) AND answered = FALSE
-        """, uid, list(all_answered_keys))
-
-    await conn.execute("""
-        INSERT INTO user_memories (user_id, text, session_id)
-        VALUES ($1, $2, $3)
-    """, uid, conversation, session_id)
+    await mark_user_questions_answered_by_keys(db, uid, set(all_answered_keys))
+    await add_user_memory(db, uid, conversation, session_id)
 
     return {"updated": True}
 
@@ -1216,16 +1813,12 @@ def _render_structured_wiki(profile_answers: dict) -> str:
 @app.post("/post-turn")
 @limiter.limit(RATE_POST_TURN)
 async def post_turn(request: Request, body: PostTurnRequest, uid: str = Depends(verify_token)):
-    pool = app.state.pool
-    async with pool.acquire() as conn:
-        result = await _process_post_turn_from_messages(
-            conn,
-            uid=uid,
-            session_id=body.session_id,
-            messages=body.messages,
-        )
-
-    asyncio.create_task(_refresh_wiki_embedding(uid, app.state.pool))
+    result = await _process_post_turn_from_messages(
+        app.state.db,
+        uid=uid,
+        session_id=body.session_id,
+        messages=body.messages,
+    )
     return result
 
 # ── Health ────────────────────────────────────────────────────────────────────
@@ -1254,204 +1847,141 @@ async def admin_list_users(
     admin_ok: bool = Depends(verify_admin),
 ):
     del admin_ok
-    pool = app.state.pool
-    args: list[Any] = []
-    where: list[str] = []
-
-    def bind(value: Any) -> str:
-        args.append(value)
-        return f"${len(args)}"
-
-    if query:
-        token = bind(f"%{query.strip()}%")
-        where.append(
-            f"(u.id ILIKE {token} OR u.display_name ILIKE {token} OR u.profile_public ILIKE {token} OR u.location_region ILIKE {token})"
-        )
-    if gender:
-        where.append(f"u.gender = {bind(gender)}")
-    if community_profile:
-        where.append(f"u.community_profile = {bind(community_profile)}")
-    if intent_type:
-        where.append(f"COALESCE(u.matching_prefs->>'intent_type', '') = {bind(intent_type)}")
-    if onboarding_complete is not None:
-        where.append(f"u.onboarding_complete = {bind(onboarding_complete)}")
-    if matching_paused is not None:
-        where.append(f"u.matching_paused = {bind(matching_paused)}")
-    if min_age is not None:
-        where.append(f"u.age >= {bind(min_age)}")
-    if max_age is not None:
-        where.append(f"u.age <= {bind(max_age)}")
-    if has_photos is not None:
-        exists_clause = "EXISTS (SELECT 1 FROM user_media um WHERE um.user_id = u.id)"
-        where.append(exists_clause if has_photos else f"NOT {exists_clause}")
-    if has_matches is not None:
-        exists_clause = "EXISTS (SELECT 1 FROM matches mt WHERE mt.user_a = u.id OR mt.user_b = u.id)"
-        where.append(exists_clause if has_matches else f"NOT {exists_clause}")
-    if has_messages is not None:
-        exists_clause = "EXISTS (SELECT 1 FROM messages msg WHERE msg.from_user_id = u.id OR msg.to_user_id = u.id)"
-        where.append(exists_clause if has_messages else f"NOT {exists_clause}")
-
+    db = app.state.db
     safe_limit = max(1, min(limit, 500))
-    sql = f"""
-        SELECT
-            u.id,
-            u.display_name,
-            u.age,
-            u.gender,
-            u.location_region,
-            u.community_profile,
-            u.onboarding_complete,
-            u.matching_paused,
-            u.profile_public,
-            u.updated_at,
-            COALESCE(u.matching_prefs->>'intent_type', '') AS intent_type,
-            (SELECT COUNT(*) FROM user_media um WHERE um.user_id = u.id) AS photo_count,
-            (SELECT COUNT(*) FROM user_memories mem WHERE mem.user_id = u.id) AS memory_count,
-            (SELECT COUNT(*) FROM matches mt WHERE mt.user_a = u.id OR mt.user_b = u.id) AS match_count,
-            (SELECT COUNT(*) FROM messages msg WHERE msg.from_user_id = u.id OR msg.to_user_id = u.id) AS message_count,
-            (SELECT COUNT(*) FROM notifications n WHERE n.user_id = u.id AND n.read = FALSE) AS unread_notifications
-        FROM users u
-        {"WHERE " + " AND ".join(where) if where else ""}
-        ORDER BY u.updated_at DESC, u.created_at DESC
-        LIMIT {safe_limit}
-    """
+    users = []
+    async for snapshot in db.collection("users").stream():
+        doc = parse_user_doc(snapshot)
+        users.append(
+            {
+                "id": doc.get("id"),
+                "display_name": doc.get("display_name"),
+                "age": doc.get("age"),
+                "gender": doc.get("gender"),
+                "location_region": doc.get("location_region"),
+                "community_profile": doc.get("community_profile"),
+                "onboarding_complete": doc.get("onboarding_complete"),
+                "matching_paused": doc.get("matching_paused"),
+                "profile_public": doc.get("profile_public"),
+                "updated_at": doc.get("updated_at"),
+                "created_at": doc.get("created_at"),
+                "intent_type": _parse_json_field(doc.get("matching_prefs")).get("intent_type", ""),
+            }
+        )
 
-    async with pool.acquire() as conn:
-        rows = await conn.fetch(sql, *args)
-    return _serialize_records(rows)
+    photo_counts, memory_counts, unread_notification_counts, match_counts, message_counts = await asyncio.gather(
+        _all_user_subcollection_counts(db, "user_media"),
+        _all_user_subcollection_counts(db, "user_memories"),
+        _all_unread_notification_counts(db),
+        _all_match_counts(db),
+        _all_message_counts(db),
+    )
+
+    records = []
+    query_lower = (query or "").strip().lower()
+    for rec in users:
+        haystack = " ".join(
+            str(rec.get(field) or "")
+            for field in ("id", "display_name", "profile_public", "location_region")
+        ).lower()
+        rec["photo_count"] = photo_counts.get(rec["id"], 0)
+        rec["memory_count"] = memory_counts.get(rec["id"], 0)
+        rec["unread_notifications"] = unread_notification_counts.get(rec["id"], 0)
+        rec["match_count"] = match_counts.get(rec["id"], 0)
+        rec["message_count"] = message_counts.get(rec["id"], 0)
+
+        if query_lower and query_lower not in haystack:
+            continue
+        if gender and rec.get("gender") != gender:
+            continue
+        if community_profile and rec.get("community_profile") != community_profile:
+            continue
+        if intent_type and rec.get("intent_type") != intent_type:
+            continue
+        if onboarding_complete is not None and rec.get("onboarding_complete") != onboarding_complete:
+            continue
+        if matching_paused is not None and rec.get("matching_paused") != matching_paused:
+            continue
+        if min_age is not None and (rec.get("age") is None or rec["age"] < min_age):
+            continue
+        if max_age is not None and (rec.get("age") is None or rec["age"] > max_age):
+            continue
+        if has_photos is not None and (rec["photo_count"] > 0) != has_photos:
+            continue
+        if has_matches is not None and (rec["match_count"] > 0) != has_matches:
+            continue
+        if has_messages is not None and (rec["message_count"] > 0) != has_messages:
+            continue
+        records.append(rec)
+
+    records.sort(
+        key=lambda rec: (rec.get("updated_at") or "", rec.get("created_at") or "", rec.get("id") or ""),
+        reverse=True,
+    )
+    records = records[:safe_limit]
+    for rec in records:
+        rec.pop("created_at", None)
+    return records
 
 
 @app.get("/admin/users/{target_uid}")
 async def admin_get_user_detail(target_uid: str, admin_ok: bool = Depends(verify_admin)):
     del admin_ok
-    pool = app.state.pool
-    async with pool.acquire() as conn:
-        user_row = await conn.fetchrow("SELECT * FROM users WHERE id = $1", target_uid)
-        if not user_row:
-            raise HTTPException(status_code=404, detail="User not found")
+    db = app.state.db
+    user_doc = await get_user_doc(db, target_uid)
+    if not user_doc:
+        raise HTTPException(status_code=404, detail="User not found")
 
-        skills_rows = await conn.fetch(
-            "SELECT user_id, skill_id, name, content, enabled FROM user_skills WHERE user_id = $1 ORDER BY skill_id ASC",
-            target_uid,
-        )
-        questions_rows = await conn.fetch(
-            """
-            SELECT user_id, question_id, key, text, category, sort_order, answered, answered_at, is_followup
-            FROM user_questions
-            WHERE user_id = $1
-            ORDER BY answered ASC, is_followup ASC, sort_order ASC, question_id ASC
-            """,
-            target_uid,
-        )
-        memories_rows = await conn.fetch(
-            """
-            SELECT id, user_id, text, session_id, created_at
-            FROM user_memories
-            WHERE user_id = $1
-            ORDER BY created_at DESC, id DESC
-            """,
-            target_uid,
-        )
-        media_rows = await conn.fetch(
-            """
-            SELECT id, user_id, photo_url, caption, created_at
-            FROM user_media
-            WHERE user_id = $1
-            ORDER BY created_at DESC, id DESC
-            """,
-            target_uid,
-        )
-        notifications_rows = await conn.fetch(
-            """
-            SELECT id, user_id, type, title, body, meta, read, created_at
-            FROM notifications
-            WHERE user_id = $1
-            ORDER BY created_at DESC, id DESC
-            """,
-            target_uid,
-        )
-        messages_rows = await conn.fetch(
-            """
-            SELECT
-                m.id,
-                m.from_user_id,
-                m.to_user_id,
-                m.text,
-                m.read,
-                m.created_at,
-                CASE
-                    WHEN m.from_user_id = $1 THEN m.to_user_id
-                    ELSE m.from_user_id
-                END AS counterpart_user_id,
-                u.display_name AS counterpart_display_name
-            FROM messages m
-            LEFT JOIN users u
-                ON u.id = CASE WHEN m.from_user_id = $1 THEN m.to_user_id ELSE m.from_user_id END
-            WHERE m.from_user_id = $1 OR m.to_user_id = $1
-            ORDER BY m.created_at DESC, m.id DESC
-            """,
-            target_uid,
-        )
-        match_rows = await conn.fetch(
-            """
-            SELECT
-                m.*,
-                CASE WHEN m.user_a = $1 THEN m.user_b ELSE m.user_a END AS other_user_id,
-                u.display_name AS other_display_name
-            FROM matches m
-            LEFT JOIN users u
-                ON u.id = CASE WHEN m.user_a = $1 THEN m.user_b ELSE m.user_a END
-            WHERE m.user_a = $1 OR m.user_b = $1
-            ORDER BY m.updated_at DESC, m.created_at DESC, m.id DESC
-            """,
-            target_uid,
-        )
-
-        match_ids = [row["id"] for row in match_rows]
-        simulation_rows = []
-        if match_ids:
-            simulation_rows = await conn.fetch(
-                """
-                SELECT id, match_id, sender_uid, turn_index, message_text, created_at
-                FROM match_simulations
-                WHERE match_id = ANY($1::int[])
-                ORDER BY match_id ASC, turn_index ASC, created_at ASC
-                """,
-                match_ids,
-            )
-
-    simulations_by_match: dict[int, list[dict]] = {}
-    for row in simulation_rows:
-        data = {k: _serialize_value(v) for k, v in dict(row).items()}
-        simulations_by_match.setdefault(int(row["match_id"]), []).append(data)
+    skills_rows, questions_rows, memories_rows, media_rows, notifications_rows, match_docs, message_rows = await asyncio.gather(
+        get_enabled_skills(db, target_uid),
+        list_user_questions(db, target_uid),
+        list_user_memories(db, target_uid),
+        list_user_media(db, target_uid),
+        get_notifications_for_user(db, target_uid, limit=1000),
+        get_matches_for_user(db, target_uid),
+        get_all_messages_for_user(db, target_uid),
+    )
+    match_docs.sort(
+        key=lambda m: (m.get("updated_at") or "", m.get("created_at") or "", m.get("id") or ""),
+        reverse=True,
+    )
 
     serialized_matches = []
-    for row in match_rows:
-        record = {k: _serialize_value(v) for k, v in dict(row).items()}
-        record["simulation"] = simulations_by_match.get(int(row["id"]), [])
+    for m in match_docs:
+        other_id = m["user_b"] if m["user_a"] == target_uid else m["user_a"]
+        other = await get_user_doc(app.state.db, other_id)
+        record = dict(m)
+        record["other_user_id"] = other_id
+        record["other_display_name"] = other.get("display_name")
+        record["simulation"] = await get_match_simulations(app.state.db, m["id"])
         serialized_matches.append(record)
 
+    counterpart_cache: dict[str, dict] = {}
     dm_threads: dict[str, dict[str, Any]] = {}
-    for row in messages_rows:
-        message = {k: _serialize_value(v) for k, v in dict(row).items()}
-        counterpart_id = str(message["counterpart_user_id"])
+    for message in message_rows:
+        counterpart_id = message["to_user_id"] if message["from_user_id"] == target_uid else message["from_user_id"]
+        counterpart = counterpart_cache.get(counterpart_id)
+        if counterpart is None:
+            counterpart = await get_user_doc(app.state.db, counterpart_id)
+            counterpart_cache[counterpart_id] = counterpart
+
         thread = dm_threads.setdefault(counterpart_id, {
             "counterpart_user_id": counterpart_id,
-            "counterpart_display_name": message.get("counterpart_display_name") or "",
+            "counterpart_display_name": counterpart.get("display_name") or "",
             "messages": [],
         })
         thread["messages"].append(message)
 
     return {
-        "user": {k: _serialize_value(v) for k, v in dict(user_row).items()},
+        "user": user_doc,
         "stats": {
             "skills": len(skills_rows),
             "questions": len(questions_rows),
             "memories": len(memories_rows),
             "media": len(media_rows),
             "notifications": len(notifications_rows),
-            "messages": len(messages_rows),
-            "matches": len(match_rows),
+            "messages": len(message_rows),
+            "matches": len(match_docs),
         },
         "agent_data_notes": {
             "full_agent_chat_transcripts_available": False,
@@ -1462,7 +1992,7 @@ async def admin_get_user_detail(target_uid: str, admin_ok: bool = Depends(verify
         "memories": _serialize_records(memories_rows),
         "media": _serialize_records(media_rows),
         "notifications": _serialize_records(notifications_rows),
-        "messages": _serialize_records(messages_rows),
+        "messages": message_rows,
         "dm_threads": list(dm_threads.values()),
         "matches": serialized_matches,
     }
@@ -1486,11 +2016,8 @@ async def wiki_correct(body: WikiCorrectBody, uid: str = Depends(verify_token)):
         raise HTTPException(status_code=400, detail=f"Invalid section. Must be one of: {', '.join(_WIKI_SECTION_COLUMNS)}")
 
     column = _WIKI_SECTION_COLUMNS[body.section]
-    pool = app.state.pool
-
-    async with pool.acquire() as conn:
-        row = await conn.fetchrow(f"SELECT {column} FROM users WHERE id = $1", uid)
-        current_content = (row[column] if row and row[column] else "") if row else ""
+    profile = await get_user_doc(app.state.db, uid)
+    current_content = profile.get(column) or ""
 
     prompt = (
         f"You maintain this user's private profile wiki section. "
@@ -1512,13 +2039,7 @@ async def wiki_correct(body: WikiCorrectBody, uid: str = Depends(verify_token)):
 
     updated_wiki = payload.get("updated_wiki", current_content)
 
-    async with pool.acquire() as conn:
-        await conn.execute(
-            f"UPDATE users SET {column} = $1 WHERE id = $2",
-            updated_wiki, uid,
-        )
-
-    asyncio.create_task(_refresh_wiki_embedding(uid, app.state.pool))
+    await update_user_doc(app.state.db, uid, {column: updated_wiki})
 
     return {"section": body.section, "content": updated_wiki}
 
@@ -1536,6 +2057,7 @@ class ProfileUpdateBody(BaseModel):
     photo_order: list | None = None
     voice_settings: dict | None = None
     profile_public: str | None = None
+    profile_private: str | None = None
     profile_public_locked: bool | None = None
     profile_public_user_edited: bool | None = None
     profile_public_pending: str | None = None
@@ -1546,130 +2068,100 @@ class ProfileUpdateBody(BaseModel):
 
 @app.get("/profile")
 async def get_profile(uid: str = Depends(verify_token)):
-    pool = app.state.pool
-    async with pool.acquire() as conn:
-        row = await conn.fetchrow("SELECT * FROM users WHERE id = $1", uid)
-        if not row:
-            display_name = "User"
-            try:
-                user_record = auth.get_user(uid)
-                if user_record.display_name:
-                    display_name = user_record.display_name
-            except Exception:
-                pass
-            await conn.execute("INSERT INTO users (id, display_name) VALUES ($1, $2) ON CONFLICT DO NOTHING", uid, display_name)
-            row = await conn.fetchrow("SELECT * FROM users WHERE id = $1", uid)
-        return _parse_row(row)
+    db = app.state.db
+    row = await get_user_doc(db, uid)
+    if not row:
+        display_name = "User"
+        try:
+            user_record = auth.get_user(uid)
+            if user_record.display_name:
+                display_name = user_record.display_name
+        except Exception:
+            pass
+        row = await ensure_user_doc(db, uid, display_name)
+    return row
 
 @app.post("/profile")
 async def update_profile(body: ProfileUpdateBody, uid: str = Depends(verify_token)):
-    pool = app.state.pool
+    db = app.state.db
     fields = body.model_dump(exclude_unset=True)
     if not fields:
         return {"success": True}
 
-    set_clauses = []
-    args = []
-    idx = 1
-    for k, v in fields.items():
-        # Handle maps/lists to JSON strings
-        if k in ("photo_order", "voice_settings", "matching_prefs", "location_coords"):
-            v = json.dumps(v)
-        set_clauses.append(f"{k} = ${idx}")
-        args.append(v)
-        idx += 1
-    
-    args.append(uid)
-    query = f"UPDATE users SET {', '.join(set_clauses)}, updated_at = NOW() WHERE id = ${idx}"
-    
-    async with pool.acquire() as conn:
-        existing = await conn.fetchval("SELECT 1 FROM users WHERE id = $1", uid)
-        if not existing:
-            display_name = fields.get("display_name") or "User"
-            try:
-                user_record = auth.get_user(uid)
-                if user_record.display_name and "display_name" not in fields:
-                    display_name = user_record.display_name
-            except Exception:
-                pass
-            await conn.execute(
-                "INSERT INTO users (id, display_name) VALUES ($1, $2) ON CONFLICT DO NOTHING",
-                uid,
-                display_name,
-            )
-        await conn.execute(query, *args)
+    existing = await get_user_doc(db, uid)
+    if not existing:
+        display_name = fields.get("display_name") or "User"
+        try:
+            user_record = auth.get_user(uid)
+            if user_record.display_name and "display_name" not in fields:
+                display_name = user_record.display_name
+        except Exception:
+            pass
+        await ensure_user_doc(db, uid, display_name)
+
+    await update_user_doc(db, uid, fields)
     return {"success": True}
 
 @app.get("/profile/{userId}/public")
 async def get_public_profile(userId: str, uid: str = Depends(verify_token)):
-    pool = app.state.pool
-    async with pool.acquire() as conn:
-        row = await conn.fetchrow("SELECT id, display_name, age, gender, location_region, profile_public, photo_order FROM users WHERE id = $1", userId)
-        if not row:
-            raise HTTPException(status_code=404, detail="Public profile not found")
-        data = dict(row)
-        
-        # Get photos from user_media
-        media_rows = await conn.fetch(f"SELECT photo_url FROM user_media WHERE user_id = $1 ORDER BY created_at DESC LIMIT {MATCHES_MEDIA_LIMIT}", userId)
-        photos = [r["photo_url"] for r in media_rows]
+    doc = await get_user_doc(app.state.db, userId)
+    if not doc:
+        raise HTTPException(status_code=404, detail="Public profile not found")
+
+    data = {
+        "id": doc.get("id"),
+        "display_name": doc.get("display_name"),
+        "age": doc.get("age"),
+        "gender": doc.get("gender"),
+        "location_region": doc.get("location_region"),
+        "profile_public": doc.get("profile_public"),
+        "photo_order": doc.get("photo_order"),
+    }
+
+    media_rows = await list_user_media(app.state.db, userId, limit=MATCHES_MEDIA_LIMIT)
+    photos = [row["photo_url"] for row in media_rows if row.get("photo_url")]
+    data["photos"] = photos
+
+    photo_order = data.get("photo_order") or []
+    if photo_order:
+        if not photos:
+            photos = [u for u in photo_order if isinstance(u, str) and u.strip()]
+        else:
+            rank = {url: i for i, url in enumerate(photo_order)}
+            photos.sort(key=lambda u: rank.get(u, 999999))
         data["photos"] = photos
-        
-        # Order photos according to saved photo_order
-        photo_order = []
-        if data.get("photo_order"):
-            try:
-                photo_order = json.loads(data["photo_order"]) if isinstance(data["photo_order"], str) else data["photo_order"]
-            except Exception:
-                pass
-        
-        if photo_order:
-            if not photos:
-                photos = [u for u in photo_order if isinstance(u, str) and u.strip()]
-            else:
-                rank = {url: i for i, url in enumerate(photo_order)}
-                photos.sort(key=lambda u: rank.get(u, 999999))
-            data["photos"] = photos
-            
-        data.pop("photo_order", None)
-        return data
+
+    data.pop("photo_order", None)
+    return data
 
 @app.get("/insights")
 async def get_insights(uid: str = Depends(verify_token)):
-    pool = app.state.pool
-    async with pool.acquire() as conn:
-        row = await conn.fetchrow(
-            "SELECT wiki_about_me, wiki_preferences, wiki_context, wiki_matching, profile_public, updated_at FROM users WHERE id = $1", uid
-        )
-        if not row:
-            return {}
-        profile = dict(row)
+    profile = await get_user_doc(app.state.db, uid)
+    if not profile:
+        return {}
 
-        media_rows = await conn.fetch(f"SELECT photo_url, caption, created_at FROM user_media WHERE user_id = $1 ORDER BY created_at DESC LIMIT {INSIGHTS_MEDIA_LIMIT}", uid)
+    media_rows = await list_user_media(app.state.db, uid, limit=INSIGHTS_MEDIA_LIMIT)
+    media_lines = []
+    for mr in media_rows:
+        date_str = str(mr.get("created_at") or "")[:10]
+        line = f"- [{date_str}]({mr['photo_url']})"
+        if mr.get("caption"):
+            line += f"\n  {mr['caption']}"
+        media_lines.append(line)
 
-        media_lines = []
-        for mr in media_rows:
-            try:
-                date_str = mr["created_at"].strftime("%Y-%m-%d")
-            except Exception:
-                date_str = str(mr["created_at"])[:10]
-            line = f"- [{date_str}]({mr['photo_url']})"
-            if mr["caption"]:
-                line += f"\n  {mr['caption']}"
-            media_lines.append(line)
-
-        updated_at = str(profile.get("updated_at") or "")
-        return {
-            "about_me": profile.get("wiki_about_me") or "",
-            "about_me_updated_at": updated_at,
-            "preferences": profile.get("wiki_preferences") or "",
-            "preferences_updated_at": updated_at,
-            "context": profile.get("wiki_context") or "",
-            "context_updated_at": updated_at,
-            "matching": profile.get("wiki_matching") or "",
-            "matching_updated_at": updated_at,
-            "media": "\n".join(media_lines),
-            "public_profile": profile.get("profile_public") or ""
-        }
+    updated_at = str(profile.get("updated_at") or "")
+    return {
+        "about_me": profile.get("wiki_about_me") or "",
+        "about_me_updated_at": updated_at,
+        "preferences": profile.get("wiki_preferences") or "",
+        "preferences_updated_at": updated_at,
+        "context": profile.get("wiki_context") or "",
+        "context_updated_at": updated_at,
+        "matching": profile.get("wiki_matching") or "",
+        "matching_updated_at": updated_at,
+        "media": "\n".join(media_lines),
+        "public_profile": profile.get("profile_public") or ""
+    }
 
 # ── Matches Endpoints ──────────────────────────────────────────────────────────
 
@@ -1678,65 +2170,84 @@ class MatchStatusBody(BaseModel):
 
 @app.get("/matches")
 async def get_matches(uid: str = Depends(verify_token)):
-    pool = app.state.pool
-    async with pool.acquire() as conn:
-        # Load all matches joined with candidate info
-        rows = await conn.fetch("""
-            SELECT m.id, m.user_a, m.user_b, m.score, m.rationale, m.summary_a, m.summary_b, m.status, m.show_simulation_transcript,
-                   u.id as other_id, u.display_name as other_display_name, u.age as other_age, u.gender as other_gender, u.location_region as other_location_region, u.profile_public as other_profile_public
-            FROM matches m
-            JOIN users u ON (m.user_a = u.id OR m.user_b = u.id)
-            WHERE (m.user_a = $1 OR m.user_b = $1) AND u.id != $1
-            ORDER BY m.updated_at DESC
-        """, uid)
-        
-        matches = []
-        for r in rows:
-            m = dict(r)
-            # Retrieve photo urls for user
-            media_rows = await conn.fetch("SELECT photo_url FROM user_media WHERE user_id = $1 ORDER BY created_at DESC LIMIT 1", m["other_id"])
-            m["other_photo_url"] = media_rows[0]["photo_url"] if media_rows else ""
-            matches.append(m)
-        return matches
+    db = app.state.db
 
-@app.post("/matches/{match_id}/status")
-async def update_match_status(match_id: int, body: MatchStatusBody, uid: str = Depends(verify_token)):
-    pool = app.state.pool
-    async with pool.acquire() as conn:
-        await conn.execute("UPDATE matches SET status = $1, updated_at = NOW() WHERE id = $2 AND (user_a = $3 OR user_b = $3)", body.status, match_id, uid)
+    match_docs = await get_matches_for_user(db, uid)
+    match_docs.sort(key=lambda m: m.get("updated_at") or "", reverse=True)
+
+    other_ids = []
+    seen_other_ids: set[str] = set()
+    for match in match_docs:
+        other_id = match["user_b"] if match["user_a"] == uid else match["user_a"]
+        if other_id not in seen_other_ids:
+            seen_other_ids.add(other_id)
+            other_ids.append(other_id)
+
+    other_docs_list = await asyncio.gather(*[get_user_doc(db, other_id) for other_id in other_ids])
+    other_docs = {other_id: doc for other_id, doc in zip(other_ids, other_docs_list)}
+
+    matches = []
+    for match in match_docs:
+        other_id = match["user_b"] if match["user_a"] == uid else match["user_a"]
+        other = other_docs.get(other_id, {})
+        media_rows = await list_user_media(db, other_id, limit=1)
+
+        matches.append({
+            "id": match["id"],
+            "user_a": match.get("user_a"),
+            "user_b": match.get("user_b"),
+            "score": match.get("score"),
+            "created_at": match.get("created_at"),
+            "rationale": match.get("rationale"),
+            "summary_a": match.get("summary_a"),
+            "summary_b": match.get("summary_b"),
+            "status": match.get("status"),
+            "show_simulation_transcript": match.get("show_simulation_transcript"),
+            "synergy_score": match.get("synergy_score"),
+            "synergy_summary": match.get("synergy_summary"),
+            "other_id": other_id,
+            "other_display_name": other.get("display_name"),
+            "other_age": other.get("age"),
+            "other_gender": other.get("gender"),
+            "other_location_region": other.get("location_region"),
+            "other_profile_public": other.get("profile_public"),
+            "other_photo_url": media_rows[0]["photo_url"] if media_rows else "",
+        })
+
+    return matches
+
+@app.post("/matches/{pair_id}/status")
+async def update_match_status(pair_id: str, body: MatchStatusBody, uid: str = Depends(verify_token)):
+    db = app.state.db
+    match = await get_match_doc(db, pair_id)
+    if not match:
+        raise HTTPException(status_code=404, detail="Match not found")
+    if uid not in (match.get("user_a"), match.get("user_b")):
+        raise HTTPException(status_code=403, detail="Not your match")
+
+    await _match_doc_ref(db, pair_id).set(
+        {
+            "status": body.status,
+            "updated_at": firestore.SERVER_TIMESTAMP,
+        },
+        merge=True,
+    )
     return {"success": True}
 
 # ── Notifications Endpoints ───────────────────────────────────────────────────
 
 @app.get("/notifications")
 async def get_notifications(uid: str = Depends(verify_token)):
-    pool = app.state.pool
-    async with pool.acquire() as conn:
-        rows = await conn.fetch(f"SELECT id, user_id, type, title, body, meta, read, created_at FROM notifications WHERE user_id = $1 ORDER BY created_at DESC LIMIT {NOTIFICATIONS_LIMIT}", uid)
-        notifs = []
-        for r in rows:
-            n = dict(r)
-            try:
-                n["meta"] = json.loads(n["meta"]) if isinstance(n["meta"], str) else n["meta"]
-            except Exception:
-                n["meta"] = {}
-            n["id"] = str(n["id"]) # stringify ID for Flutter model parsing
-            n["created_at"] = n["created_at"].isoformat()
-            notifs.append(n)
-        return notifs
+    return await get_notifications_for_user(app.state.db, uid, limit=NOTIFICATIONS_LIMIT)
 
 @app.post("/notifications/{notif_id}/read")
-async def mark_notification_read(notif_id: int, uid: str = Depends(verify_token)):
-    pool = app.state.pool
-    async with pool.acquire() as conn:
-        await conn.execute("UPDATE notifications SET read = TRUE WHERE id = $1 AND user_id = $2", notif_id, uid)
+async def mark_notification_read(notif_id: str, uid: str = Depends(verify_token)):
+    await mark_notification_read_doc(app.state.db, uid, notif_id)
     return {"success": True}
 
 @app.post("/notifications/read-all")
 async def mark_all_notifications_read(uid: str = Depends(verify_token)):
-    pool = app.state.pool
-    async with pool.acquire() as conn:
-        await conn.execute("UPDATE notifications SET read = TRUE WHERE user_id = $1 AND read = FALSE", uid)
+    await mark_all_notifications_read_docs(app.state.db, uid)
     return {"success": True}
 
 # ── Profile Answers & Questions Checklist ──────────────────────────────────────
@@ -1750,148 +2261,421 @@ class FollowupQuestionBody(BaseModel):
 
 @app.get("/profile/answers")
 async def get_profile_answers(uid: str = Depends(verify_token)):
-    pool = app.state.pool
-    async with pool.acquire() as conn:
-        val = await conn.fetchval("SELECT profile_answers FROM users WHERE id = $1", uid)
-        if not val: return {}
-        return json.loads(val) if isinstance(val, str) else val
+    doc = await get_user_doc(app.state.db, uid)
+    return doc.get("profile_answers") or {}
 
 @app.post("/profile/answers")
 async def save_profile_answer(body: ProfileAnswerBody, uid: str = Depends(verify_token)):
-    pool = app.state.pool
-    async with pool.acquire() as conn:
-        row = await conn.fetchrow("SELECT profile_answers, profile_answers_public, profile_answers_private, profile_answers_sensitive, profile_field_visibility FROM users WHERE id = $1", uid)
-        if not row:
-            raise HTTPException(status_code=404, detail="User not found")
-        
-        def parse_jsonb(v):
-            if not v: return {}
-            return json.loads(v) if isinstance(v, str) else v
+    doc = await get_user_doc(app.state.db, uid)
+    if not doc:
+        raise HTTPException(status_code=404, detail="User not found")
 
-        profile_answers = parse_jsonb(row["profile_answers"])
-        public_map = parse_jsonb(row["profile_answers_public"])
-        private_map = parse_jsonb(row["profile_answers_private"])
-        sensitive_map = parse_jsonb(row["profile_answers_sensitive"])
-        visibility_map = parse_jsonb(row["profile_field_visibility"])
+    profile_answers = dict(doc.get("profile_answers") or {})
+    public_map = dict(doc.get("profile_answers_public") or {})
+    private_map = dict(doc.get("profile_answers_private") or {})
+    sensitive_map = dict(doc.get("profile_answers_sensitive") or {})
+    visibility_map = dict(doc.get("profile_field_visibility") or {})
 
-        field_id = body.field_id
-        value = body.value
-        meta = PROFILE_FIELD_META.get(field_id, {})
-        sensitive = bool(meta.get("sensitive_flag"))
+    field_id = body.field_id
+    value = body.value
+    meta = PROFILE_FIELD_META.get(field_id, {})
+    sensitive = bool(meta.get("sensitive_flag"))
 
-        profile_answers[field_id] = value
-        if sensitive:
-            sensitive_map[field_id] = value
-            # default visibility for sensitive is private
-            visibility_map[field_id] = "private"
-            private_map[field_id] = value
-            public_map.pop(field_id, None)
-        else:
-            visibility_map[field_id] = "public"
-            public_map[field_id] = value
-            private_map.pop(field_id, None)
+    profile_answers[field_id] = value
+    if sensitive:
+        sensitive_map[field_id] = value
+        # default visibility for sensitive is private
+        visibility_map[field_id] = "private"
+        private_map[field_id] = value
+        public_map.pop(field_id, None)
+    else:
+        visibility_map[field_id] = "public"
+        public_map[field_id] = value
+        private_map.pop(field_id, None)
 
-        structured_wiki = _render_structured_wiki(profile_answers)
+    structured_wiki = _render_structured_wiki(profile_answers)
 
-        await conn.execute("""
-            UPDATE users SET
-                profile_answers = $1,
-                profile_answers_public = $2,
-                profile_answers_private = $3,
-                profile_answers_sensitive = $4,
-                profile_field_visibility = $5,
-                wiki_profile_structured = $6,
-                updated_at = NOW()
-            WHERE id = $7
-        """, json.dumps(profile_answers), json.dumps(public_map), json.dumps(private_map), 
-        json.dumps(sensitive_map), json.dumps(visibility_map), structured_wiki, uid)
+    await update_user_doc(
+        app.state.db,
+        uid,
+        {
+            "profile_answers": profile_answers,
+            "profile_answers_public": public_map,
+            "profile_answers_private": private_map,
+            "profile_answers_sensitive": sensitive_map,
+            "profile_field_visibility": visibility_map,
+            "wiki_profile_structured": structured_wiki,
+            "explore_attrs": _build_explore_attrs(public_map),
+        },
+    )
 
-        # Mark corresponding checklist item as answered
-        await conn.execute("""
-            UPDATE user_questions
-            SET answered = TRUE, answered_at = NOW()
-            WHERE user_id = $1 AND key = $2
-        """, uid, field_id)
+    await mark_user_questions_answered_by_keys(app.state.db, uid, {field_id})
 
     return {"success": True}
 
 @app.get("/questions/pending")
 async def get_pending_questions(uid: str = Depends(verify_token)):
-    pool = app.state.pool
-    async with pool.acquire() as conn:
-        rows = await conn.fetch("""
-            SELECT question_id, key, text, category, sort_order as "order", is_followup 
-            FROM user_questions 
-            WHERE user_id = $1 AND answered = FALSE
-            ORDER BY sort_order ASC
-        """, uid)
-        return [dict(r) for r in rows]
+    return await get_pending_user_questions(app.state.db, uid)
 
 @app.post("/questions/followup")
 async def add_followup_question(body: FollowupQuestionBody, uid: str = Depends(verify_token)):
-    pool = app.state.pool
     qid = f"followup_{int(datetime.now().timestamp())}"
-    async with pool.acquire() as conn:
-        await conn.execute("""
-            INSERT INTO user_questions (user_id, question_id, key, text, category, is_followup, sort_order)
-            VALUES ($1, $2, $3, $4, 'followup', TRUE, 1)
-        """, uid, qid, qid, body.question)
+    await add_followup_question_doc(app.state.db, uid, qid, body.question)
     return {"success": True}
 
 @app.post("/questions/{qid}/answered")
 async def mark_question_answered(qid: str, uid: str = Depends(verify_token)):
-    pool = app.state.pool
-    async with pool.acquire() as conn:
-        await conn.execute("UPDATE user_questions SET answered = TRUE, answered_at = NOW() WHERE user_id = $1 AND question_id = $2", uid, qid)
+    await mark_question_answered_doc(app.state.db, uid, qid)
     return {"success": True}
 
 # ── Explore ───────────────────────────────────────────────────────────────────
 
+EXPLORE_FILTER_FIELD_IDS = (
+    "religion",
+    "race",
+    "height_cm",
+    "education_level",
+    "occupation",
+    "skin_tone",
+    "diet",
+    "tribe_ethnicity",
+    "religious_sect",
+    "location_city",
+    "marital_status",
+    "relationship_intent",
+    "religious_practice_level",
+    "caste",
+    "mother_tongue",
+    "language_spoken",
+)
+
+EXPLORE_PREFETCH_LIMIT = max(EXPLORE_LIMIT * 4, 200)
+
+_EXPLORE_QUERY_PROMPT = """Parse this people-search query for a matchmaking app into structured filters.
+
+Allowed filter field IDs (only include when explicitly mentioned or strongly implied):
+{field_catalog}
+
+Return JSON only:
+{{
+  "filters": {{ "field_id": "value" or ["value1", "value2"] or {{"min": number, "max": number}} }},
+  "text_terms": ["remaining tokens to match against name, bio, or location"]
+}}
+
+Rules:
+- Normalize religion, race, diet, and occupation to simple lowercase strings.
+- For height, prefer cm as {{"min": N, "max": M}} when a range is implied.
+- If the query is only a name or interest phrase, leave filters empty and use text_terms.
+- Never invent filters that are not supported by the query.
+"""
+
+
+def _normalize_explore_value(value) -> str | list[str]:
+    if isinstance(value, list):
+        return [str(v).strip().lower() for v in value if str(v).strip()]
+    return str(value).strip().lower()
+
+
+def _build_explore_attrs(public_map: dict) -> dict:
+    attrs: dict = {}
+    for field_id in EXPLORE_FILTER_FIELD_IDS:
+        raw = public_map.get(field_id)
+        if raw in (None, "", [], {}):
+            continue
+        attrs[field_id] = _normalize_explore_value(raw)
+    return attrs
+
+
+def _candidate_explore_attrs(doc: dict) -> dict:
+    attrs = dict(doc.get("explore_attrs") or {})
+    if attrs:
+        return attrs
+    return _build_explore_attrs(_parse_json_field(doc.get("profile_answers_public")))
+
+
+def _explore_text_blob(doc: dict) -> str:
+    parts = [
+        doc.get("display_name") or "",
+        doc.get("profile_public") or "",
+        doc.get("location_region") or "",
+    ]
+    for value in _candidate_explore_attrs(doc).values():
+        if isinstance(value, list):
+            parts.extend(str(v) for v in value)
+        else:
+            parts.append(str(value))
+    return " ".join(p.strip() for p in parts if p and str(p).strip()).lower()
+
+
+def _attr_value_matches(candidate_value, filter_value) -> bool:
+    if filter_value in (None, "", [], {}):
+        return True
+
+    if isinstance(filter_value, dict) and ("min" in filter_value or "max" in filter_value):
+        try:
+            candidate_num = float(candidate_value)
+        except (TypeError, ValueError):
+            return False
+        min_val = filter_value.get("min")
+        max_val = filter_value.get("max")
+        if min_val is not None and candidate_num < float(min_val):
+            return False
+        if max_val is not None and candidate_num > float(max_val):
+            return False
+        return True
+
+    candidate_norm = _normalize_explore_value(candidate_value)
+    filter_norm = _normalize_explore_value(filter_value)
+
+    if isinstance(candidate_norm, list):
+        if isinstance(filter_norm, list):
+            return any(f in candidate_norm or any(f in c for c in candidate_norm) for f in filter_norm)
+        return filter_norm in candidate_norm or any(filter_norm in c for c in candidate_norm)
+
+    if isinstance(filter_norm, list):
+        return any(f in candidate_norm or candidate_norm in f for f in filter_norm)
+
+    return (
+        filter_norm == candidate_norm
+        or filter_norm in candidate_norm
+        or candidate_norm in filter_norm
+    )
+
+
+def _matches_explore_filters(
+    doc: dict,
+    *,
+    parsed_filters: dict,
+    text_terms: list[str],
+) -> bool:
+    attrs = _candidate_explore_attrs(doc)
+    for field_id, filter_value in parsed_filters.items():
+        if field_id not in EXPLORE_FILTER_FIELD_IDS:
+            continue
+        if not _attr_value_matches(attrs.get(field_id), filter_value):
+            return False
+
+    if not text_terms:
+        return True
+
+    blob = _explore_text_blob(doc)
+    return all(term.strip().lower() in blob for term in text_terms if term.strip())
+
+
+def _coords_from_doc(doc: dict) -> tuple[float, float] | None:
+    coords = _parse_json_field(doc.get("location_coords"))
+    lat = coords.get("lat")
+    lng = coords.get("lng")
+    if lat is None or lng is None:
+        return None
+    try:
+        return float(lat), float(lng)
+    except (TypeError, ValueError):
+        return None
+
+
+def _haversine_km(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
+    r = 6371.0
+    phi1, phi2 = math.radians(lat1), math.radians(lat2)
+    dphi = math.radians(lat2 - lat1)
+    dlambda = math.radians(lon2 - lon1)
+    a = math.sin(dphi / 2) ** 2 + math.cos(phi1) * math.cos(phi2) * math.sin(dlambda / 2) ** 2
+    return 2 * r * math.asin(math.sqrt(a))
+
+
+def _within_radius_km(
+    viewer_coords: tuple[float, float] | None,
+    candidate_doc: dict,
+    radius_km: int | None,
+) -> bool:
+    if radius_km is None or radius_km <= 0 or viewer_coords is None:
+        return True
+    candidate_coords = _coords_from_doc(candidate_doc)
+    if candidate_coords is None:
+        return True
+    distance = _haversine_km(viewer_coords[0], viewer_coords[1], candidate_coords[0], candidate_coords[1])
+    return distance <= float(radius_km)
+
+
+def _explore_field_catalog() -> str:
+    lines = []
+    for field_id in EXPLORE_FILTER_FIELD_IDS:
+        meta = PROFILE_FIELD_META.get(field_id, {})
+        question = meta.get("question_text") or field_id
+        lines.append(f"- {field_id}: {question}")
+    return "\n".join(lines)
+
+
+async def _parse_explore_query(query: str) -> tuple[dict, list[str]]:
+    cleaned = (query or "").strip()
+    if not cleaned:
+        return {}, []
+
+    prompt = _EXPLORE_QUERY_PROMPT.format(field_catalog=_explore_field_catalog())
+    try:
+        raw = await _gemini_call(
+            TEXT_MODEL,
+            f"Search query: {cleaned}",
+            system_instruction=prompt,
+            generation_config={"response_mime_type": "application/json"},
+        )
+        payload = json.loads(raw)
+    except Exception as e:
+        logger.warning(f"[explore] query parse failed: {type(e).__name__}: {e}")
+        return {}, _fallback_explore_text_terms(cleaned)
+
+    filters = payload.get("filters") or {}
+    if not isinstance(filters, dict):
+        filters = {}
+
+    text_terms = payload.get("text_terms") or []
+    if not isinstance(text_terms, list):
+        text_terms = []
+    text_terms = [str(term).strip().lower() for term in text_terms if str(term).strip()]
+
+    if not filters and not text_terms:
+        text_terms = [cleaned.lower()]
+
+    return filters, text_terms
+
+
+def _fallback_explore_text_terms(query: str) -> list[str]:
+    stopwords = {
+        "a",
+        "an",
+        "and",
+        "are",
+        "by",
+        "for",
+        "in",
+        "likes",
+        "like",
+        "of",
+        "or",
+        "the",
+        "to",
+        "who",
+        "with",
+    }
+    terms = [
+        term
+        for term in re.findall(r"[a-z0-9]+", query.lower())
+        if len(term) > 2 and term not in stopwords
+    ]
+    return terms or [query.strip().lower()]
+
+
+def _pick_firestore_attr_filter(parsed_filters: dict) -> tuple[str, object] | None:
+    priority = (
+        "religion",
+        "race",
+        "education_level",
+        "occupation",
+        "location_city",
+        "diet",
+        "relationship_intent",
+    )
+    for field_id in priority:
+        value = parsed_filters.get(field_id)
+        if value in (None, "", [], {}):
+            continue
+        if isinstance(value, dict):
+            continue
+        if isinstance(value, list):
+            if not value:
+                continue
+            return field_id, value[0]
+        return field_id, value
+    return None
+
+
 @app.get("/explore")
-async def explore(gender: str | None = None, ageMin: int | None = None, ageMax: int | None = None, query: str | None = None, uid: str = Depends(verify_token)):
-    pool = app.state.pool
-    sql = "SELECT id, display_name, age, gender, location_region, profile_public, photo_order FROM users WHERE onboarding_complete = TRUE AND id != $1"
-    args = [uid]
-    idx = 2
-    
+async def explore(
+    gender: str | None = None,
+    ageMin: int | None = None,
+    ageMax: int | None = None,
+    radiusKm: int | None = None,
+    query: str | None = None,
+    uid: str = Depends(verify_token),
+):
+    db = app.state.db
+    if query and len(query) > 100:
+        raise HTTPException(status_code=400, detail="query too long")
+    gender = _normalize_gender_filter(gender)
+    viewer = await get_user_doc(db, uid)
+    viewer_coords = _coords_from_doc(viewer) if viewer else None
+
+    parsed_filters: dict = {}
+    text_terms: list[str] = []
+    if query and query.strip():
+        parsed_filters, text_terms = await _parse_explore_query(query)
+
+    q = db.collection("users").where(filter=FieldFilter("onboarding_complete", "==", True))
+
     if gender:
-        sql += f" AND gender = ${idx}"
-        args.append(gender)
-        idx += 1
+        q = q.where(filter=FieldFilter("gender", "==", gender))
     if ageMin is not None:
-        sql += f" AND age >= ${idx}"
-        args.append(ageMin)
-        idx += 1
+        q = q.where(filter=FieldFilter("age", ">=", ageMin))
     if ageMax is not None:
-        sql += f" AND age <= ${idx}"
-        args.append(ageMax)
-        idx += 1
-    if query:
-        sql += f" AND (display_name ILIKE ${idx} OR profile_public ILIKE ${idx})"
-        args.append(f"%{query}%")
-        idx += 1
-        
-    sql += f" LIMIT {EXPLORE_LIMIT}"
-    
-    async with pool.acquire() as conn:
-        rows = await conn.fetch(sql, *args)
-        people = []
-        for r in rows:
-            p = dict(r)
-            photo_order = []
-            if p.get("photo_order"):
-                try:
-                    photo_order = json.loads(p["photo_order"]) if isinstance(p["photo_order"], str) else p["photo_order"]
-                except Exception:
-                    photo_order = []
-            p["photo_order"] = [u for u in photo_order if isinstance(u, str) and u.strip()]
-            # Retrieve single photo for preview
-            media_rows = await conn.fetch("SELECT photo_url FROM user_media WHERE user_id = $1 ORDER BY created_at DESC LIMIT 1", p["id"])
-            p["photo_url"] = media_rows[0]["photo_url"] if media_rows else ""
-            if not p["photo_url"] and p["photo_order"]:
-                p["photo_url"] = p["photo_order"][0]
-            people.append(p)
-        return people
+        q = q.where(filter=FieldFilter("age", "<=", ageMax))
+
+    firestore_attr = _pick_firestore_attr_filter(parsed_filters)
+    if firestore_attr:
+        field_id, value = firestore_attr
+        q = q.where(filter=FieldFilter(f"explore_attrs.{field_id}", "==", _normalize_explore_value(value)))
+
+    needs_post_filter = bool(
+        (parsed_filters and (not firestore_attr or len(parsed_filters) > 1))
+        or text_terms
+        or (radiusKm is not None and radiusKm > 0 and viewer_coords is not None)
+    )
+    fetch_limit = EXPLORE_PREFETCH_LIMIT if needs_post_filter else EXPLORE_LIMIT
+    q = q.limit(fetch_limit)
+
+    people = []
+    async for snap in q.stream():
+        if snap.id == uid:
+            continue
+
+        doc = parse_user_doc(snap)
+        if not _within_radius_km(viewer_coords, doc, radiusKm):
+            continue
+        if not _matches_explore_filters(doc, parsed_filters=parsed_filters, text_terms=text_terms):
+            continue
+
+        p = {
+            "id": doc.get("id"),
+            "display_name": doc.get("display_name"),
+            "age": doc.get("age"),
+            "gender": doc.get("gender"),
+            "location_region": doc.get("location_region"),
+            "profile_public": doc.get("profile_public"),
+            "photo_order": doc.get("photo_order"),
+        }
+        photo_order = p.get("photo_order") or []
+        p["photo_order"] = [u for u in photo_order if isinstance(u, str) and u.strip()]
+        people.append(p)
+        if len(people) >= EXPLORE_LIMIT:
+            break
+
+    for p in people:
+        media_rows = await list_user_media(db, p["id"], limit=1)
+        p["photo_url"] = media_rows[0]["photo_url"] if media_rows else ""
+        if not p["photo_url"] and p["photo_order"]:
+            p["photo_url"] = p["photo_order"][0]
+
+    return people
+
+
+def _normalize_gender_filter(gender: str | None) -> str | None:
+    value = (gender or "").strip().lower()
+    if not value:
+        return None
+    if value in ("men", "male"):
+        return "man"
+    if value in ("women", "female"):
+        return "woman"
+    return value
 
 # ── User Media Endpoints ───────────────────────────────────────────────────────
 
@@ -1904,16 +2688,12 @@ class MediaDeleteBody(BaseModel):
 
 @app.post("/media")
 async def save_media_record(body: MediaBody, uid: str = Depends(verify_token)):
-    pool = app.state.pool
-    async with pool.acquire() as conn:
-        await conn.execute("INSERT INTO user_media (user_id, photo_url, caption) VALUES ($1, $2, $3)", uid, body.photo_url, body.caption)
+    await save_user_media(app.state.db, uid, body.photo_url, body.caption)
     return {"success": True}
 
 @app.delete("/media")
 async def delete_media_by_url(body: MediaDeleteBody, uid: str = Depends(verify_token)):
-    pool = app.state.pool
-    async with pool.acquire() as conn:
-        await conn.execute("DELETE FROM user_media WHERE user_id = $1 AND photo_url = $2", uid, body.photo_url)
+    await delete_user_media_by_url_doc(app.state.db, uid, body.photo_url)
     return {"success": True}
 
 class AnalyzePhotosBody(BaseModel):
@@ -1946,11 +2726,7 @@ async def analyze_photos(request: Request, body: AnalyzePhotosBody, uid: str = D
         safe, reason = await _is_photo_safe(url)
         if not safe:
             logger.warning(f"[moderation] unsafe photo for {uid}: {reason}")
-            pool = app.state.pool
-            async with pool.acquire() as conn:
-                await conn.execute(
-                    "UPDATE users SET matching_paused = TRUE WHERE id = $1", uid
-                )
+            await update_user_doc(app.state.db, uid, {"matching_paused": True})
             raise HTTPException(status_code=422, detail=f"Photo flagged: {reason}")
     try:
         photo_prompt = (
@@ -1988,16 +2764,15 @@ async def analyze_photos(request: Request, body: AnalyzePhotosBody, uid: str = D
                     continue
                 raise
         if description:
-            pool = app.state.pool
-            async with pool.acquire() as conn:
-                existing = await conn.fetchrow("SELECT wiki_about_me FROM users WHERE id = $1", uid)
-                current = (existing["wiki_about_me"] or "") if existing else ""
-                # Replace any prior appearance assessment block
-                lines = [l for l in current.split("\n")
-                         if not any(k in l.lower() for k in ("score:", "strengths:", "improve:", "best feature:", "impression:"))]
-                appearance_block = f"## Appearance Assessment\n{description}"
-                updated = (appearance_block + "\n\n" + "\n".join(lines)).strip()
-                await conn.execute("UPDATE users SET wiki_about_me = $1 WHERE id = $2", updated, uid)
+            profile = await get_user_doc(app.state.db, uid)
+            current = profile.get("wiki_about_me") or ""
+            lines = [
+                line for line in current.split("\n")
+                if not any(key in line.lower() for key in ("score:", "strengths:", "improve:", "best feature:", "impression:"))
+            ]
+            appearance_block = f"## Appearance Assessment\n{description}"
+            updated = (appearance_block + "\n\n" + "\n".join(lines)).strip()
+            await update_user_doc(app.state.db, uid, {"wiki_about_me": updated})
     except Exception as e:
         logger.warning(f"analyze-photos failed: {e}")
     return {"success": True}
@@ -2010,9 +2785,7 @@ class DeviceTokenBody(BaseModel):
 @app.post("/device-token")
 async def save_device_token(body: DeviceTokenBody, uid: str = Depends(verify_token)):
     """Save the device's FCM token so the backend can send push notifications."""
-    pool = app.state.pool
-    async with pool.acquire() as conn:
-        await conn.execute("UPDATE users SET fcm_token = $1 WHERE id = $2", body.token, uid)
+    await update_user_doc(app.state.db, uid, {"fcm_token": body.token})
     logger.info(f"FCM token registered for {uid}")
     return {"success": True}
 
@@ -2024,21 +2797,22 @@ class MessageBody(BaseModel):
 
 @app.post("/messages")
 async def send_direct_message(body: MessageBody, uid: str = Depends(verify_token)):
-    pool = app.state.pool
-    async with pool.acquire() as conn:
-        await conn.execute(
-            "INSERT INTO messages (from_user_id, to_user_id, text) VALUES ($1, $2, $3)",
-            uid, body.target_user_id, body.text,
-        )
-        me = await conn.fetchrow("SELECT display_name FROM users WHERE id = $1", uid)
-        my_name = (me["display_name"] if me and me["display_name"] else "Someone")
-        notif_body = f"{my_name} sent you a message."
-        meta = json.dumps({"from_user_id": uid})
-        await conn.execute("""
-            INSERT INTO notifications (user_id, type, title, body, meta, read)
-            VALUES ($1, 'agent_update', 'New message', $2, $3, FALSE)
-        """, body.target_user_id, notif_body, meta)
-        recipient_token = await _get_fcm_token(body.target_user_id, conn)
+    db = app.state.db
+    await send_message(db, uid, body.target_user_id, body.text)
+    me = await get_user_doc(db, uid)
+    my_name = me.get("display_name") or "Someone"
+    notif_body = f"{my_name} sent you a message."
+    await create_notification(
+        db,
+        body.target_user_id,
+        "agent_update",
+        "New message",
+        notif_body,
+        {"from_user_id": uid},
+    )
+
+    recipient = await get_user_doc(db, body.target_user_id)
+    recipient_token = recipient.get("fcm_token") or ""
 
     asyncio.create_task(_send_push(
         recipient_token, f"Message from {my_name}",
@@ -2048,23 +2822,9 @@ async def send_direct_message(body: MessageBody, uid: str = Depends(verify_token
 
 @app.get("/messages/{other_user_id}")
 async def get_messages(other_user_id: str, uid: str = Depends(verify_token)):
-    pool = app.state.pool
-    async with pool.acquire() as conn:
-        rows = await conn.fetch("""
-            SELECT id, from_user_id, to_user_id, text, read, created_at 
-            FROM messages
-            WHERE (from_user_id = $1 AND to_user_id = $2) OR (from_user_id = $2 AND to_user_id = $1)
-            ORDER BY created_at ASC
-            LIMIT {MESSAGES_LIMIT}
-        """, uid, other_user_id)
-        
-        msgs = []
-        for r in rows:
-            m = dict(r)
-            m["created_at"] = m["created_at"].isoformat()
-            m["id"] = str(m["id"])
-            msgs.append(m)
-        return msgs
+    db = app.state.db
+    msgs = await get_conversation_messages(db, uid, other_user_id)
+    return msgs
 
 # ── Text Chat Endpoint ─────────────────────────────────────────────────────────
 
@@ -2076,46 +2836,43 @@ class TextChatRequest(BaseModel):
 async def text_chat(request: Request, body: TextChatRequest, uid: str = Depends(verify_token)):
     """Text-mode chat with Ayma — uses same system prompt as voice bootstrap.
     Useful for testing conversation quality without Gemini Live WebSocket."""
-    pool = app.state.pool
-    async with pool.acquire() as conn:
-        profile_row = await conn.fetchrow("SELECT * FROM users WHERE id = $1", uid)
-        if not profile_row:
-            raise HTTPException(status_code=404, detail="User not found")
-        profile = _parse_row(profile_row)
-        active_questions = _active_questions_for_profile(profile)
-        answered_keys = _answered_question_keys_from_profile(profile)
-        skills_rows = await conn.fetch(
-            "SELECT name, content FROM user_skills WHERE user_id = $1 AND enabled = TRUE", uid
-        )
-        skills = [dict(r) for r in skills_rows]
-        questions_rows = await conn.fetch("""
-            SELECT key, text, category, sort_order as "order", is_followup
-            FROM user_questions
-            WHERE user_id = $1 AND answered = FALSE
-            ORDER BY CASE category WHEN 'required' THEN 0 WHEN 'deeper' THEN 1 WHEN 'matching_prefs' THEN 2 ELSE 3 END, sort_order
-        """, uid)
-        pending_questions = [dict(r) for r in questions_rows]
+    db = app.state.db
+    profile = await get_user_doc(db, uid)
+    if not profile:
+        raise HTTPException(status_code=404, detail="User not found")
+    active_questions = _active_questions_for_profile(profile)
+    answered_keys = _answered_question_keys_from_profile(profile)
+    skills = await get_enabled_skills(db, uid)
+    await seed_user_questions_if_empty(db, uid, active_questions, answered_keys)
+    pending_questions = await get_pending_user_questions(db, uid)
+
+    if not body.messages:
+        raise HTTPException(status_code=400, detail="No messages provided")
 
     system_prompt = _build_system_prompt(profile, skills, pending_questions)
+    contents = []
+    for m in body.messages:
+        text = (m.get("text") or "").strip()
+        if not text:
+            continue
+        role = "user" if m.get("role") == "user" else "model"
+        contents.append({"role": role, "parts": [{"text": text}]})
+    if not contents:
+        raise HTTPException(status_code=400, detail="No text messages provided")
 
-    history = []
-    for m in body.messages[:-1]:
-        role = "user" if m["role"] == "user" else "model"
-        history.append({"role": role, "parts": [{"text": m["text"]}]})
-
-    last_msg = body.messages[-1]
-
-    for attempt in range(len(_API_KEYS)):
-        try:
-            model = genai.GenerativeModel(TEXT_MODEL, system_instruction=system_prompt)
-            chat = model.start_chat(history=history)
-            resp = await chat.send_message_async(last_msg["text"])
-            return {"role": "model", "text": resp.text}
-        except Exception as e:
-            if _is_quota_error(e) and attempt < len(_API_KEYS) - 1:
-                _rotate_key()
-                continue
-            raise HTTPException(status_code=500, detail=str(e))
+    try:
+        text = await _gemini_call(
+            TEXT_MODEL,
+            contents,
+            system_instruction=system_prompt,
+        )
+        return {"role": "model", "text": text or ""}
+    except Exception as e:
+        if _is_quota_error(e):
+            logger.warning(f"[/chat/text] Gemini quota exhausted: {type(e).__name__}: {e}")
+            raise HTTPException(status_code=429, detail="Quota exhausted")
+        logger.exception("[/chat/text] Gemini generation failed")
+        raise HTTPException(status_code=500, detail=str(e))
 
 # ── Matching & Simulation Engine Helpers ──────────────────────────────────────────
 
@@ -2220,19 +2977,6 @@ Their simulated first-date conversation:
 Consider: natural rapport, shared interests, complementary values, conversational energy, emotional connection.
 
 Return JSON only: {{"synergyScore": <integer 0-100>, "synergySummary": "<one concise sentence describing their chemistry>"}}"""
-
-async def _generate_embedding(text: str) -> list[float] | None:
-    if not text.strip():
-        return None
-    for attempt in range(len(_API_KEYS)):
-        try:
-            return await asyncio.to_thread(_embed_text_with_gemini_v2, text)
-        except Exception as e:
-            if _is_quota_error(e) and attempt < len(_API_KEYS) - 1:
-                _rotate_key()
-                continue
-            logger.warning(f"[embedding] generation failed: {e}")
-            return None
 
 
 def _embed_text_with_gemini_v2(text: str) -> list[float] | None:
@@ -2353,13 +3097,10 @@ async def _score_pair(
     except Exception:
         return None
 
-async def _run_vibe_check(match_id: int, uid_a: str, uid_b: str, conn, _model_unused) -> dict:
+async def _run_vibe_check(db, pid: str, uid_a: str, uid_b: str) -> dict:
     """Simulate a 5-turn first-date conversation and return synergy score + summary."""
-    profile_a_row = await conn.fetchrow("SELECT * FROM users WHERE id = $1", uid_a)
-    profile_b_row = await conn.fetchrow("SELECT * FROM users WHERE id = $1", uid_b)
-
-    profile_a = _parse_row(profile_a_row)
-    profile_b = _parse_row(profile_b_row)
+    profile_a = await get_user_doc(db, uid_a)
+    profile_b = await get_user_doc(db, uid_b)
 
     fmt_a = _fmt_profile(strip_pii(profile_a))
     fmt_b = _fmt_profile(strip_pii(profile_b))
@@ -2388,10 +3129,9 @@ async def _run_vibe_check(match_id: int, uid_a: str, uid_b: str, conn, _model_un
     except Exception:
         synergy_score = 50
         synergy_summary = ""
-        
-    # Parse dialogue and write to match_simulations table
-    await conn.execute("DELETE FROM match_simulations WHERE match_id = $1", match_id)
-    
+
+    # Parse dialogue and write to the matches/{pairId}/simulations subcollection
+    turns: list[dict] = []
     lines = conversation.split('\n')
     turn_idx = 0
     for line in lines:
@@ -2403,21 +3143,25 @@ async def _run_vibe_check(match_id: int, uid_a: str, uid_b: str, conn, _model_un
             parts = line.split(':', 1)
             if len(parts) > 1:
                 text = parts[1].strip()
-                await conn.execute("""
-                    INSERT INTO match_simulations (match_id, sender_uid, turn_index, message_text)
-                    VALUES ($1, $2, $3, $4)
-                """, match_id, uid_a, turn_idx, text)
+                turns.append({
+                    "sender_uid": uid_a,
+                    "turn_index": turn_idx,
+                    "message_text": text,
+                })
                 turn_idx += 1
         elif line.startswith('B:') or line.startswith('Person B:'):
             parts = line.split(':', 1)
             if len(parts) > 1:
                 text = parts[1].strip()
-                await conn.execute("""
-                    INSERT INTO match_simulations (match_id, sender_uid, turn_index, message_text)
-                    VALUES ($1, $2, $3, $4)
-                """, match_id, uid_b, turn_idx, text)
+                turns.append({
+                    "sender_uid": uid_b,
+                    "turn_index": turn_idx,
+                    "message_text": text,
+                })
                 turn_idx += 1
-            
+
+    await replace_match_simulations(db, pid, turns)
+
     return {
         "synergy_score": max(0, min(100, synergy_score)),
         "synergy_summary": synergy_summary
@@ -2428,150 +3172,103 @@ async def _run_vibe_check(match_id: int, uid_a: str, uid_b: str, conn, _model_un
 @app.post("/run-matching")
 @limiter.limit(RATE_RUN_MATCHING)
 async def run_matching(request: Request, uid: str = Depends(verify_token)):
-    pool = app.state.pool
+    db = app.state.db
     model = None  # _score_pair and _run_vibe_check now use _gemini_call internally
-    
-    async with pool.acquire() as conn:
-        me_row = await conn.fetchrow("SELECT * FROM users WHERE id = $1", uid)
-        if not me_row:
-            raise HTTPException(status_code=404, detail="Profile not found")
-        me = _parse_row(me_row)
-        
-        embedding_vector = None
-        if me.get("matching_embedding"):
-            try:
-                if isinstance(me["matching_embedding"], str):
-                    emb_str = me["matching_embedding"].strip("[]")
-                    embedding_vector = [float(x) for x in emb_str.split(",") if x.strip()]
-                else:
-                    embedding_vector = list(me["matching_embedding"])
-            except Exception:
-                embedding_vector = None
-                
-        if not embedding_vector:
-            pref_text = f"{me.get('wiki_preferences') or ''}\n{me.get('wiki_matching') or ''}".strip()
-            if pref_text:
-                embedding_vector = await _generate_embedding(pref_text)
-                if embedding_vector:
-                    vector_str = f"[{','.join(map(str, embedding_vector))}]"
-                    await conn.execute("UPDATE users SET matching_embedding = $1::vector WHERE id = $2", vector_str, uid)
-                    
-        if embedding_vector:
-            vector_str = f"[{','.join(map(str, embedding_vector))}]"
-            candidate_rows = await conn.fetch(f"""
-                SELECT * FROM users
-                WHERE onboarding_complete = TRUE
-                  AND matching_paused = FALSE
-                  AND id != $1
-                  AND id NOT IN (
-                      SELECT user_a FROM matches WHERE user_b = $1
-                      UNION
-                      SELECT user_b FROM matches WHERE user_a = $1
-                  )
-                ORDER BY (CASE WHEN matching_embedding IS NULL THEN 1 ELSE 0 END), matching_embedding <=> $2::vector ASC
-                LIMIT {MATCH_CANDIDATE_POOL}
-            """, uid, vector_str)
+
+    me = await get_user_doc(db, uid)
+    if not me:
+        raise HTTPException(status_code=404, detail="Profile not found")
+
+    existing_matches = await get_matches_for_user(db, uid)
+    excluded_ids = {
+        match["user_b"] if match["user_a"] == uid else match["user_a"]
+        for match in existing_matches
+    }
+
+    candidates = []
+    query = (
+        db.collection("users")
+        .where(filter=FieldFilter("onboarding_complete", "==", True))
+        .where(filter=FieldFilter("matching_paused", "==", False))
+        .limit(MATCH_CANDIDATE_POOL)
+    )
+    # Approximates the old SQL NOT IN filter: Firestore applies LIMIT before the
+    # client-side self/excluded filtering, so fewer candidates may remain.
+    async for snap in query.stream():
+        if snap.id == uid or snap.id in excluded_ids:
+            continue
+        candidates.append(parse_user_doc(snap))
+
+    filtered = [c for c in candidates if _is_heuristic_match(me, c)]
+
+    to_score = filtered[:MATCH_SCORE_TOP_K]
+    if not to_score:
+        return {"matches_created": 0, "candidates_evaluated": 0}
+
+    scorings = await asyncio.gather(*[_score_pair(model, me, c) for c in to_score])
+
+    scored_pairs = [
+        (c, s) for c, s in zip(to_score, scorings)
+        if s is not None and float(s.get("score", 0.0)) >= MATCH_SCORE_MIN
+    ]
+    scored_pairs.sort(key=lambda x: float(x[1].get("score", 0.0)), reverse=True)
+
+    created = 0
+    vibe_candidates = [p for p in scored_pairs if float(p[1].get("score", 0.0)) >= VIBE_CHECK_THRESHOLD][:VIBE_CHECK_TOP_K]
+    vibe_uids = {c["id"] for c, _ in vibe_candidates}
+    my_name = me.get("display_name") or "Someone"
+
+    for candidate, scoring in scored_pairs:
+        score = round(float(scoring.get("score", 0.0)), 3)
+        cuid = candidate["id"]
+
+        user_a, user_b = (uid, cuid) if uid < cuid else (cuid, uid)
+        if uid < cuid:
+            db_summary_a = scoring.get("summary_a", "")
+            db_summary_b = scoring.get("summary_b", "")
         else:
-            candidate_rows = await conn.fetch(f"""
-                SELECT * FROM users
-                WHERE onboarding_complete = TRUE
-                  AND matching_paused = FALSE
-                  AND id != $1
-                  AND id NOT IN (
-                      SELECT user_a FROM matches WHERE user_b = $1
-                      UNION
-                      SELECT user_b FROM matches WHERE user_a = $1
-                  )
-                LIMIT {MATCH_CANDIDATE_POOL}
-            """, uid)
+            db_summary_a = scoring.get("summary_b", "")
+            db_summary_b = scoring.get("summary_a", "")
 
-        candidates = [_parse_row(r) for r in candidate_rows]
-        filtered = [c for c in candidates if _is_heuristic_match(me, c)]
+        # Always reset synergy fields here (mirrors the old SQL, which reset
+        # them to NULL on every conflict-update unless immediately overwritten
+        # by the vibe-check branch below) — otherwise merge=True would keep a
+        # stale synergy score from a previous run.
+        pid = await upsert_match_doc(db, user_a, user_b, {
+            "score": score,
+            "rationale": scoring.get("rationale", ""),
+            "summary_a": db_summary_a,
+            "summary_b": db_summary_b,
+            "status": "pending",
+            "synergy_score": None,
+            "synergy_summary": "",
+        })
 
-        to_score = filtered[:MATCH_SCORE_TOP_K]
-        if not to_score:
-            return {"matches_created": 0, "candidates_evaluated": 0}
-            
-        scorings = await asyncio.gather(*[_score_pair(model, me, c) for c in to_score])
-        
-        scored_pairs = [
-            (c, s) for c, s in zip(to_score, scorings)
-            if s is not None and float(s.get("score", 0.0)) >= MATCH_SCORE_MIN
-        ]
-        scored_pairs.sort(key=lambda x: float(x[1].get("score", 0.0)), reverse=True)
-        
-        created = 0
-        vibe_candidates = [p for p in scored_pairs if float(p[1].get("score", 0.0)) >= VIBE_CHECK_THRESHOLD][:VIBE_CHECK_TOP_K]
-        vibe_uids = {c["id"] for c, _ in vibe_candidates}
-        
-        for candidate, scoring in scored_pairs:
-            score = round(float(scoring.get("score", 0.0)), 3)
-            cuid = candidate["id"]
-            
-            user_a, user_b = (uid, cuid) if uid < cuid else (cuid, uid)
-            if uid < cuid:
-                db_summary_a = scoring.get("summary_a", "")
-                db_summary_b = scoring.get("summary_b", "")
-            else:
-                db_summary_a = scoring.get("summary_b", "")
-                db_summary_b = scoring.get("summary_a", "")
-                
-            if cuid in vibe_uids:
-                match_id = await conn.fetchval("""
-                    INSERT INTO matches (user_a, user_b, score, rationale, summary_a, summary_b, status)
-                    VALUES ($1, $2, $3, $4, $5, $6, 'pending')
-                    ON CONFLICT (user_a, user_b) DO UPDATE SET 
-                        score = EXCLUDED.score, 
-                        rationale = EXCLUDED.rationale, 
-                        summary_a = EXCLUDED.summary_a, 
-                        summary_b = EXCLUDED.summary_b,
-                        updated_at = NOW()
-                    RETURNING id
-                """, user_a, user_b, score, scoring.get("rationale", ""), db_summary_a, db_summary_b)
-                
-                vibe = await _run_vibe_check(match_id, uid, cuid, conn, model)
-                synergy_score = vibe["synergy_score"]
-                synergy_summary = vibe["synergy_summary"]
-                
-                final_score = round(score * FINAL_SCORE_COMPAT_WEIGHT + (synergy_score / 100) * (1 - FINAL_SCORE_COMPAT_WEIGHT), 3)
-                
-                await conn.execute("""
-                    UPDATE matches SET
-                        score = $1,
-                        synergy_score = $2,
-                        synergy_summary = $3,
-                        status = 'vibe_checked',
-                        updated_at = NOW()
-                    WHERE id = $4
-                """, final_score, synergy_score, synergy_summary, match_id)
-            else:
-                await conn.execute("""
-                    INSERT INTO matches (user_a, user_b, score, rationale, summary_a, summary_b, status, synergy_score, synergy_summary)
-                    VALUES ($1, $2, $3, $4, $5, $6, 'pending', NULL, NULL)
-                    ON CONFLICT (user_a, user_b) DO UPDATE SET
-                        score = EXCLUDED.score,
-                        rationale = EXCLUDED.rationale,
-                        summary_a = EXCLUDED.summary_a,
-                        summary_b = EXCLUDED.summary_b,
-                        status = 'pending',
-                        synergy_score = NULL,
-                        synergy_summary = NULL,
-                        updated_at = NOW()
-                """, user_a, user_b, score, scoring.get("rationale", ""), db_summary_a, db_summary_b)
-                
-            created += 1
-            # Push notification: tell the other user they have a new match
-            other_token = await _get_fcm_token(cuid, conn)
-            me_row = await conn.fetchrow("SELECT display_name FROM users WHERE id = $1", uid)
-            my_name = (me_row["display_name"] if me_row and me_row["display_name"] else "Someone")
-            asyncio.create_task(_send_push(
-                other_token, "New match ✨",
-                f"You matched with {my_name}!",
-                {"type": "new_match", "match_user_id": uid},
-            ))
+        if cuid in vibe_uids:
+            vibe = await _run_vibe_check(db, pid, uid, cuid)
+            synergy_score = vibe["synergy_score"]
+            synergy_summary = vibe["synergy_summary"]
 
-        logger.info(f"[matching] {uid}: {created} matches created from {len(to_score)} candidates")
-        return {"matches_created": created, "candidates_evaluated": len(to_score)}
+            final_score = round(score * FINAL_SCORE_COMPAT_WEIGHT + (synergy_score / 100) * (1 - FINAL_SCORE_COMPAT_WEIGHT), 3)
+
+            await upsert_match_doc(db, user_a, user_b, {
+                "score": final_score,
+                "synergy_score": synergy_score,
+                "synergy_summary": synergy_summary,
+                "status": "vibe_checked",
+            })
+
+        created += 1
+        # Push notification: tell the other user they have a new match
+        other_token = candidate.get("fcm_token") or ""
+        asyncio.create_task(_send_push(
+            other_token, "New match ✨",
+            f"You matched with {my_name}!",
+            {"type": "new_match", "match_user_id": uid},
+        ))
+
+    logger.info(f"[matching] {uid}: {created} matches created from {len(to_score)} candidates")
+    return {"matches_created": created, "candidates_evaluated": len(to_score)}
 
 # ── Cron-triggered matching (Cloud Scheduler) ──────────────────────────────────
 
@@ -2581,141 +3278,143 @@ async def run_matching_cron(x_cron_secret: str | None = Header(None, alias="X-Cr
     Set CRON_SECRET env var in Cloud Run and in the scheduler job HTTP headers."""
     if not CRON_SECRET or x_cron_secret != CRON_SECRET:
         raise HTTPException(status_code=403, detail="Forbidden")
-    pool = app.state.pool
+    db = app.state.db
     total_created = 0
-    async with pool.acquire() as conn:
-        user_rows = await conn.fetch(
-            "SELECT id FROM users WHERE onboarding_complete = TRUE AND matching_paused = FALSE"
-        )
-        user_ids = [r["id"] for r in user_rows]
+
+    user_ids = []
+    user_query = (
+        db.collection("users")
+        .where(filter=FieldFilter("onboarding_complete", "==", True))
+        .where(filter=FieldFilter("matching_paused", "==", False))
+    )
+    async for snap in user_query.stream():
+        user_ids.append(snap.id)
+
     logger.info(f"[cron] Running matching for {len(user_ids)} users")
     for uid in user_ids:
         try:
-            async with pool.acquire() as conn:
-                me_row = await conn.fetchrow("SELECT * FROM users WHERE id = $1", uid)
-                if not me_row:
+            me = await get_user_doc(db, uid)
+            if not me:
+                continue
+
+            existing_matches = await get_matches_for_user(db, uid)
+            excluded_ids = {
+                match["user_b"] if match["user_a"] == uid else match["user_a"]
+                for match in existing_matches
+            }
+
+            candidates = []
+            query = (
+                db.collection("users")
+                .where(filter=FieldFilter("onboarding_complete", "==", True))
+                .where(filter=FieldFilter("matching_paused", "==", False))
+                .limit(CRON_CANDIDATE_POOL)
+            )
+            async for snap in query.stream():
+                if snap.id == uid or snap.id in excluded_ids:
                     continue
-                me = _parse_row(me_row)
-                candidate_rows = await conn.fetch(f"""
-                    SELECT * FROM users
-                    WHERE onboarding_complete = TRUE AND matching_paused = FALSE AND id != $1
-                    AND id NOT IN (
-                        SELECT user_a FROM matches WHERE user_b = $1
-                        UNION SELECT user_b FROM matches WHERE user_a = $1
-                    ) LIMIT {CRON_CANDIDATE_POOL}
-                """, uid)
-                candidates = [_parse_row(r) for r in candidate_rows]
-                filtered = [c for c in candidates if _is_heuristic_match(me, c)][:CRON_SCORE_TOP_K]
-                if not filtered:
+                candidates.append(parse_user_doc(snap))
+
+            filtered = [c for c in candidates if _is_heuristic_match(me, c)][:CRON_SCORE_TOP_K]
+            if not filtered:
+                continue
+            scorings = await asyncio.gather(*[_score_pair(None, me, c) for c in filtered])
+            for candidate, scoring in zip(filtered, scorings):
+                if not scoring or float(scoring.get("score", 0)) < MATCH_SCORE_MIN:
                     continue
-                scorings = await asyncio.gather(*[_score_pair(None, me, c) for c in filtered])
-                for candidate, scoring in zip(filtered, scorings):
-                    if not scoring or float(scoring.get("score", 0)) < MATCH_SCORE_MIN:
-                        continue
-                    cuid = candidate["id"]
-                    ua, ub = (uid, cuid) if uid < cuid else (cuid, uid)
-                    sa = scoring.get("summary_a" if uid < cuid else "summary_b", "")
-                    sb = scoring.get("summary_b" if uid < cuid else "summary_a", "")
-                    await conn.execute("""
-                        INSERT INTO matches (user_a, user_b, score, rationale, summary_a, summary_b, status)
-                        VALUES ($1,$2,$3,$4,$5,$6,'pending')
-                        ON CONFLICT (user_a, user_b) DO NOTHING
-                    """, ua, ub, round(float(scoring.get("score", 0)), 3),
-                        scoring.get("rationale", ""), sa, sb)
-                    total_created += 1
+                cuid = candidate["id"]
+                ua, ub = (uid, cuid) if uid < cuid else (cuid, uid)
+                sa = scoring.get("summary_a" if uid < cuid else "summary_b", "")
+                sb = scoring.get("summary_b" if uid < cuid else "summary_a", "")
+                existing = await get_match_doc(db, _pair_id(ua, ub))
+                if existing:
+                    continue  # ON CONFLICT (user_a, user_b) DO NOTHING equivalent
+                await upsert_match_doc(db, ua, ub, {
+                    "score": round(float(scoring.get("score", 0)), 3),
+                    "rationale": scoring.get("rationale", ""),
+                    "summary_a": sa,
+                    "summary_b": sb,
+                    "status": "pending",
+                })
+                total_created += 1
         except Exception as e:
             logger.warning(f"[cron] matching failed for {uid}: {e}")
     logger.info(f"[cron] Matching complete: {total_created} new matches")
     return {"total_matches_created": total_created, "users_processed": len(user_ids)}
 
 class VibeCheckRequest(BaseModel):
-    match_id: int
+    pair_id: str
 
 @app.post("/vibe-check")
 async def vibe_check(body: VibeCheckRequest, uid: str = Depends(verify_token)):
-    pool = app.state.pool
-    async with pool.acquire() as conn:
-        match_row = await conn.fetchrow("SELECT * FROM matches WHERE id = $1", body.match_id)
-        if not match_row:
-            raise HTTPException(status_code=404, detail="Match not found")
+    db = app.state.db
+    match = await get_match_doc(db, body.pair_id)
+    if not match:
+        raise HTTPException(status_code=404, detail="Match not found")
 
-        match = dict(match_row)
-        uid_a = match.get("user_a")
-        uid_b = match.get("user_b")
+    uid_a = match.get("user_a")
+    uid_b = match.get("user_b")
 
-        if uid not in (uid_a, uid_b):
-            raise HTTPException(status_code=403, detail="Not your match")
+    if uid not in (uid_a, uid_b):
+        raise HTTPException(status_code=403, detail="Not your match")
 
-        other_uid = uid_b if uid == uid_a else uid_a
-        result = await _run_vibe_check(body.match_id, uid, other_uid, conn, None)
-        synergy_score = result["synergy_score"]
-        synergy_summary = result["synergy_summary"]
-        
-        compat_score = float(match.get("score") or 0.0)
-        final_score = round(compat_score * FINAL_SCORE_COMPAT_WEIGHT + (synergy_score / 100) * (1 - FINAL_SCORE_COMPAT_WEIGHT), 3)
-        
-        await conn.execute("""
-            UPDATE matches SET
-                score = $1,
-                synergy_score = $2,
-                synergy_summary = $3,
-                status = 'vibe_checked',
-                updated_at = NOW()
-            WHERE id = $4
-        """, final_score, synergy_score, synergy_summary, body.match_id)
-        
-        return {
+    other_uid = uid_b if uid == uid_a else uid_a
+    result = await _run_vibe_check(db, body.pair_id, uid, other_uid)
+    synergy_score = result["synergy_score"]
+    synergy_summary = result["synergy_summary"]
+
+    compat_score = float(match.get("score") or 0.0)
+    final_score = round(compat_score * FINAL_SCORE_COMPAT_WEIGHT + (synergy_score / 100) * (1 - FINAL_SCORE_COMPAT_WEIGHT), 3)
+
+    await _match_doc_ref(db, body.pair_id).set(
+        {
+            "score": final_score,
             "synergy_score": synergy_score,
-            "synergy_summary": synergy_summary
-        }
+            "synergy_summary": synergy_summary,
+            "status": "vibe_checked",
+            "updated_at": firestore.SERVER_TIMESTAMP,
+        },
+        merge=True,
+    )
 
-@app.get("/matches/{match_id}/simulation")
-async def get_match_simulation(match_id: int, uid: str = Depends(verify_token)):
-    pool = app.state.pool
-    async with pool.acquire() as conn:
-        match_row = await conn.fetchrow("SELECT user_a, user_b, show_simulation_transcript FROM matches WHERE id = $1", match_id)
-        if not match_row:
-            raise HTTPException(status_code=404, detail="Match not found")
-            
-        match = dict(match_row)
-        if uid not in (match["user_a"], match["user_b"]):
-            raise HTTPException(status_code=403, detail="Not authorized to view this match simulation")
-            
-        if not match["show_simulation_transcript"]:
-            return []
-            
-        rows = await conn.fetch("""
-            SELECT sender_uid, turn_index, message_text, created_at 
-            FROM match_simulations 
-            WHERE match_id = $1 
-            ORDER BY turn_index ASC
-        """, match_id)
-        
-        res = []
-        for r in rows:
-            d = dict(r)
-            d["created_at"] = d["created_at"].isoformat()
-            res.append(d)
-        return res
+    return {
+        "synergy_score": synergy_score,
+        "synergy_summary": synergy_summary
+    }
+
+@app.get("/matches/{pair_id}/simulation")
+async def get_match_simulation(pair_id: str, uid: str = Depends(verify_token)):
+    db = app.state.db
+    match = await get_match_doc(db, pair_id)
+    if not match:
+        raise HTTPException(status_code=404, detail="Match not found")
+
+    if uid not in (match["user_a"], match["user_b"]):
+        raise HTTPException(status_code=403, detail="Not authorized to view this match simulation")
+
+    if not match.get("show_simulation_transcript"):
+        return []
+
+    return await get_match_simulations(db, pair_id)
 
 class ToggleSimulationBody(BaseModel):
     show_simulation_transcript: bool
 
-@app.post("/matches/{match_id}/toggle-simulation")
-async def toggle_match_simulation(match_id: int, body: ToggleSimulationBody, uid: str = Depends(verify_token)):
-    pool = app.state.pool
-    async with pool.acquire() as conn:
-        match_row = await conn.fetchrow("SELECT user_a, user_b FROM matches WHERE id = $1", match_id)
-        if not match_row:
-            raise HTTPException(status_code=404, detail="Match not found")
-        match = dict(match_row)
-        if uid not in (match["user_a"], match["user_b"]):
-            raise HTTPException(status_code=403, detail="Not authorized")
-            
-        await conn.execute("""
-            UPDATE matches 
-            SET show_simulation_transcript = $1, updated_at = NOW() 
-            WHERE id = $2
-        """, body.show_simulation_transcript, match_id)
-        
+@app.post("/matches/{pair_id}/toggle-simulation")
+async def toggle_match_simulation(pair_id: str, body: ToggleSimulationBody, uid: str = Depends(verify_token)):
+    db = app.state.db
+    match = await get_match_doc(db, pair_id)
+    if not match:
+        raise HTTPException(status_code=404, detail="Match not found")
+    if uid not in (match["user_a"], match["user_b"]):
+        raise HTTPException(status_code=403, detail="Not authorized")
+
+    await _match_doc_ref(db, pair_id).set(
+        {
+            "show_simulation_transcript": body.show_simulation_transcript,
+            "updated_at": firestore.SERVER_TIMESTAMP,
+        },
+        merge=True,
+    )
+
     return {"success": True}

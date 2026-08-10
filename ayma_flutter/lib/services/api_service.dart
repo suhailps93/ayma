@@ -3,6 +3,7 @@ import 'dart:async';
 import 'dart:convert';
 
 import 'package:firebase_auth/firebase_auth.dart';
+import 'package:flutter/foundation.dart';
 import 'package:http/http.dart' as http;
 
 import '../env.dart';
@@ -10,6 +11,7 @@ import '../models/community_profile.dart';
 import '../models/match_model.dart';
 import '../models/notification_model.dart';
 import '../models/profile.dart';
+import 'backend_headers.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 class ApiService {
@@ -20,21 +22,13 @@ class ApiService {
   static String _preboardingKey() => 'ayma.preboarding_seen.$_uid';
   static String uidForClient() => FirebaseAuth.instance.currentUser?.uid ?? '';
 
-  static Future<String?> _idToken() async =>
-      FirebaseAuth.instance.currentUser?.getIdToken();
-
   static Future<http.Response> _get(
     String path, {
     Map<String, String>? extraHeaders,
   }) async {
-    final token = await _idToken();
     return http.get(
       Uri.parse('${Env.bootstrapUrl}$path'),
-      headers: {
-        'Content-Type': 'application/json',
-        if (token != null) 'Authorization': 'Bearer $token',
-        ...?extraHeaders,
-      },
+      headers: await BackendHeaders.jsonAuth(extra: extraHeaders),
     );
   }
 
@@ -43,25 +37,18 @@ class ApiService {
     Map<String, dynamic> body, {
     Map<String, String>? extraHeaders,
   }) async {
-    final token = await _idToken();
     return http.post(
       Uri.parse('${Env.bootstrapUrl}$path'),
-      headers: {
-        'Content-Type': 'application/json',
-        if (token != null) 'Authorization': 'Bearer $token',
-        ...?extraHeaders,
-      },
+      headers: await BackendHeaders.jsonAuth(extra: extraHeaders),
       body: jsonEncode(body),
     );
   }
 
-  static Future<http.Response> _delete(String path, Map<String, dynamic> body) async {
-    final token = await _idToken();
-    final request = http.Request('DELETE', Uri.parse('${Env.bootstrapUrl}$path'));
-    request.headers.addAll({
-      'Content-Type': 'application/json',
-      if (token != null) 'Authorization': 'Bearer $token',
-    });
+  static Future<http.Response> _delete(
+      String path, Map<String, dynamic> body) async {
+    final request =
+        http.Request('DELETE', Uri.parse('${Env.bootstrapUrl}$path'));
+    request.headers.addAll(await BackendHeaders.jsonAuth());
     request.body = jsonEncode(body);
     final streamedResponse = await request.send();
     return http.Response.fromStream(streamedResponse);
@@ -71,10 +58,20 @@ class ApiService {
 
   static Future<UserProfile?> getProfile() async {
     final response = await _get('/profile');
+    if (kDebugMode) {
+      debugPrint('DEBUG: GET /profile -> ${response.statusCode}');
+    }
     if (response.statusCode != 200) {
       throw Exception('Failed to load profile: ${response.statusCode}');
     }
     final Map<String, dynamic> data = jsonDecode(response.body);
+    if (kDebugMode) {
+      debugPrint(
+        'DEBUG: /profile body uid=${data['id']} '
+        'onboarding_complete=${data['onboarding_complete']} '
+        'preboarding_seen=${data['preboarding_seen']}',
+      );
+    }
     return UserProfile.fromMap(data);
   }
 
@@ -86,7 +83,12 @@ class ApiService {
   }
 
   static Future<void> updateProfile(Map<String, dynamic> fields) async {
-    await _post('/profile', fields);
+    final response = await _post('/profile', fields);
+    if (response.statusCode < 200 || response.statusCode >= 300) {
+      throw Exception(
+        'Failed to update profile: ${response.statusCode} ${response.body}',
+      );
+    }
   }
 
   /// Called when user manually edits their bio — marks it as user-edited.
@@ -133,7 +135,8 @@ class ApiService {
     await _post('/messages', {'target_user_id': targetUserId, 'text': text});
   }
 
-  static Stream<List<Map<String, dynamic>>> conversationStream(String otherUserId) async* {
+  static Stream<List<Map<String, dynamic>>> conversationStream(
+      String otherUserId) async* {
     while (true) {
       try {
         final response = await _get('/messages/$otherUserId');
@@ -168,8 +171,10 @@ class ApiService {
       if ((gender ?? '').trim().isNotEmpty) 'gender': gender!.trim(),
       if ((communityProfile ?? '').trim().isNotEmpty)
         'community_profile': communityProfile!.trim(),
-      if ((intentType ?? '').trim().isNotEmpty) 'intent_type': intentType!.trim(),
-      if (onboardingComplete != null) 'onboarding_complete': '$onboardingComplete',
+      if ((intentType ?? '').trim().isNotEmpty)
+        'intent_type': intentType!.trim(),
+      if (onboardingComplete != null)
+        'onboarding_complete': '$onboardingComplete',
       if (matchingPaused != null) 'matching_paused': '$matchingPaused',
       if (hasPhotos != null) 'has_photos': '$hasPhotos',
       if (hasMatches != null) 'has_matches': '$hasMatches',
@@ -180,17 +185,15 @@ class ApiService {
     };
     final uri = Uri.parse('${Env.bootstrapUrl}/admin/users')
         .replace(queryParameters: qp);
-    final token = await _idToken();
     final response = await http.get(
       uri,
-      headers: {
-        'Content-Type': 'application/json',
-        if (token != null) 'Authorization': 'Bearer $token',
-        'X-Admin-Password': adminPassword,
-      },
+      headers: await BackendHeaders.jsonAuth(
+        extra: {'X-Admin-Password': adminPassword},
+      ),
     );
     if (response.statusCode != 200) {
-      throw Exception('Admin users failed: ${response.statusCode} ${response.body}');
+      throw Exception(
+          'Admin users failed: ${response.statusCode} ${response.body}');
     }
     final data = jsonDecode(response.body) as List<dynamic>;
     return data.cast<Map<String, dynamic>>();
@@ -205,7 +208,8 @@ class ApiService {
       extraHeaders: {'X-Admin-Password': adminPassword},
     );
     if (response.statusCode != 200) {
-      throw Exception('Admin user detail failed: ${response.statusCode} ${response.body}');
+      throw Exception(
+          'Admin user detail failed: ${response.statusCode} ${response.body}');
     }
     return jsonDecode(response.body) as Map<String, dynamic>;
   }
@@ -356,22 +360,23 @@ class ApiService {
     final response = await _get('/matches');
     if (response.statusCode != 200) return const [];
     final List<dynamic> list = jsonDecode(response.body);
-    return list.map((d) => MatchModel.fromMap(d as Map<String, dynamic>, _uid)).toList();
+    return list
+        .map((d) => MatchModel.fromMap(d as Map<String, dynamic>, _uid))
+        .toList();
   }
 
   static Future<void> updateMatchStatus(String matchId, String status) async {
-    final id = int.tryParse(matchId) ?? 0;
-    await _post('/matches/$id/status', {'status': status});
+    await _post('/matches/$matchId/status', {'status': status});
   }
 
   static Future<void> toggleMatchSimulation(String matchId, bool show) async {
-    final id = int.tryParse(matchId) ?? 0;
-    await _post('/matches/$id/toggle-simulation', {'show_simulation_transcript': show});
+    await _post('/matches/$matchId/toggle-simulation',
+        {'show_simulation_transcript': show});
   }
 
-  static Future<List<Map<String, dynamic>>> getMatchSimulation(String matchId) async {
-    final id = int.tryParse(matchId) ?? 0;
-    final response = await _get('/matches/$id/simulation');
+  static Future<List<Map<String, dynamic>>> getMatchSimulation(
+      String matchId) async {
+    final response = await _get('/matches/$matchId/simulation');
     if (response.statusCode != 200) return const [];
     final List<dynamic> list = jsonDecode(response.body);
     return list.cast<Map<String, dynamic>>();
@@ -383,7 +388,9 @@ class ApiService {
     final response = await _get('/notifications');
     if (response.statusCode != 200) return const [];
     final List<dynamic> list = jsonDecode(response.body);
-    return list.map((d) => NotificationModel.fromMap(d as Map<String, dynamic>)).toList();
+    return list
+        .map((d) => NotificationModel.fromMap(d as Map<String, dynamic>))
+        .toList();
   }
 
   static Stream<List<NotificationModel>> notificationsStream() async* {
@@ -397,8 +404,7 @@ class ApiService {
   }
 
   static Future<void> markNotificationRead(String id) async {
-    final notifId = int.tryParse(id) ?? 0;
-    await _post('/notifications/$notifId/read', {});
+    await _post('/notifications/$id/read', {});
   }
 
   static Future<void> markAllNotificationsRead() async {
@@ -506,7 +512,6 @@ class ApiService {
     final Map<String, dynamic> data = jsonDecode(response.body);
     return data.map((key, value) => MapEntry(key, value.toString()));
   }
-
 
   // ── Questions ─────────────────────────────────────────────────────────────
 
@@ -1098,7 +1103,8 @@ class ApiService {
     },
     {
       'id': 'family_type_preference',
-      'text': 'Do you prefer a joint family or nuclear family setup after marriage?',
+      'text':
+          'Do you prefer a joint family or nuclear family setup after marriage?',
       'section': 'family_background',
       'required': false,
       'sensitive_flag': false,
@@ -1110,7 +1116,7 @@ class ApiService {
     {
       'id': 'religious_sect',
       'text': 'What is your religious denomination or sect '
-              '(e.g. Sunni/Shia for Muslim; Brahmin/Kshatriya for Hindu)?',
+          '(e.g. Sunni/Shia for Muslim; Brahmin/Kshatriya for Hindu)?',
       'section': 'values_religion_culture',
       'required': false,
       'sensitive_flag': true,
@@ -1166,7 +1172,8 @@ class ApiService {
     },
     {
       'id': 'mahram_required',
-      'text': 'Do you require a mahram (chaperone) when meeting a potential spouse?',
+      'text':
+          'Do you require a mahram (chaperone) when meeting a potential spouse?',
       'section': 'values_religion_culture',
       'required': false,
       'sensitive_flag': true,
@@ -1178,7 +1185,7 @@ class ApiService {
     {
       'id': 'nikah_type',
       'text': 'What type of marriage ceremony do you prefer '
-              '(civil + religious, religious only, etc.)?',
+          '(civil + religious, religious only, etc.)?',
       'section': 'intent_readiness',
       'required': false,
       'sensitive_flag': false,
@@ -1212,7 +1219,8 @@ class ApiService {
     },
     {
       'id': 'lobola_expectation',
-      'text': 'What are your thoughts or expectations around bride price / lobola?',
+      'text':
+          'What are your thoughts or expectations around bride price / lobola?',
       'section': 'family_background',
       'required': false,
       'sensitive_flag': true,
@@ -1280,7 +1288,7 @@ class ApiService {
     {
       'id': 'relationship_structure',
       'text': 'What relationship structure works best for you '
-              '(monogamous, polyamorous, open, etc.)?',
+          '(monogamous, polyamorous, open, etc.)?',
       'section': 'intent_readiness',
       'required': false,
       'sensitive_flag': false,
@@ -1386,7 +1394,8 @@ class ApiService {
 
   /// Returns the ordered, filtered list of questions for a given community.
   /// Questions not in the community's [questionIds] list are excluded.
-  static List<Map<String, dynamic>> getQuestionsForCommunity(String communityId) {
+  static List<Map<String, dynamic>> getQuestionsForCommunity(
+      String communityId) {
     final profile = CommunityProfiles.forId(communityId);
     final orderedIds = profile.questionIds;
     final bank = {for (final q in allQuestions) q['id'] as String: q};
@@ -1558,9 +1567,11 @@ class ApiService {
     required String photoUrl,
     String caption = '',
   }) async {
-    final response = await _post('/media', {'photo_url': photoUrl, 'caption': caption});
+    final response =
+        await _post('/media', {'photo_url': photoUrl, 'caption': caption});
     if (response.statusCode != 200 && response.statusCode != 201) {
-      throw Exception('Failed to save media record (${response.statusCode}): ${response.body}');
+      throw Exception(
+          'Failed to save media record (${response.statusCode}): ${response.body}');
     }
   }
 
@@ -1584,26 +1595,36 @@ class ApiService {
     String? gender,
     int ageMin = 0,
     int ageMax = 120,
+    int radiusKm = 50,
     String query = '',
   }) async {
     final Map<String, String> params = {};
-    if (gender != null) params['gender'] = gender;
+    final normalizedGender = _normalizeExploreGender(gender);
+    if (normalizedGender != null) params['gender'] = normalizedGender;
     params['ageMin'] = ageMin.toString();
     params['ageMax'] = ageMax.toString();
+    params['radiusKm'] = radiusKm.toString();
     if (query.isNotEmpty) params['query'] = query;
 
-    final uri = Uri.parse('${Env.bootstrapUrl}/explore').replace(queryParameters: params);
-    final token = await _idToken();
+    final uri = Uri.parse('${Env.bootstrapUrl}/explore')
+        .replace(queryParameters: params);
     final response = await http.get(
       uri,
-      headers: {
-        'Content-Type': 'application/json',
-        if (token != null) 'Authorization': 'Bearer $token',
-      },
+      headers: await BackendHeaders.jsonAuth(),
     );
 
     if (response.statusCode != 200) return const [];
     final List<dynamic> list = jsonDecode(response.body);
     return list.cast<Map<String, dynamic>>();
+  }
+
+  static String? _normalizeExploreGender(String? gender) {
+    final value = gender?.trim().toLowerCase();
+    return switch (value) {
+      null || '' => null,
+      'men' || 'male' => 'man',
+      'women' || 'female' => 'woman',
+      _ => value,
+    };
   }
 }

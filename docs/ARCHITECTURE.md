@@ -1,6 +1,6 @@
 # Ayma System Architecture
 
-> **Last updated:** 2026-06-20  
+> **Last updated:** 2026-07-21  
 > **Canonical architecture doc.** Read this first for a full picture of how the system works today.
 > Execution checklist and handoffs live in [`PLAN.md`](../PLAN.md). Ops commands live in [`agent.md`](agent.md).
 
@@ -8,7 +8,7 @@
 
 ## What Ayma Is
 
-Ayma is a serverless AI matchmaking platform. Users talk to a personalized AI companion (Gemini Live voice, with text fallback). Each conversation enriches a structured profile wiki and questionnaire answers. A matching engine finds compatible people using hard filters, pgvector similarity, LLM scoring, and optional agent-to-agent vibe checks.
+Ayma is a serverless AI matchmaking platform. Users talk to a personalized AI companion (LiveKit voice with Gemini Live, or text chat). Each conversation enriches a structured profile wiki and questionnaire answers in Google Cloud Firestore. A matching engine finds compatible people using hard filters, heuristic ranking, LLM scoring, and optional agent-to-agent vibe checks.
 
 **Design principle:** the Flutter client is thin. It handles presentation, device I/O (mic, camera, playback), Firebase Auth, and authenticated HTTP/WebSocket calls. All business logic — profile CRUD, memory extraction, matching, messaging — lives in the Cloud Run backend.
 
@@ -22,26 +22,29 @@ flowchart TB
     UI[Screens + Riverpod]
     ApiSvc[ApiService — data CRUD]
     BackendSvc[BackendService — AI ops]
-    AudioSvc[AudioService — voice/text chat]
+    AudioSvc[AudioService — LiveKit WebRTC voice/text]
     Storage[Firebase Storage SDK — photos]
     Auth[Firebase Auth SDK]
   end
 
   subgraph GCP["Google Cloud"]
-    CR[Cloud Run: ayma-bootstrap<br/>FastAPI + asyncpg]
-    PG[(PostgreSQL<br/>profiles, matches, messages)]
+    CR[Cloud Run: ayma-bootstrap<br/>FastAPI + Firestore Client + LiveKit Agent]
     Scheduler[Cloud Scheduler<br/>daily matching cron]
   end
 
   subgraph Firebase["Firebase (ayma-ai)"]
-    FAuth[Auth — identity only]
+    FAuth[Auth — identity & JWT verification]
     FStore[Storage — media files]
+    FSDB[(Firestore Database<br/>users, matches, conversations, subcollections)]
+  end
+
+  subgraph LiveKit["LiveKit Cloud"]
+    LKR[LiveKit Room / WebRTC]
   end
 
   subgraph Gemini["Gemini API"]
-    Live[Live WebSocket<br/>gemini-3.1-flash-live-preview]
+    Live[Live API<br/>gemini-3.1-flash-live-preview]
     Text[Text REST<br/>gemini-3.5-flash]
-    Embed[Embeddings<br/>gemini-embedding-2]
   end
 
   UI --> ApiSvc & BackendSvc & AudioSvc
@@ -49,12 +52,12 @@ flowchart TB
   Storage --> FStore
   ApiSvc -->|Bearer JWT| CR
   BackendSvc -->|Bearer JWT| CR
-  AudioSvc -->|POST /bootstrap| CR
-  AudioSvc -->|Voice WebSocket| Live
-  AudioSvc -->|Text POST /chat| CR
-  AudioSvc -->|POST /post-turn| CR
-  CR --> PG
-  CR --> Text & Embed
+  AudioSvc -->|POST /bootstrap token| CR
+  AudioSvc -->|WebRTC Audio/Data| LKR
+  CR -->|LiveKit Agent Worker| LKR
+  LKR -->|Gemini Realtime Multimodal| Live
+  CR --> FSDB
+  CR --> Text
   Scheduler -->|POST /run-matching-cron| CR
   CR -->|verify token| FAuth
 ```
@@ -68,22 +71,29 @@ flowchart TB
 | Mobile client | Flutter + Riverpod + go_router | UI, routing, state |
 | Identity | Firebase Auth | Email/password sign-in; JWT for backend |
 | Media files | Firebase Storage | Photo uploads (direct from client) |
-| Application data | PostgreSQL (asyncpg) | Profiles, wiki, matches, messages, notifications |
-| Backend | FastAPI on Cloud Run | All REST endpoints |
-| Voice AI | Gemini Live WebSocket | Direct client connection (not proxied) |
-| Text AI | Gemini REST | Post-turn extraction, text chat, matching, vibe check |
-| Embeddings | gemini-embedding-2 → pgvector | Candidate pool ranking |
+| Application data | Google Cloud Firestore | Profiles, wiki, matches, conversations, notifications |
+| Backend | FastAPI on Cloud Run | All REST endpoints + LiveKit Agent worker |
+| Voice AI | LiveKit Cloud + Gemini Live | Real-time WebRTC audio streaming with AEC & barge-in |
+| Text AI | Gemini REST (`gemini-3.5-flash`) | Post-turn extraction, text chat, matching, vibe check |
 | Scheduled jobs | Cloud Scheduler | Daily batch matching |
 
 ---
 
 ## Database
 
-PostgreSQL stores all application data. The backend connects via `asyncpg` using `DATABASE_URL` from `config.py`.
+Google Cloud Firestore (`google-cloud-firestore`) stores all application data. The backend connects asynchronously via `AsyncClient` in FastAPI app state (`app.state.db`).
 
-Apply schema (first time): `psql $DATABASE_URL -f schema.sql` (requires pgvector extension).
+Top-level collections:
+- `users/{uid}`: Profile fields, wiki maps, settings, matching preferences.
+- `matches/{pairId}`: Match metadata, scores, synergy, and status.
+- `conversations/{pairId}/messages`: Direct chat messages between matched users.
 
-For a user-centric breakdown of what is stored and how tables relate, see [`docs/database-user-data.md`](database-user-data.md).
+Subcollections under `users/{uid}`:
+- `user_media`: Photo metadata records.
+- `user_memories`: Audio turn transcript audit log.
+- `user_questions`: Pending and answered questionnaire checklist.
+- `user_skills`: Custom AI skill instructions.
+- `notifications`: In-app notification inbox.
 
 ---
 
@@ -100,8 +110,8 @@ Every source file in the repo and what it does. Excludes build outputs (`.dart_t
 | `PLAN.md` | Canonical cross-agent execution checklist, validation log, and handoffs |
 | `README.md` | Repo overview and quick commands (points to PLAN + ARCHITECTURE) |
 | `CLAUDE.md` | Claude/Codex agent entrypoint: quick commands and coding rules |
-| `schema.sql` | PostgreSQL DDL — tables, indexes, pgvector extension |
-| `firebase.json` | Firebase deploy config (Storage rules only) |
+| `schema.sql` | Legacy PostgreSQL DDL (retained for reference; app data is in Firestore) |
+| `firebase.json` | Firebase deploy config (Storage rules + `functions/triggers`) |
 | `storage.rules` | Firebase Storage security rules for photo uploads |
 | `.gitignore` | Git ignore patterns |
 
@@ -116,6 +126,15 @@ Every source file in the repo and what it does. Excludes build outputs (`.dart_t
 | `manual_testing_guide.md` | End-to-end local testing runbook |
 | `ui_test_plan.md` | Screen-by-screen UI/runtime test matrix |
 | `cloud-scheduler.md` | Daily matching cron setup for Cloud Scheduler |
+
+---
+
+### `functions/triggers/` — Firebase Functions
+
+| File | Purpose |
+|---|---|
+| `main.py` | `cleanup_deleted_user` Firestore trigger — cascade-deletes user subcollections, matches, and conversations when `users/{uid}` is deleted |
+| `requirements.txt` | Python dependencies for the trigger function |
 
 ---
 
@@ -325,7 +344,7 @@ Auth guard: unauthenticated → `/auth`. Incomplete onboarding → `/onboarding`
 |---|---|
 | `ApiService` | Profile, matches, notifications, explore, insights, media records, messages, questions — all via authenticated HTTP to Cloud Run |
 | `BackendService` | AI pipeline calls: `/bootstrap`, `/post-turn`, `/run-matching`, `/vibe-check`, `/device-token`; Firebase Storage uploads |
-| `AudioService` | Mic/speaker, Gemini Live WebSocket session, transcript persistence (SharedPreferences), calls `BackendService.postTurn` on turn complete |
+| `AudioService` | LiveKit WebRTC voice/text session, transcript persistence (SharedPreferences), calls `BackendService.postTurn` on turn complete |
 | `AuthService` | Firebase Auth sign-in/out, session state |
 
 **Rule:** all backend calls go through `ApiService` or `BackendService` — no direct database access from screens.
@@ -360,7 +379,7 @@ Single FastAPI service: `functions/bootstrap/main.py`. All endpoints verify Fire
 | GET | `/questions/pending` | Unanswered checklist questions |
 | POST | `/questions/followup` | Add follow-up question from Live tool call |
 | POST | `/questions/{qid}/answered` | Mark question answered |
-| GET | `/explore` | Filtered people browse |
+| GET | `/explore` | Filtered people browse (gender/age/radius + LLM-parsed structured attrs + free-text) |
 | POST/DELETE | `/media` | Register/delete media records (files in Firebase Storage) |
 | POST | `/profile/analyze-photos` | Gemini photo analysis → profile hints |
 | POST | `/device-token` | Store FCM push token |
@@ -368,12 +387,12 @@ Single FastAPI service: `functions/bootstrap/main.py`. All endpoints verify Fire
 | POST | `/chat` | Text chat via REST (used by Flutter client) |
 | POST | `/chat/text` | Server-side text chat (alternative fallback endpoint) |
 | GET | `/matches` | List user's matches |
-| POST | `/matches/{match_id}/status` | Accept/reject match |
+| POST | `/matches/{pair_id}/status` | Accept/reject match |
 | POST | `/run-matching` | On-demand matching for current user |
 | POST | `/run-matching-cron` | Batch matching for all users (Cloud Scheduler, `X-Cron-Secret`) |
 | POST | `/vibe-check` | Agent-to-agent simulation for a match |
-| GET | `/matches/{match_id}/simulation` | Vibe-check transcript |
-| POST | `/matches/{match_id}/toggle-simulation` | Privacy toggle for transcript |
+| GET | `/matches/{pair_id}/simulation` | Vibe-check transcript |
+| POST | `/matches/{pair_id}/toggle-simulation` | Privacy toggle for transcript |
 
 Rate limits configured in `config.py` (slowapi, per IP).
 
@@ -402,60 +421,57 @@ Key defaults:
 
 1. User signs in via Firebase Auth (email/password).
 2. Flutter obtains ID token from Firebase.
-3. Every backend call sends `Authorization: Bearer <id_token>`.
-4. Backend verifies token with Firebase Admin SDK, extracts `uid`.
+3. Every backend call sends `Authorization: Bearer <id_token>` and `X-Firebase-AppCheck: <app_check_token>`.
+4. Backend verifies Firebase ID token and App Check token (monitor mode by default; set `APP_CHECK_ENFORCE=true` to reject invalid/missing tokens).
 
 Firebase is **identity only**. No profile data in Firebase beyond Auth user record.
 
-Sign-in flow: `AuthScreen` → `AuthService` (email/phone/Google/Apple) → Firebase Auth → `ApiService.getProfile()` bootstraps Postgres row → router redirects to `/chat` or `/onboarding`. Every `ApiService`/`BackendService` call sends `Authorization: Bearer <id_token>`. Backend `verify_token()` uses Firebase Admin SDK. FCM token registered via `POST /device-token` on sign-in.
+Sign-in flow: `AuthScreen` → `AuthService` (email/phone/Google/Apple) → Firebase Auth → `ApiService.getProfile()` bootstraps the Firestore user doc → router redirects to `/chat` or `/onboarding`. Every `ApiService`/`BackendService` call sends `Authorization: Bearer <id_token>`. Backend `verify_token()` uses Firebase Admin SDK. FCM token registered via `POST /device-token` on sign-in.
 
 ### 2. Onboarding
 
 1. User selects a **community profile** (e.g. `dating_western`, `arranged_india`, `friends_bff`) — defines question set and prompt style.
 2. Flutter POSTs demographics, location, matching prefs to `/profile`.
-3. Backend upserts `users` row (`INSERT … ON CONFLICT`).
-4. On first `/bootstrap`, backend seeds `user_questions` from community-specific question catalog.
+3. Backend upserts `users/{uid}` in Firestore (`ensure_user_doc` / `update_user_doc`).
+4. On first `/bootstrap`, backend seeds `users/{uid}/user_questions` from community-specific question catalog.
 5. `onboarding_complete` flag gates explore/matching.
 
 Community profiles are defined in `ayma_flutter/lib/models/community_profile.dart` and must stay in sync with backend `COMMUNITY_CONFIG` in `questionnaire_schema.json` (guarded by `test_main_logic.py`).
 
 Onboarding steps: welcome → community selection → about you (name, gender, age) → preferences (interested_in, age range, location) → photos (optional). Completing sets `onboarding_complete=true` via `POST /profile`. Router caches completion in SharedPreferences to skip re-checking on launch.
 
-### 3. Voice Session (Gemini Live)
+### 3. Voice Session (LiveKit + Gemini Live)
 
 ```
-Flutter                          Cloud Run                    Gemini Live
-   │ POST /bootstrap ──────────────►│                           │
-   │◄── setup payload + API key ─────│                           │
-   │ WebSocket connect ──────────────────────────────────────────►│
-   │◄── bidirectional audio + tool calls ──────────────────────────│
-   │                                                                 │
-   │ on turnComplete: POST /post-turn ─►│                           │
-   │◄── wiki + answers updated ─────────│                           │
+Flutter                          Cloud Run                    LiveKit Cloud              Gemini Live
+   │ POST /bootstrap ──────────────►│                           │                          │
+   │◄── LiveKit token + room URL ──│                           │                          │
+   │ WebRTC connect ────────────────────────────────────────────►│                          │
+   │◄── audio + data channels ───────────────────────────────────│                          │
+   │                                                               │ Agent worker ───────────►│
+   │                                                               │◄── realtime audio ───────│
+   │ on turnComplete: POST /post-turn ─►│ (Firestore wiki update)  │                          │
 ```
 
 Steps:
 
 1. `AudioService` calls `BackendService.bootstrap()`.
-2. Backend reads Postgres profile + wiki fields + pending questions + skills; builds system prompt; returns Gemini Live WebSocket URL, API key, and setup JSON (voice, tools).
-3. `GeminiLiveClient` opens WebSocket **directly** to Google — audio never routes through Cloud Run.
-4. Gemini Live tool: `add_followup_question` → Flutter forwards to `/questions/followup`.
-5. On turn complete, last 10 transcript lines sent to `/post-turn`.
+2. Backend reads Firestore profile + wiki fields + pending questions + skills; builds system prompt; returns a LiveKit access token and room URL.
+3. `AudioService` connects to LiveKit via WebRTC — audio routes through LiveKit, not Cloud Run.
+4. The embedded LiveKit Agent worker (`agent.py`) joins the room, runs Gemini Live for voice, and handles text via data channels.
+5. Gemini Live tool: `add_followup_question` → written to `users/{uid}/user_questions`.
+6. On turn complete, the agent (or Flutter) sends transcript to `/post-turn` for wiki extraction.
 
 Session states: `disconnected` → `connecting` → `ready` → `listening` ↔ `thinking` ↔ `speaking`. Barge-in commits partial transcript and calls `/post-turn`. Transcript persisted in SharedPreferences per UID.
 
-Optional: OpenAI Realtime provider via `--dart-define=AYMA_LIVE_PROVIDER=openai` (secondary path).
-
 ### 4. Text Chat
 
-Text chat is handled by the backend REST API (unlike Voice, which uses a direct WebSocket):
+Text chat shares the LiveKit room with voice:
 
-- **Primary (Flutter Client):** `AudioService.sendText()` bundles the recent transcript history and calls `BackendService.chat()` which hits the `POST /chat` endpoint. Cloud Run then makes a standard REST call to `TEXT_MODEL` (default `gemini-3.5-flash`).
-- **Server-side (Fallback):** `POST /chat/text` rebuilds the system prompt from Postgres and runs Gemini on the backend (useful for testing).
+- **Primary (Flutter Client):** `AudioService.sendText()` publishes text on the LiveKit data channel. The embedded agent worker (`agent.py`) handles the LLM reply and broadcasts it back on the same channel.
+- **REST fallback:** `POST /chat` and `POST /chat/text` rebuild the system prompt from Firestore and run Gemini on Cloud Run (useful for testing without a LiveKit session).
 
-Both voice and text chat trigger the exact same `/post-turn` memory pipeline when a conversational turn is complete.
-
-Local transcript history is capped at 60 turns or 180 lines in SharedPreferences.
+Both voice and text chat trigger the same `/post-turn` memory pipeline when a conversational turn completes.
 
 ### 5. Memory & Profile Wiki
 
@@ -463,12 +479,12 @@ After every voice or text turn, `/post-turn` runs one consolidated Gemini call t
 
 | Output | Stored in |
 |---|---|
-| Wiki upserts (`about_me`, `context`, `preferences`, `matching`) | `users.wiki_*` columns |
-| Structured field extractions | `users.profile_answers*` JSONB maps |
-| Answered question keys | marks rows in `user_questions` |
-| Public summary draft | `users.profile_public_pending` |
-| Verbatim user lines | `users.raw_user_statements` (audit) |
-| Raw conversation snippet | `user_memories` table (debug trail) |
+| Wiki upserts (`about_me`, `context`, `preferences`, `matching`) | `users/{uid}` wiki fields |
+| Structured field extractions | `users/{uid}.profile_answers*` maps |
+| Answered question keys | `users/{uid}/user_questions` docs |
+| Public summary draft | `users/{uid}.profile_public_pending` |
+| Verbatim user lines | `users/{uid}.raw_user_statements` (audit) |
+| Raw conversation snippet | `users/{uid}/user_memories` subcollection (debug trail) |
 
 At next `/bootstrap`, all four wiki fields are injected into the system prompt (~500 tokens of dense, deduplicated context). No vector search at bootstrap time.
 
@@ -478,27 +494,26 @@ Field catalog and community configs: `questionnaire_schema.json` (via `load_prof
 ### 6. Photo Upload
 
 1. Flutter uploads bytes directly to Firebase Storage (`uploads/{uid}/{filename}`).
-2. Flutter POSTs download URL to `/media` → row in `user_media`.
+2. Flutter POSTs download URL to `/media` → doc in `users/{uid}/user_media`.
 3. Optional: `/profile/analyze-photos` sends URLs to Gemini for profile hints.
 
 ### 7. Matching Pipeline
 
-Three passes, all in Cloud Run:
+Two passes, all in Cloud Run:
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
 │ PASS 1: Candidate pool                                      │
-│   pgvector cosine similarity on matching_embedding            │
-│   OR random pool if no embedding yet                        │
+│   Firestore query for onboarded users                       │
 │   → heuristic filter (_is_heuristic_match)                  │
-│     age range, gender prefs, intent, dealbreakers             │
+│     age range, gender prefs, intent, dealbreakers           │
 └──────────────────────────┬──────────────────────────────────┘
                            ▼
 ┌─────────────────────────────────────────────────────────────┐
-│ PASS 2: LLM compatibility scoring (_score_pair)             │
+│ PASS 2: LLM compatibility scoring (_score_pair)           │
 │   PII stripped before Gemini call                           │
 │   Returns score (0–1), rationale, per-user summaries       │
-│   Top pairs above MATCH_SCORE_MIN written to matches table  │
+│   Top pairs above MATCH_SCORE_MIN written to matches/{pairId}│
 └──────────────────────────┬──────────────────────────────────┘
                            ▼
 ┌─────────────────────────────────────────────────────────────┐
@@ -506,7 +521,7 @@ Three passes, all in Cloud Run:
 │   For pairs ≥ VIBE_CHECK_THRESHOLD:                         │
 │   4–5 turn agent-to-agent dialogue simulation               │
 │   Synergy score blended into final match score              │
-│   Transcript stored in match_simulations                    │
+│   Transcript stored in matches/{pairId}/simulations         │
 └─────────────────────────────────────────────────────────────┘
 ```
 
@@ -518,8 +533,6 @@ Triggers:
 | Daily cron | `POST /run-matching-cron` | Lighter pool; no vibe-check; see `cloud-scheduler.md` |
 | User requests vibe check | `POST /vibe-check` | Re-run simulation for existing match |
 
-Embeddings generated from `wiki_preferences + wiki_matching` text on first matching run.
-
 ### 8. Direct Messaging
 
 - `POST /messages` — send DM to another user.
@@ -530,37 +543,23 @@ Explore screen → public profile → DirectMessageScreen.
 
 ---
 
-## PostgreSQL Schema
+## Legacy PostgreSQL Schema
 
-Full DDL: `schema.sql`. Key tables:
+> **Note:** The app no longer uses PostgreSQL at runtime. All data lives in Firestore (see Database section above). `schema.sql` is retained only as a historical reference for the original table layout.
 
-### `users`
+Key concepts that map to Firestore:
 
-Core profile + wiki + questionnaire storage.
-
-| Column group | Examples |
+| Old SQL table | Firestore location |
 |---|---|
-| Identity | `id` (Firebase UID), `display_name`, `age`, `gender`, `location_region`, `location_coords` |
-| Profile text | `profile_public`, `profile_private`, `profile_ai_observations` |
-| Settings | `agent_name`, `voice_preference`, `voice_settings`, `community_profile`, `matching_paused` |
-| Wiki (Karpathy-style flat columns) | `wiki_about_me`, `wiki_context`, `wiki_preferences`, `wiki_matching`, `wiki_profile_structured` |
-| Structured answers | `profile_answers`, `profile_answers_public/private/sensitive`, `profile_field_visibility` |
-| Matching | `matching_prefs` (JSONB), `matching_embedding` (vector 1536) |
-| Flags | `onboarding_complete`, `preboarding_seen`, `profile_public_locked`, `profile_public_user_edited` |
-| Push | `fcm_token` |
-
-### Other tables
-
-| Table | Purpose |
-|---|---|
-| `user_skills` | Custom AI skills/instructions per user |
-| `user_questions` | Checklist of pending/answered profile questions |
-| `matches` | Pairs, score, rationale, summaries, synergy, status |
-| `match_simulations` | Vibe-check dialogue transcript |
-| `user_memories` | Raw conversation audit log |
-| `user_media` | Photo URL records |
-| `notifications` | In-app notifications |
-| `messages` | Direct messages between users |
+| `users` | `users/{uid}` |
+| `user_skills` | `users/{uid}/user_skills` |
+| `user_questions` | `users/{uid}/user_questions` |
+| `user_memories` | `users/{uid}/user_memories` |
+| `user_media` | `users/{uid}/user_media` |
+| `notifications` | `users/{uid}/notifications` |
+| `matches` | `matches/{pairId}` (deterministic ID from sorted UIDs) |
+| `match_simulations` | `matches/{pairId}/simulations` |
+| `messages` (DMs) | `conversations/{pairId}/messages` |
 
 ---
 
@@ -583,10 +582,11 @@ Bucket: `ayma-ai.firebasestorage.app`.
 | Cloud Run service | `ayma-bootstrap` |
 | Cloud Run URL | `https://ayma-bootstrap-235381544962.us-central1.run.app` |
 | Cloud Run SA | `vertex-express@ayma-ai.iam.gserviceaccount.com` |
-| PostgreSQL | `DATABASE_URL` env var on Cloud Run |
+| Firestore | Native mode, project `ayma-ai` |
 | Firebase Storage | `ayma-ai.firebasestorage.app` |
+| Firebase Functions | `functions/triggers` — user deletion cascade |
 
-Local dev: set `DATABASE_URL`, then `uvicorn main:app --port 8080` from `functions/bootstrap/`.
+Local dev: set `GOOGLE_API_KEY` and Firebase credentials, then `uvicorn main:app --port 8080` from `functions/bootstrap/`.
 
 ---
 
@@ -612,7 +612,7 @@ Each defines:
 - Prompt tone/style for `/bootstrap` system prompt
 - Completeness scoring weights in Flutter
 
-Stored as `users.community_profile`. Backend reads it to select active questions and prompt behavior.
+Stored as `users/{uid}.community_profile`. Backend reads it to select active questions and prompt behavior.
 
 ---
 
@@ -632,7 +632,7 @@ cd ayma_flutter && flutter analyze
 ./ayma_flutter/scripts/check-flutter-env
 
 # Local backend
-export DATABASE_URL="postgresql://user:pass@localhost:5432/ayma"
+export GOOGLE_API_KEY="your-key"
 cd functions/bootstrap && uvicorn main:app --host 0.0.0.0 --port 8080
 ```
 
@@ -656,6 +656,8 @@ Runtime testing: see [`manual_testing_guide.md`](manual_testing_guide.md) and [`
 
 From `PLAN.md` — not yet fully validated:
 
+- [ ] Deploy Firestore-backed backend to Cloud Run and smoke-test all endpoints (including `/explore` structured + free-text search)
+- [ ] Deploy `functions/triggers` Firebase codebase
 - [ ] Single source of truth for question definitions across Flutter + backend (currently duplicated with drift guard in tests)
 - [ ] Legacy users with `dating_standard` community profile migration
 - [ ] Text chat integration test (ADB cannot type into Flutter TextFields)

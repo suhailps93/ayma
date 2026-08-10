@@ -65,6 +65,7 @@ class AymaAudioService extends ChangeNotifier {
   Room? _room;
   EventsListener<RoomEvent>? _listener;
   Timer? _volumeTimer;
+  final Set<String> _completedTextMessageIds = <String>{};
 
   SessionState _state = SessionState.disconnected;
   SessionState get state => _state;
@@ -137,7 +138,8 @@ class AymaAudioService extends ChangeNotifier {
       final token = bootstrap['token'] as String? ?? '';
 
       if (wsUrl.isEmpty || token.isEmpty) {
-        throw Exception('Missing LiveKit URL or AccessToken from bootstrap response.');
+        throw Exception(
+            'Missing LiveKit URL or AccessToken from bootstrap response.');
       }
 
       final r = Room();
@@ -146,8 +148,8 @@ class AymaAudioService extends ChangeNotifier {
       // Connect natively to room
       await r.connect(wsUrl, token);
 
-      // Enable microphone (AEC & Noise Suppression handled natively by LiveKit WebRTC)
-      await r.localParticipant?.setMicrophoneEnabled(!_muted);
+      // Enable microphone only for explicit voice sessions.
+      await _setMicrophoneEnabled(!_muted);
 
       // Wire event listeners
       final l = r.createListener();
@@ -175,6 +177,18 @@ class AymaAudioService extends ChangeNotifier {
                 return;
               }
               if (type == 'agent_transcript') {
+                final clientMessageId =
+                    (payload['client_message_id'] as String? ?? '').trim();
+                if (clientMessageId.isNotEmpty &&
+                    _completedTextMessageIds.contains(clientMessageId)) {
+                  debugPrint(
+                    'DEBUG: Ignoring late LiveKit text reply for $clientMessageId',
+                  );
+                  return;
+                }
+                if (clientMessageId.isNotEmpty) {
+                  _completedTextMessageIds.add(clientMessageId);
+                }
                 _addTranscript(text, isUser: false);
                 _setState(SessionState.listening);
                 return;
@@ -232,6 +246,7 @@ class AymaAudioService extends ChangeNotifier {
     _volumeTimer = null;
     await _listener?.dispose();
     _listener = null;
+    await _setMicrophoneEnabled(false);
     await _room?.disconnect();
     _room = null;
     _inputVolume = 0;
@@ -289,7 +304,8 @@ class AymaAudioService extends ChangeNotifier {
           // User started talking -> Interruption check!
           // Flush local playing audio tracks immediately if speaking
           if (_state == SessionState.speaking) {
-            debugPrint('DEBUG: Interruption detected. Flushing remote audio playback.');
+            debugPrint(
+                'DEBUG: Interruption detected. Flushing remote audio playback.');
             flushLocalPlayback();
           }
           notifyListeners();
@@ -315,23 +331,27 @@ class AymaAudioService extends ChangeNotifier {
             track.mediaStreamTrack.enabled = false;
             // Re-enable track after brief duration to capture subsequent model speech
             Future.delayed(
-              const Duration(milliseconds: AudioConfig.livekitTrackFlushDelayMs),
+              const Duration(
+                  milliseconds: AudioConfig.livekitTrackFlushDelayMs),
               () {
                 track.mediaStreamTrack.enabled = true;
               },
             );
           } catch (e) {
-            debugPrint('DEBUG: Error disabling audio track for interruption: $e');
+            debugPrint(
+                'DEBUG: Error disabling audio track for interruption: $e');
           }
         }
       }
     }
   }
 
-  // ── Text messaging over LiveKit data track ─────────────────────────────────
+  // ── Text messaging over REST ───────────────────────────────────────────────
 
-  /// Sends a text message directly using LiveKit's bidirectional data channel feature,
-  /// completely bypassing the old HTTP REST loops.
+  /// Sends text through the production REST backend.
+  ///
+  /// Text mode is intentionally separate from LiveKit voice mode: typing must
+  /// not connect a room, request microphone access, or trigger spoken output.
   Future<bool> sendText(
     String text, {
     List<Map<String, String>> attachments = const [],
@@ -342,20 +362,13 @@ class AymaAudioService extends ChangeNotifier {
     final attachmentSummary = attachments.isEmpty
         ? ''
         : '\n\nShared attachments:\n${attachments.map((a) => '- ${a['kind'] ?? 'file'}: ${a['filename'] ?? a['url'] ?? 'attachment'}').join('\n')}';
-    final historyText =
-        trimmed.isEmpty ? attachmentSummary.trim() : '$trimmed$attachmentSummary';
+    final historyText = trimmed.isEmpty
+        ? attachmentSummary.trim()
+        : '$trimmed$attachmentSummary';
 
-    // Establish LiveKit room session first if not connected
-    if (_room == null || _state == SessionState.disconnected) {
-      _setState(SessionState.thinking);
-      try {
-        await connect(userInitiated: true);
-      } catch (e) {
-        debugPrint('DEBUG: Failed to connect to Room before sending text: $e');
-        _setTextChatFailure(TextChatFailure.noConnection);
-        _setState(SessionState.disconnected);
-        return false;
-      }
+    if (_room != null || _state != SessionState.disconnected) {
+      await _disconnectTransport();
+      _setState(SessionState.disconnected);
     }
 
     _addTranscript(
@@ -368,17 +381,36 @@ class AymaAudioService extends ChangeNotifier {
       allowRecentDuplicate: true,
     );
 
+    return _sendTextViaRestFallback(historyText);
+  }
+
+  Future<bool> _sendTextViaRestFallback(String userText) async {
+    _setState(SessionState.thinking);
     try {
-      final payload = utf8.encode(historyText);
-      await _room?.localParticipant?.publishData(
-        payload,
-        reliable: true,
+      final response = await BackendService.chat(messages: _history);
+      if (response.trim().isEmpty) {
+        throw Exception('Empty fallback response');
+      }
+      _addTranscript(response, isUser: false);
+      await BackendService.postTurn(
+        sessionId: 'rest_${DateTime.now().millisecondsSinceEpoch}',
+        messages: [
+          {'role': 'user', 'text': userText},
+          {'role': 'model', 'text': response},
+        ],
       );
       _setTextChatFailure(TextChatFailure.none);
+      _setState(SessionState.disconnected);
       return true;
     } catch (e) {
-      debugPrint('DEBUG: Failed to publish data track packet: $e');
-      _setTextChatFailure(TextChatFailure.noConnection);
+      debugPrint('DEBUG: REST text fallback failed: $e');
+      _setTextChatFailure(
+        e.toString().contains('quota_exhausted')
+            ? TextChatFailure.quotaExhausted
+            : TextChatFailure.serverError,
+      );
+      _setState(
+          _room == null ? SessionState.disconnected : SessionState.listening);
       return false;
     }
   }
@@ -393,9 +425,12 @@ class AymaAudioService extends ChangeNotifier {
       await connect(userInitiated: true);
     }
 
-    final deadline = DateTime.now().add(const Duration(seconds: AudioConfig.retryDeadlineSeconds));
-    final delayDur = const Duration(milliseconds: AudioConfig.retryPollIntervalMs);
-    while (_state == SessionState.connecting && DateTime.now().isBefore(deadline)) {
+    final deadline = DateTime.now()
+        .add(const Duration(seconds: AudioConfig.retryDeadlineSeconds));
+    final delayDur =
+        const Duration(milliseconds: AudioConfig.retryPollIntervalMs);
+    while (_state == SessionState.connecting &&
+        DateTime.now().isBefore(deadline)) {
       await Future<void>.delayed(delayDur);
     }
 
@@ -451,7 +486,9 @@ class AymaAudioService extends ChangeNotifier {
     _speechToText.statusListener = (status) {
       if (status == 'done' || status == 'notListening') {
         if (_wakeWordListening && _state == SessionState.disconnected) {
-          Future.delayed(const Duration(milliseconds: AudioConfig.wakeWordDelayMs), _listenForWakeWord);
+          Future.delayed(
+              const Duration(milliseconds: AudioConfig.wakeWordDelayMs),
+              _listenForWakeWord);
         }
       }
     };
@@ -522,7 +559,8 @@ class AymaAudioService extends ChangeNotifier {
 
   void _schedulePersistTranscript() {
     _persistDebounce?.cancel();
-    _persistDebounce = Timer(const Duration(milliseconds: AudioConfig.persistDebounceMs), () {
+    _persistDebounce =
+        Timer(const Duration(milliseconds: AudioConfig.persistDebounceMs), () {
       unawaited(_persistTranscript());
     });
   }
@@ -535,19 +573,23 @@ class AymaAudioService extends ChangeNotifier {
     bool allowRecentDuplicate = false,
   }) {
     final normalized = text.trim();
-    if (normalized.isEmpty && (attachments == null || attachments.isEmpty)) return;
+    if (normalized.isEmpty && (attachments == null || attachments.isEmpty)) {
+      return;
+    }
 
     if (_transcript.isNotEmpty) {
       final last = _transcript.last;
       final isDuplicate = last.isUser == isUser &&
           last.text.trim() == normalized &&
-          DateTime.now().difference(last.time) < const Duration(seconds: AudioConfig.duplicatePreventSeconds);
+          DateTime.now().difference(last.time) <
+              const Duration(seconds: AudioConfig.duplicatePreventSeconds);
       if (isDuplicate && !allowRecentDuplicate) return;
     }
 
     final now = DateTime.now();
     _transcript.add(
-      TranscriptLine(normalized, isUser: isUser, time: now, attachments: attachments),
+      TranscriptLine(normalized,
+          isUser: isUser, time: now, attachments: attachments),
     );
     _trimTranscriptIfNeeded();
 
@@ -568,15 +610,18 @@ class AymaAudioService extends ChangeNotifier {
 
   void _trimTranscriptIfNeeded() {
     if (_transcript.length <= AudioConfig.maxTranscriptLines) return;
-    _transcript.removeRange(0, _transcript.length - AudioConfig.maxTranscriptLines);
+    _transcript.removeRange(
+        0, _transcript.length - AudioConfig.maxTranscriptLines);
   }
 
-  String _stamp(DateTime time, String text) => '[${time.toIso8601String()}] $text';
+  String _stamp(DateTime time, String text) =>
+      '[${time.toIso8601String()}] $text';
 
   Future<Map<String, dynamic>> _bootstrapForProvider() async {
     if (Env.liveProvider != 'gemini' && Env.openAiApiKey.isNotEmpty) {
       try {
-        return await BackendService.bootstrap().timeout(const Duration(seconds: AudioConfig.bootstrapTimeoutSeconds));
+        return await BackendService.bootstrap().timeout(
+            const Duration(seconds: AudioConfig.bootstrapTimeoutSeconds));
       } catch (_) {
         return <String, dynamic>{};
       }
@@ -593,8 +638,20 @@ class AymaAudioService extends ChangeNotifier {
   void setMuted(bool muted) {
     if (_muted == muted) return;
     _muted = muted;
-    unawaited(_room?.localParticipant?.setMicrophoneEnabled(!_muted));
+    unawaited(_setMicrophoneEnabled(!_muted));
     notifyListeners();
+  }
+
+  Future<void> _setMicrophoneEnabled(bool enabled) async {
+    final participant = _room?.localParticipant;
+    if (participant == null) return;
+    await participant.setMicrophoneEnabled(enabled);
+    for (final pub in participant.audioTrackPublications) {
+      final track = pub.track;
+      if (track != null) {
+        track.mediaStreamTrack.enabled = enabled;
+      }
+    }
   }
 
   void toggleSpeaker() {

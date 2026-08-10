@@ -9,23 +9,20 @@ import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:http/http.dart' as http;
 
 import '../env.dart';
+import 'backend_headers.dart';
 
 class BackendService {
   BackendService._();
 
-  static Future<String?> _idToken() async =>
-      FirebaseAuth.instance.currentUser?.getIdToken();
-
   static Future<Map<String, dynamic>> bootstrap() async {
-    final token = await _idToken();
-    if (token == null) throw Exception('Not authenticated');
+    final headers = await BackendHeaders.jsonAuth();
+    if (!headers.containsKey('Authorization')) {
+      throw Exception('Not authenticated');
+    }
 
     final response = await http.post(
       Uri.parse('${Env.bootstrapUrl}/bootstrap'),
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': 'Bearer $token',
-      },
+      headers: headers,
     );
 
     if (response.statusCode != 200) {
@@ -38,36 +35,35 @@ class BackendService {
     required String sessionId,
     required List<Map<String, String>> messages,
   }) async {
-    final token = await _idToken();
-    if (token == null) throw Exception('Not authenticated');
+    final headers = await BackendHeaders.jsonAuth();
+    if (!headers.containsKey('Authorization')) {
+      throw Exception('Not authenticated');
+    }
 
     final response = await http
         .post(
           Uri.parse('${Env.bootstrapUrl}/post-turn'),
-          headers: {
-            'Content-Type': 'application/json',
-            'Authorization': 'Bearer $token',
-          },
+          headers: headers,
           body: jsonEncode({'session_id': sessionId, 'messages': messages}),
         )
         .timeout(const Duration(seconds: 15));
 
     if (response.statusCode != 200) {
-      throw Exception('post-turn failed: ${response.statusCode} ${response.body}');
+      throw Exception(
+          'post-turn failed: ${response.statusCode} ${response.body}');
     }
   }
 
   static Future<Map<String, dynamic>> runMatching() async {
-    final token = await _idToken();
-    if (token == null) throw Exception('Not authenticated');
+    final headers = await BackendHeaders.jsonAuth();
+    if (!headers.containsKey('Authorization')) {
+      throw Exception('Not authenticated');
+    }
 
     final response = await http
         .post(
           Uri.parse('${Env.bootstrapUrl}/run-matching'),
-          headers: {
-            'Content-Type': 'application/json',
-            'Authorization': 'Bearer $token',
-          },
+          headers: headers,
         )
         .timeout(const Duration(seconds: 90));
 
@@ -78,17 +74,16 @@ class BackendService {
   }
 
   static Future<Map<String, dynamic>> vibeCheck(String matchId) async {
-    final token = await _idToken();
-    if (token == null) throw Exception('Not authenticated');
+    final headers = await BackendHeaders.jsonAuth();
+    if (!headers.containsKey('Authorization')) {
+      throw Exception('Not authenticated');
+    }
 
     final response = await http
         .post(
           Uri.parse('${Env.bootstrapUrl}/vibe-check'),
-          headers: {
-            'Content-Type': 'application/json',
-            'Authorization': 'Bearer $token',
-          },
-          body: jsonEncode({'match_id': int.tryParse(matchId) ?? 0}),
+          headers: headers,
+          body: jsonEncode({'pair_id': matchId}),
         )
         .timeout(const Duration(seconds: 60));
 
@@ -102,16 +97,15 @@ class BackendService {
     required List<Map<String, String>> messages,
     String? systemPrompt,
   }) async {
-    final token = await _idToken();
-    if (token == null) throw Exception('Not authenticated');
+    final headers = await BackendHeaders.jsonAuth();
+    if (!headers.containsKey('Authorization')) {
+      throw Exception('Not authenticated');
+    }
 
     final response = await http
         .post(
-          Uri.parse('${Env.bootstrapUrl}/chat'),
-          headers: {
-            'Content-Type': 'application/json',
-            'Authorization': 'Bearer $token',
-          },
+          Uri.parse('${Env.bootstrapUrl}/chat/text'),
+          headers: headers,
           body: jsonEncode({
             'messages': messages,
             if (systemPrompt != null && systemPrompt.isNotEmpty)
@@ -120,10 +114,14 @@ class BackendService {
         )
         .timeout(const Duration(seconds: 30));
 
-    if (response.statusCode == 429) throw Exception('quota_exhausted');
-    if (response.statusCode != 200) throw Exception('Chat failed: ${response.statusCode}');
+    if (response.statusCode == 429) {
+      throw Exception('quota_exhausted');
+    }
+    if (response.statusCode != 200) {
+      throw Exception('Chat failed: ${response.statusCode}');
+    }
     final body = jsonDecode(response.body) as Map<String, dynamic>;
-    return (body['reply'] as String?) ?? '';
+    return (body['text'] as String?) ?? (body['reply'] as String?) ?? '';
   }
 
   static Future<String> uploadMedia(Uint8List bytes, String filename) async {
@@ -143,18 +141,19 @@ class BackendService {
   }
 
   static Future<void> saveDeviceToken(String token) async {
-    final idToken = await _idToken();
-    if (idToken == null) return;
+    final headers = await BackendHeaders.jsonAuth();
+    if (!headers.containsKey('Authorization')) return;
     await http.post(
       Uri.parse('${Env.bootstrapUrl}/device-token'),
-      headers: {'Content-Type': 'application/json', 'Authorization': 'Bearer $idToken'},
+      headers: headers,
       body: jsonEncode({'token': token}),
     );
   }
 
   // Uses putFile() on native to avoid loading large video files into memory.
   // Falls back to putData() on web (where dart:io File is unavailable).
-  static Future<String> uploadMediaPath(String filePath, String filename) async {
+  static Future<String> uploadMediaPath(
+      String filePath, String filename) async {
     final uid = FirebaseAuth.instance.currentUser?.uid;
     if (uid == null) throw Exception('Not authenticated');
 
@@ -184,7 +183,8 @@ class BackendService {
       'mp4' => 'video/mp4',
       'mov' => 'video/quicktime',
       'webm' => 'video/webm',
-      _ => 'image/jpeg', // image_picker on Android often returns files without extension
+      _ =>
+        'image/jpeg', // image_picker on Android often returns files without extension
     };
   }
 }

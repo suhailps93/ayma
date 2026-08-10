@@ -4,8 +4,7 @@ firebase-admin==6.6.0
 google-generativeai==0.8.3
 google-genai>=1.67.0
 pydantic==2.10.3
-asyncpg==0.30.0
 slowapi==0.1.9
-cloud-sql-python-connector[asyncpg]
+google-cloud-firestore==2.27.0
 livekit-agents==1.6.2
 livekit-plugins-google==1.6.2

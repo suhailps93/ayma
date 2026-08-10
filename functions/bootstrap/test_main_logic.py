@@ -11,17 +11,7 @@ import re
 
 def _install_test_stubs():
     os.environ.setdefault("GOOGLE_API_KEY", "test-key")
-    os.environ.setdefault("DATABASE_URL", "postgresql://test:test@localhost:5432/ayma")
     os.environ.setdefault("ADMIN_PASSWORD", "test-admin-pass")
-
-    asyncpg = types.ModuleType("asyncpg")
-
-    async def _create_pool(*args, **kwargs):
-        return None
-
-    asyncpg.create_pool = _create_pool
-    sys.modules["asyncpg"] = asyncpg
-
     firebase_admin = types.ModuleType("firebase_admin")
     firebase_admin._apps = []
     firebase_admin.initialize_app = lambda **kwargs: None
@@ -39,6 +29,12 @@ def _install_test_stubs():
     messaging_module.send = lambda msg: "ok"
     firebase_admin.auth = auth_module
     firebase_admin.messaging = messaging_module
+
+    app_check_module = types.ModuleType("firebase_admin.app_check")
+    app_check_module.verify_token = lambda token: {"app_id": "test-app"}
+    firebase_admin.app_check = app_check_module
+    sys.modules["firebase_admin.app_check"] = app_check_module
+
     sys.modules["firebase_admin"] = firebase_admin
     sys.modules["firebase_admin.auth"] = auth_module
     sys.modules["firebase_admin.messaging"] = messaging_module
@@ -60,7 +56,7 @@ def _install_test_stubs():
         google_pkg = sys.modules["google"]
     else:
         google_pkg = types.ModuleType("google")
-        
+    google_pkg.__path__ = getattr(google_pkg, "__path__", [])
     google_pkg.generativeai = genai
     google_genai = types.ModuleType("google.genai")
 
@@ -79,10 +75,52 @@ def _install_test_stubs():
     google_genai.Client = _DummyEmbeddingClient
     google_genai_types = types.ModuleType("google.genai.types")
     google_genai_types.EmbedContentConfig = _DummyEmbedContentConfig
+    google_genai_types.GenerateContentConfig = _DummyEmbedContentConfig
+
+    google_api_core = types.ModuleType("google.api_core")
+    google_api_core.__path__ = []
+    google_api_core_exceptions = types.ModuleType("google.api_core.exceptions")
+    google_api_core_exceptions.AlreadyExists = type("AlreadyExists", (Exception,), {})
+
+    google_cloud = types.ModuleType("google.cloud")
+    google_cloud.__path__ = []
+    firestore_module = types.ModuleType("google.cloud.firestore")
+
+    class _DummyAsyncClient:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def close(self):
+            return None
+
+    firestore_module.AsyncClient = _DummyAsyncClient
+    firestore_module.SERVER_TIMESTAMP = object()
+
+    firestore_base_query = types.ModuleType("google.cloud.firestore_v1.base_query")
+    firestore_base_query.FieldFilter = lambda *args, **kwargs: ("field_filter", args, kwargs)
+
+    firestore_vector = types.ModuleType("google.cloud.firestore_v1.vector")
+    firestore_vector.Vector = lambda vals: vals
+
+    firestore_base_vector_query = types.ModuleType("google.cloud.firestore_v1.base_vector_query")
+    class DistanceMeasure:
+        COSINE = "COSINE"
+        EUCLIDEAN = "EUCLIDEAN"
+        DOT_PRODUCT = "DOT_PRODUCT"
+    firestore_base_vector_query.DistanceMeasure = DistanceMeasure
+
+    google_cloud.firestore = firestore_module
     sys.modules["google"] = google_pkg
     sys.modules["google.generativeai"] = genai
     sys.modules["google.genai"] = google_genai
     sys.modules["google.genai.types"] = google_genai_types
+    sys.modules["google.api_core"] = google_api_core
+    sys.modules["google.api_core.exceptions"] = google_api_core_exceptions
+    sys.modules["google.cloud"] = google_cloud
+    sys.modules["google.cloud.firestore"] = firestore_module
+    sys.modules["google.cloud.firestore_v1.base_query"] = firestore_base_query
+    sys.modules["google.cloud.firestore_v1.vector"] = firestore_vector
+    sys.modules["google.cloud.firestore_v1.base_vector_query"] = firestore_base_vector_query
 
     fastapi = types.ModuleType("fastapi")
 
@@ -431,6 +469,186 @@ class HeuristicMatchingTests(unittest.TestCase):
         self.assertFalse(bootstrap_main._is_heuristic_match(me, too_young))
         self.assertFalse(bootstrap_main._is_heuristic_match(me, too_old))
         self.assertTrue(bootstrap_main._is_heuristic_match(me, just_right))
+
+
+class ExploreSearchTests(unittest.TestCase):
+    def test_build_explore_attrs_normalizes_public_fields(self):
+        attrs = bootstrap_main._build_explore_attrs({
+            "religion": "Islam",
+            "race": ["South Asian", "Indian"],
+            "height_cm": 178,
+            "occupation": "Engineer",
+        })
+        self.assertEqual(attrs["religion"], "islam")
+        self.assertEqual(attrs["race"], ["south asian", "indian"])
+        self.assertEqual(attrs["height_cm"], "178")
+
+    def test_matches_explore_filters_on_structured_attrs(self):
+        doc = {
+            "display_name": "Amina",
+            "profile_public": "Software engineer in Toronto",
+            "explore_attrs": {
+                "religion": "islam",
+                "occupation": "engineer",
+                "height_cm": "170",
+            },
+        }
+        self.assertTrue(
+            bootstrap_main._matches_explore_filters(
+                doc,
+                parsed_filters={"religion": "islam"},
+                text_terms=[],
+            )
+        )
+        self.assertFalse(
+            bootstrap_main._matches_explore_filters(
+                doc,
+                parsed_filters={"religion": "christian"},
+                text_terms=[],
+            )
+        )
+
+    def test_matches_explore_filters_on_text_terms(self):
+        doc = {
+            "display_name": "Priya",
+            "profile_public": "Loves hiking and coffee",
+            "explore_attrs": {},
+        }
+        self.assertTrue(
+            bootstrap_main._matches_explore_filters(
+                doc,
+                parsed_filters={},
+                text_terms=["hiking"],
+            )
+        )
+        self.assertFalse(
+            bootstrap_main._matches_explore_filters(
+                doc,
+                parsed_filters={},
+                text_terms=["surfing"],
+            )
+        )
+
+    def test_height_range_filter(self):
+        doc = {"explore_attrs": {"height_cm": "180"}}
+        self.assertTrue(
+            bootstrap_main._matches_explore_filters(
+                doc,
+                parsed_filters={"height_cm": {"min": 170, "max": 190}},
+                text_terms=[],
+            )
+        )
+        self.assertFalse(
+            bootstrap_main._matches_explore_filters(
+                doc,
+                parsed_filters={"height_cm": {"min": 185, "max": 200}},
+                text_terms=[],
+            )
+        )
+
+    def test_within_radius_km(self):
+        viewer = (37.7749, -122.4194)
+        nearby = {"location_coords": {"lat": 37.8, "lng": -122.4}}
+        far = {"location_coords": {"lat": 40.7, "lng": -74.0}}
+        self.assertTrue(bootstrap_main._within_radius_km(viewer, nearby, 50))
+        self.assertFalse(bootstrap_main._within_radius_km(viewer, far, 50))
+
+    def test_pick_firestore_attr_filter_prefers_religion(self):
+        picked = bootstrap_main._pick_firestore_attr_filter({
+            "occupation": "doctor",
+            "religion": "islam",
+        })
+        self.assertEqual(picked, ("religion", "islam"))
+
+
+class AppCheckTests(unittest.TestCase):
+    def _request(self, headers: dict | None = None):
+        data = headers or {}
+
+        class _Headers:
+            def get(self, key, default=None):
+                return data.get(key, default)
+
+        return types.SimpleNamespace(headers=_Headers())
+
+    def setUp(self):
+        self._original_enforce = bootstrap_main.APP_CHECK_ENFORCE
+
+    def tearDown(self):
+        bootstrap_main.APP_CHECK_ENFORCE = self._original_enforce
+        bootstrap_main.app_check.verify_token = lambda token: {"app_id": "test-app"}
+
+    def test_missing_token_allowed_in_monitor_mode(self):
+        bootstrap_main.APP_CHECK_ENFORCE = False
+        bootstrap_main._verify_app_check_token(self._request())
+
+    def test_missing_token_rejected_when_enforced(self):
+        bootstrap_main.APP_CHECK_ENFORCE = True
+        with self.assertRaises(bootstrap_main.HTTPException) as ctx:
+            bootstrap_main._verify_app_check_token(self._request())
+        self.assertEqual(ctx.exception.status_code, 401)
+
+    def test_invalid_token_rejected_when_enforced(self):
+        bootstrap_main.APP_CHECK_ENFORCE = True
+
+        def _fail(_token):
+            raise ValueError("invalid")
+
+        bootstrap_main.app_check.verify_token = _fail
+        with self.assertRaises(bootstrap_main.HTTPException) as ctx:
+            bootstrap_main._verify_app_check_token(
+                self._request({"X-Firebase-AppCheck": "bad-token"})
+            )
+        self.assertEqual(ctx.exception.status_code, 401)
+
+    def test_valid_token_passes_when_enforced(self):
+        bootstrap_main.APP_CHECK_ENFORCE = True
+        bootstrap_main._verify_app_check_token(
+            self._request({"X-Firebase-AppCheck": "good-token"})
+        )
+
+
+class SemanticMemoryTests(unittest.IsolatedAsyncioTestCase):
+    async def test_add_user_memory_embeds_vector(self):
+        added = []
+
+        class DummySubcoll:
+            async def add(self, data):
+                added.append(data)
+
+        dummy_db = types.SimpleNamespace()
+        bootstrap_main._user_subcollection_ref = lambda db, uid, sub: DummySubcoll()
+
+        await bootstrap_main.add_user_memory(dummy_db, "user1", "Loves hiking in nature", "sess1")
+        self.assertEqual(len(added), 1)
+        self.assertEqual(added[0]["text"], "Loves hiking in nature")
+        self.assertIn("embedding", added[0])
+
+    async def test_get_relevant_user_memories_fallback(self):
+        class DummyDoc:
+            id = "mem1"
+            def to_dict(self):
+                return {"text": "Loves hiking", "user_id": "user1"}
+
+        class DummyStream:
+            def __aiter__(self):
+                return self
+            async def __anext__(self):
+                if not hasattr(self, "_done"):
+                    self._done = True
+                    return DummyDoc()
+                raise StopAsyncIteration
+
+        class DummySubcoll:
+            def stream(self):
+                return DummyStream()
+
+        dummy_db = types.SimpleNamespace()
+        bootstrap_main._user_subcollection_ref = lambda db, uid, sub: DummySubcoll()
+
+        res = await bootstrap_main.get_relevant_user_memories(dummy_db, "user1", query_text=None, limit=5)
+        self.assertEqual(len(res), 1)
+        self.assertEqual(res[0]["text"], "Loves hiking")
 
 
 if __name__ == "__main__":

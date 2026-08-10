@@ -94,8 +94,8 @@ class _ExploreScreenState extends ConsumerState<ExploreScreen> {
                           child: TextField(
                             controller: _searchCtrl,
                             onChanged: _onSearch,
-                            style: TextStyle(
-                                color: context.ac.fg, fontSize: 14),
+                            style:
+                                TextStyle(color: context.ac.fg, fontSize: 14),
                             cursorColor: context.ac.accent,
                             decoration: InputDecoration(
                               isCollapsed: true,
@@ -134,17 +134,17 @@ class _ExploreScreenState extends ConsumerState<ExploreScreen> {
                         const SizedBox(width: 8),
                         _FilterChip(
                           label: 'Women',
-                          active: filters.gender == 'women',
+                          active: filters.gender == 'woman',
                           onTap: () => _setFilter((f) => f.copyWith(
                               gender:
-                                  filters.gender == 'women' ? null : 'women')),
+                                  filters.gender == 'woman' ? null : 'woman')),
                         ),
                         const SizedBox(width: 8),
                         _FilterChip(
                           label: 'Men',
-                          active: filters.gender == 'men',
+                          active: filters.gender == 'man',
                           onTap: () => _setFilter((f) => f.copyWith(
-                              gender: filters.gender == 'men' ? null : 'men')),
+                              gender: filters.gender == 'man' ? null : 'man')),
                         ),
                         const SizedBox(width: 8),
                         _AgeFilterChip(
@@ -644,7 +644,9 @@ class _ProfileCard extends StatelessWidget {
               _CardPlaceholder(h1: h1, h2: h2),
             // Bottom gradient scrim
             Positioned(
-              left: 0, right: 0, bottom: 0,
+              left: 0,
+              right: 0,
+              bottom: 0,
               child: Container(
                 height: 110,
                 decoration: const BoxDecoration(
@@ -658,7 +660,9 @@ class _ProfileCard extends StatelessWidget {
             ),
             // Name / age / location / online
             Positioned(
-              left: 12, right: 12, bottom: 12,
+              left: 12,
+              right: 12,
+              bottom: 12,
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 mainAxisSize: MainAxisSize.min,
@@ -677,7 +681,7 @@ class _ProfileCard extends StatelessWidget {
                       if (age != null) ...[
                         const SizedBox(width: 5),
                         Text(
-                          '· \$age',
+                          '· $age',
                           style: const TextStyle(
                               color: Colors.white70, fontSize: 15),
                         ),
@@ -690,7 +694,8 @@ class _ProfileCard extends StatelessWidget {
                       children: [
                         if (isOnline) ...[
                           Container(
-                            width: 6, height: 6,
+                            width: 6,
+                            height: 6,
                             decoration: const BoxDecoration(
                               color: Color(0xFF46D96A),
                               shape: BoxShape.circle,
@@ -729,21 +734,21 @@ class _CardPlaceholder extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) => Container(
-    decoration: BoxDecoration(
-      gradient: LinearGradient(
-        colors: [
-          HSLColor.fromAHSL(1, h1.toDouble(), 0.3, 0.25).toColor(),
-          HSLColor.fromAHSL(1, h2.toDouble(), 0.25, 0.18).toColor(),
-        ],
-        begin: Alignment.topLeft,
-        end: Alignment.bottomRight,
-      ),
-    ),
-    child: Center(
-      child: Icon(Icons.person_outline_rounded,
-          size: 40, color: Colors.white.withValues(alpha: 0.15)),
-    ),
-  );
+        decoration: BoxDecoration(
+          gradient: LinearGradient(
+            colors: [
+              HSLColor.fromAHSL(1, h1.toDouble(), 0.3, 0.25).toColor(),
+              HSLColor.fromAHSL(1, h2.toDouble(), 0.25, 0.18).toColor(),
+            ],
+            begin: Alignment.topLeft,
+            end: Alignment.bottomRight,
+          ),
+        ),
+        child: Center(
+          child: Icon(Icons.person_outline_rounded,
+              size: 40, color: Colors.white.withValues(alpha: 0.15)),
+        ),
+      );
 }
 
 // ── Prompts list ──────────────────────────────────────────────────────────────
@@ -911,12 +916,19 @@ class _ExploreProfileScreenState extends State<_ExploreProfileScreen> {
                   ?.trim();
           final bio = (p['profile_public'] as String?)?.trim();
           final location = (p['location_region'] as String?)?.trim();
-          final job = ((p['job'] as String?) ?? (p['occupation'] as String?) ?? '').trim();
-          final company = ((p['company'] as String?) ?? (p['employer'] as String?) ?? '').trim();
-          final jobPill = job.isNotEmpty ? (company.isNotEmpty ? '$job · $company' : job) : '';
+          final job =
+              ((p['job'] as String?) ?? (p['occupation'] as String?) ?? '')
+                  .trim();
+          final company =
+              ((p['company'] as String?) ?? (p['employer'] as String?) ?? '')
+                  .trim();
+          final jobPill = job.isNotEmpty
+              ? (company.isNotEmpty ? '$job · $company' : job)
+              : '';
           final extraPills = <String>[
             jobPill,
-            ((p['height_text'] as String?) ?? (p['height'] as String?) ?? '').trim(),
+            ((p['height_text'] as String?) ?? (p['height'] as String?) ?? '')
+                .trim(),
             ((p['pronouns'] as String?) ?? '').trim(),
             ((p['religion'] as String?) ?? '').trim(),
             ((p['relationship_goal'] as String?) ?? '').trim(),
@@ -1011,20 +1023,23 @@ class _ProfileActionsState extends State<_ProfileActions> {
   Widget build(BuildContext context) {
     return Row(
       children: [
-        Expanded(child: _ActionBtn(
+        Expanded(
+            child: _ActionBtn(
           label: _liked ? 'Liked' : 'Like Photos',
           icon: _liked ? Icons.favorite_rounded : Icons.favorite_border_rounded,
           accent: _liked,
           onTap: widget.busy || widget.userId.isEmpty ? null : _like,
         )),
         const SizedBox(width: 8),
-        Expanded(child: _ActionBtn(
+        Expanded(
+            child: _ActionBtn(
           label: 'Message',
           icon: Icons.chat_bubble_outline_rounded,
           onTap: widget.busy || widget.userId.isEmpty ? null : _message,
         )),
         const SizedBox(width: 8),
-        Expanded(child: _ActionBtn(
+        Expanded(
+            child: _ActionBtn(
           label: widget.matchScore == null
               ? 'Match'
               : '${(100 * widget.matchScore!).round()}%',
@@ -1041,12 +1056,15 @@ class _ActionBtn extends StatelessWidget {
   final VoidCallback? onTap;
   final IconData? icon;
   final bool accent;
-  const _ActionBtn({required this.label, this.onTap, this.icon, this.accent = false});
+  const _ActionBtn(
+      {required this.label, this.onTap, this.icon, this.accent = false});
 
   @override
   Widget build(BuildContext context) {
     final enabled = onTap != null;
-    final color = accent ? context.ac.accent : (enabled ? context.ac.fg : context.ac.fgMute);
+    final color = accent
+        ? context.ac.accent
+        : (enabled ? context.ac.fg : context.ac.fgMute);
     return GestureDetector(
       onTap: onTap,
       child: Container(
@@ -1064,7 +1082,8 @@ class _ActionBtn extends StatelessWidget {
           children: [
             if (icon != null) Icon(icon, size: 18, color: color),
             if (icon != null) const SizedBox(height: 4),
-            Text(label, style: TextStyle(color: color, fontSize: 11),
+            Text(label,
+                style: TextStyle(color: color, fontSize: 11),
                 textAlign: TextAlign.center),
           ],
         ),

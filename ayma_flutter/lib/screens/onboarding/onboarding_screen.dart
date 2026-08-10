@@ -9,6 +9,7 @@ import 'package:go_router/go_router.dart';
 import 'package:image_picker/image_picker.dart';
 
 import '../../models/community_profile.dart';
+import '../../models/profile.dart';
 import '../../providers/providers.dart';
 import '../../services/api_service.dart';
 import '../../services/backend_service.dart';
@@ -288,7 +289,12 @@ class _OnboardingScreenState extends ConsumerState<OnboardingScreen> {
       try {
         // Async fetch to verify latest backend values
         final alreadySeen = await ref.read(preboardingSeenProvider.future);
-        final latestProfile = await ref.read(profileProvider.future);
+        UserProfile? latestProfile;
+        try {
+          latestProfile = await ref.read(profileProvider.future);
+        } catch (e) {
+          debugPrint('DEBUG: Error loading profile: $e');
+        }
         if (!mounted) return;
 
         if (latestProfile != null && latestProfile.onboardingComplete) {

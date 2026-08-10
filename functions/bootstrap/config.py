@@ -22,7 +22,6 @@ def _require_env(name: str) -> str:
 
 FIREBASE_PROJECT_ID: str = os.environ.get("FIREBASE_PROJECT_ID", "ayma-ai")
 
-DATABASE_URL: str = _require_env("DATABASE_URL")
 GOOGLE_API_KEY: str = _require_env("GOOGLE_API_KEY")
 
 # ── Gemini models ─────────────────────────────────────────────────────────────
@@ -33,7 +32,7 @@ LIVE_MODEL: str = os.environ.get("LIVE_MODEL", "gemini-3.1-flash-live-preview")
 # Text — chat replies, post-turn extraction, scoring, photo analysis, safety
 TEXT_MODEL: str = os.environ.get("TEXT_MODEL", "gemini-3.5-flash")
 
-# Embeddings — pgvector matching similarity
+# Embeddings — semantic memory retrieval (Step 7)
 EMBEDDING_MODEL: str = os.environ.get("EMBEDDING_MODEL", "gemini-embedding-2")
 
 # ── Rate limits (slowapi, per IP) ─────────────────────────────────────────────
@@ -52,7 +51,7 @@ MATCH_SCORE_MIN: float = float(os.environ.get("MATCH_SCORE_MIN", "0.4"))
 # Minimum score to run a full vibe-check simulation on top of scoring
 VIBE_CHECK_THRESHOLD: float = float(os.environ.get("VIBE_CHECK_THRESHOLD", "0.65"))
 
-# Max candidates fetched from DB before heuristic filter
+# Max candidates fetched before heuristic filter
 MATCH_CANDIDATE_POOL: int = int(os.environ.get("MATCH_CANDIDATE_POOL", "100"))
 
 # Max candidates sent to Gemini scoring after heuristic filter
@@ -86,3 +85,13 @@ PUSH_PREVIEW_LEN: int = int(os.environ.get("PUSH_PREVIEW_LEN", "100"))
 
 # Set this in Cloud Run env vars and in Cloud Scheduler HTTP header X-Cron-Secret
 CRON_SECRET: str = os.environ.get("CRON_SECRET", "")
+
+# Admin password for admin dashboard endpoints
+ADMIN_PASSWORD: str = os.environ.get("ADMIN_PASSWORD", "")
+
+# App Check — monitor mode logs failures; set APP_CHECK_ENFORCE=true to reject
+APP_CHECK_ENFORCE: bool = os.environ.get("APP_CHECK_ENFORCE", "false").lower() in (
+    "1",
+    "true",
+    "yes",
+)
